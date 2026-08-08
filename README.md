@@ -5,7 +5,7 @@ board state, tickets move through a Kanban board, and the retrospective turns
 finished work into skills the team applies next sprint.
 
 ![Plugin API](https://img.shields.io/badge/plugin%20API-v1-blue.svg)
-![Tests](https://img.shields.io/badge/tests-278%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-292%20passing-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
 ---
@@ -38,7 +38,7 @@ weight. The daily standup was removed for exactly that reason — see
 3. [Triggers](#triggers) — what starts them
 4. [Ticket lifecycle](#ticket-lifecycle)
 5. [Learning loop](#learning-loop) — how the team improves
-6. [Architecture](#architecture)
+6. [Architecture](#architecture) — incl. [Agent hierarchy](#agent-hierarchy)
 7. [Development](#development)
 8. [Verified](#verified) and [Known limitations](#known-limitations)
 
@@ -82,11 +82,32 @@ Expected output:
 ✓ Installed schapat.agent-scrum v2.0.0 (ready)
 ```
 
-### 4. Open the board
+### 4. Activate the team for your organisation
+
+Installing the plugin does **not** create agents. Creating six agents is a
+visible, budget-relevant change to an organisation, so it needs an explicit
+opt-in — one organisation may want the Scrum team while another only wants the
+plugin available.
+
+In the plugin settings, switch on **"Activate the Scrum team for this
+organisation"**. From the CLI:
+
+```bash
+paperclipai plugin config:set schapat.agent-scrum \
+  --company-id <your-company-id> \
+  --payload-json '{"configJson":{"enableTeam":true}}'
+```
+
+Until this is on, the plugin runs, shows an empty board, and creates nothing.
+If the setting cannot be read it stays off — failing closed is the only safe
+direction when the alternative is populating someone's company uninvited.
+
+### 5. Open the board
 
 Open **Scrum Board** in the Paperclip navigation.
 
-This step matters. The six agents do not exist until the board is opened.
+This step matters. The six agents are created the first time the board is
+opened (with the team activated).
 
 The reason is a host rule worth knowing about: company-scoped calls are only
 permitted inside an invocation the host started — an event, an action, or a
@@ -96,7 +117,7 @@ plugin waits for the first request, takes the company from it, and reconciles
 the team then. That also means it always binds to the company you are actually
 looking at, instead of guessing.
 
-### 5. Verify
+### 6. Verify
 
 ```bash
 paperclipai plugin inspect schapat.agent-scrum
@@ -289,6 +310,40 @@ flowchart TB
 Ceremonies are pure functions over a `WorkerState` value, which is why they are
 testable without a running host.
 
+### Agent hierarchy
+
+The intended reporting line:
+
+```
+Company lead (CEO)
+  └─ Product Owner
+  └─ Scrum Master
+  └─ Technical Lead
+       └─ Developer 1
+       └─ Developer 2
+  └─ QA Engineer
+```
+
+Developers report to the Technical Lead; everyone else reports to the company
+lead. That mirrors how ceremonies actually escalate — the Tech Lead receives
+blocked tickets and refinement work and hands implementation down.
+
+**The plugin cannot set this structurally.** The managed-agent schema has no
+`reportsTo` field, the host's `declarationPatch` does not map one, and
+`ctx.agents` offers no update method. Managed agents are therefore always
+created without a superior.
+
+Two things the plugin does instead:
+
+- **Each agent's instructions state its reporting line**, so escalation
+  behaviour is correct even when the org chart is flat.
+- **Drift is reported.** After every reconcile the plugin compares the actual
+  reporting line against the intended one and logs any difference, so an
+  operator can wire the org chart up by hand.
+
+The single source for all of this is `src/team.ts` — the manifest derives its
+agent declarations from it, so the two cannot drift apart.
+
 ### What the plugin does *not* do
 
 It never invents content. User stories, acceptance criteria and estimates are
@@ -318,6 +373,9 @@ Against a live instance (`paperclipai plugin install`, then a `bridge:data`
 call carrying company scope):
 
 - Installs and reaches `ready`; registry, manifest and status health checks pass.
+- **Nothing is created without consent:** with the team switched off the board
+  reports 0 agents; switching `enableTeam` on and reopening the board produces
+  exactly the six.
 - All six managed agents are created and adopted — and only those six. A company
   usually has other agents (a CEO, other teams); they are deliberately not put
   on the Scrum board.
@@ -340,6 +398,9 @@ Stated plainly, because the alternative is a README that lies:
   acceptance criteria was not watched end to end.
 - **Ceremony summaries and agent messages are in German.** The code, README and
   comments are English; the operational text the agents read is not yet.
+- **The reporting line has to be set by hand.** See
+  [Agent hierarchy](#agent-hierarchy) — the plugin states the intent and
+  reports drift, but the host API gives it no way to set a superior.
 - **No performance measurements.** Nothing here has been profiled under load.
 
 ---

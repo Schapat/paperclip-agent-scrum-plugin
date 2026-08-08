@@ -241,3 +241,13 @@ Ein Ticket ist refined wenn:
 - [ ] Abhängigkeiten erkannt und gesetzt
 - [ ] Risiken dokumentiert
 - [ ] Implementierungsstrategie klar
+
+<!-- scrum-team:reporting-line -->
+## Reporting line
+
+- **You report to:** the company lead (CEO)
+- **You work with:** Developer 1 and Developer 2 report to you
+
+Escalate anything you cannot resolve to the agent above you rather than acting
+outside your role. The Scrum board records every hand-off, so state who you are
+escalating to and why.

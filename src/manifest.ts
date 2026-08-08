@@ -13,6 +13,8 @@
 
 import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 
+import { TEAM } from "./team";
+
 const PLUGIN_ID = "schapat.agent-scrum";
 const PLUGIN_VERSION = "2.0.0";
 
@@ -60,66 +62,21 @@ const manifest: PaperclipPluginManifestV1 = {
   // Managed agents — the Scrum team
   // ---------------------------------------------------------------------------
 
-  agents: [
-    {
-      agentKey: "product-owner",
-      displayName: "Product Owner",
-      role: "product_owner",
-      title: "Product Owner",
-      icon: "clipboard-list",
-      capabilities:
-        "Product vision, backlog management, user story creation, prioritisation, business value assessment, ticket assignment",
-      instructions: { entryFile: "AGENTS.md", assetPath: "agents/product-owner" },
-    },
-    {
-      agentKey: "scrum-master",
-      displayName: "Scrum Master",
-      role: "scrum_master",
-      title: "Scrum Master",
-      icon: "users",
-      capabilities:
-        "Scrum facilitation, impediment removal, flow optimisation, retrospectives, process improvement",
-      instructions: { entryFile: "AGENTS.md", assetPath: "agents/scrum-master" },
-    },
-    {
-      agentKey: "technical-lead",
-      displayName: "Technical Lead",
-      role: "technical_lead",
-      title: "Technical Lead",
-      icon: "code",
-      capabilities:
-        "Software architecture, ticket refinement, story point estimation, subtask creation, implementation strategy",
-      instructions: { entryFile: "AGENTS.md", assetPath: "agents/technical-lead" },
-    },
-    {
-      agentKey: "developer-1",
-      displayName: "Developer 1",
-      role: "developer",
-      title: "Developer",
-      icon: "terminal",
-      capabilities: "Feature development, bug fixing, unit tests, documentation, git",
-      instructions: { entryFile: "AGENTS.md", assetPath: "agents/developer-1" },
-    },
-    {
-      agentKey: "developer-2",
-      displayName: "Developer 2",
-      role: "developer",
-      title: "Developer",
-      icon: "terminal",
-      capabilities: "Feature development, bug fixing, unit tests, documentation, git",
-      instructions: { entryFile: "AGENTS.md", assetPath: "agents/developer-2" },
-    },
-    {
-      agentKey: "qa-engineer",
-      displayName: "QA Engineer",
-      role: "qa_engineer",
-      title: "QA Engineer",
-      icon: "bug",
-      capabilities:
-        "Quality assurance, acceptance criteria verification, test execution, code review, regression testing",
-      instructions: { entryFile: "AGENTS.md", assetPath: "agents/qa-engineer" },
-    },
-  ],
+  // Derived from the single team definition in `src/team.ts`, so the manifest
+  // and the worker's hierarchy check can never drift apart.
+  //
+  // Note the schema has no `reportsTo`: managed agents are always created
+  // without a superior. The intended reporting line lives in `team.ts` and in
+  // each agent's instructions; see "Agent hierarchy" in the README.
+  agents: TEAM.map((member) => ({
+    agentKey: member.agentKey,
+    displayName: member.displayName,
+    role: member.role,
+    title: member.title,
+    icon: member.icon,
+    capabilities: member.capabilities,
+    instructions: { entryFile: "AGENTS.md", assetPath: `agents/${member.agentKey}` },
+  })),
 
   // ---------------------------------------------------------------------------
   // Operator configuration
@@ -128,6 +85,16 @@ const manifest: PaperclipPluginManifestV1 = {
   instanceConfigSchema: {
     type: "object",
     properties: {
+      // The plugin creates six agents in the company. That is a visible,
+      // budget-relevant change, so it never happens implicitly: an
+      // organisation opts in here, and nothing is created until it does.
+      enableTeam: {
+        type: "boolean",
+        default: false,
+        title: "Activate the Scrum team for this organisation",
+        description:
+          "Creates and maintains the six Scrum agents (Product Owner, Scrum Master, Technical Lead, two Developers, QA). Leave off to install the plugin without adding agents.",
+      },
       enableAutoPlanning: {
         type: "boolean",
         default: true,

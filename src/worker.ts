@@ -30,6 +30,7 @@ import {
   type CeremonyContext,
 } from "./core/ceremonies";
 import { collectInstructionUpdates, type InstructionUpdate } from "./core/learning";
+import { TEAM, describeReportingLine, detectReportingDrift } from "./team";
 
 /** Where the board lives in plugin state. */
 const STATE_SCOPE = { scopeKind: "instance", stateKey: "board" } as const;
@@ -107,8 +108,39 @@ const plugin = definePlugin({
       }
       if (teamReady || !companyId) return;
 
+      // Creating six agents is a visible, budget-relevant change to someone
+      // else's organisation. It only happens on an explicit opt-in — installing
+      // the plugin is not consent to populate the company.
+      if (!(await teamEnabled())) {
+        ctx.logger.info("Scrum team not activated for this organisation", {
+          companyId,
+          hint: "Enable 'Activate the Scrum team' in the plugin settings.",
+        });
+        return;
+      }
+
       await reconcileTeam();
       teamReady = true;
+    }
+
+    /**
+     * Reads the organisation's opt-in.
+     *
+     * Defaults to *off*: if the setting cannot be read, the plugin does not
+     * create anything. Failing closed is the only safe direction here.
+     */
+    async function teamEnabled(): Promise<boolean> {
+      if (!companyId) return false;
+
+      try {
+        const config = await ctx.config.get(companyId);
+        return config.enableTeam === true;
+      } catch (error) {
+        ctx.logger.warn("Could not read plugin settings — leaving the team inactive", {
+          error: String(error),
+        });
+        return false;
+      }
     }
 
     async function save(): Promise<void> {
@@ -132,12 +164,18 @@ const plugin = definePlugin({
       if (!companyId) return;
 
       const team: WorkerState["agents"] = [];
+      const resolved = new Map<string, { agentId: string; reportsTo: string | null }>();
 
-      for (const declared of ctx.manifest.agents ?? []) {
+      for (const member of TEAM) {
         try {
-          const resolution = await ctx.agents.managed.reconcile(declared.agentKey, companyId);
+          const resolution = await ctx.agents.managed.reconcile(member.agentKey, companyId);
           const agent = resolution.agent;
           if (!agent || !resolution.agentId) continue;
+
+          resolved.set(member.agentKey, {
+            agentId: resolution.agentId,
+            reportsTo: (agent as { reportsTo?: string | null }).reportsTo ?? null,
+          });
 
           // Keep whatever the board already knew about this agent (current
           // ticket, status) so a reconcile does not reset live assignment.
@@ -145,10 +183,10 @@ const plugin = definePlugin({
 
           team.push({
             id: resolution.agentId,
-            name: agent.name ?? declared.displayName,
+            name: agent.name ?? member.displayName,
             // The declared role is authoritative: assignment and ceremonies
             // match on it, and the host may store a different one.
-            role: declared.role ?? agent.role ?? "developer",
+            role: member.role,
             status: existing?.status ?? "idle",
             currentTaskId: existing?.currentTaskId ?? null,
             capabilities: existing?.capabilities ?? [],
@@ -156,17 +194,28 @@ const plugin = definePlugin({
           });
         } catch (error) {
           ctx.logger.warn("Could not reconcile managed agent", {
-            agentKey: declared.agentKey,
+            agentKey: member.agentKey,
             error: String(error),
           });
         }
       }
 
-      if (team.length > 0) {
-        state.agents = team;
-        ctx.logger.info("Scrum team ready", {
-          agents: team.length,
-          roles: team.map((a) => a.role).join(", "),
+      if (team.length === 0) return;
+
+      state.agents = team;
+      ctx.logger.info("Scrum team ready", {
+        agents: team.length,
+        roles: team.map((a) => a.role).join(", "),
+      });
+
+      // The host creates managed agents without a superior and offers no way
+      // to set one, so the plugin can only surface the gap. Reported once per
+      // reconcile so an operator can wire the org chart up by hand.
+      const drift = detectReportingDrift(resolved);
+      if (drift.length > 0) {
+        ctx.logger.warn("Reporting line differs from the intended hierarchy", {
+          agents: drift.map((d) => `${d.displayName} should report to ${d.expected}`),
+          intended: describeReportingLine(),
         });
       }
     }

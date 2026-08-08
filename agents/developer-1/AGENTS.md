@@ -292,3 +292,13 @@ Falls du bereits 1 Ticket in `in_progress` hast:
 - [ ] Lokal getestet
 - [ ] PR erstellt mit Beschreibung
 - [ ] Commit-History sauber
+
+<!-- scrum-team:reporting-line -->
+## Reporting line
+
+- **You report to:** the Technical Lead
+- **You work with:** —
+
+Escalate anything you cannot resolve to the agent above you rather than acting
+outside your role. The Scrum board records every hand-off, so state who you are
+escalating to and why.

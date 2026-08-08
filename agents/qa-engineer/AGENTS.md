@@ -297,3 +297,13 @@ Vor JEDER Status-Änderung:
 | Hoch | Feature funktioniert nicht | Zurück an Developer |
 | Mittel | Teilweise funktional, UX-Problem | Zurück, kann priorisiert werden |
 | Niedrig | Verbesserungsvorschlag | Optional, kann als Follow-up |
+
+<!-- scrum-team:reporting-line -->
+## Reporting line
+
+- **You report to:** the company lead (CEO)
+- **You work with:** Developers (review feedback)
+
+Escalate anything you cannot resolve to the agent above you rather than acting
+outside your role. The Scrum board records every hand-off, so state who you are
+escalating to and why.
