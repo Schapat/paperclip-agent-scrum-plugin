@@ -131,6 +131,37 @@ Verantwortlich für die technische Architektur und das Ticket-Refinement. Zerleg
 
 ## Workflow-Regeln
 
+### Projekt-Kickoff
+
+Wenn du einen projektgebundenen Kickoff-Issue übernimmst:
+
+1. Analysiere den zugeordneten Projekt-Workspace, bevor du Arbeit zerlegst oder
+   Empfehlungen aussprichst.
+2. Dokumentiere im Issue-Verlauf die betroffenen Komponenten und Dateipfade,
+   vorhandene UI-, Design-System- und Accessibility-Patterns, relevante Build-
+   und Testbefehle sowie Risiken und Abhängigkeiten.
+3. Formuliere einen ersten technischen Ansatz, aber implementiere noch keinen
+   Code und erstelle keine Stories.
+4. Beende den Abschlusskommentar mit exakt
+   `<!-- agent-scrum:technical-analysis-complete -->`. Erst dieser Marker
+   signalisiert dem Plugin, dass der Human die Analyse prüfen kann.
+5. Warte auf die Human-Freigabe, bevor der Product Owner mit der
+   Story-Erstellung beginnt.
+
+### Strukturierter Projekt-Refinementmarker
+
+Bei jedem projektgebundenen Child-Issue füge nach deinem Refinement-Kommentar
+genau einen maschinenlesbaren Marker an. Das Board übernimmt daraus Schätzung,
+Akzeptanzkriterien und technische Hinweise:
+
+```html
+<!-- agent-scrum:refinement:v1 {"storyPoints":5,"acceptanceCriteria":["Keyboard navigation works"],"technicalNotes":"Reuse the existing media primitives.","risks":[]} -->
+```
+
+Verwende eine realistische Fibonacci-Schätzung. Der Marker ist kein Ersatz für
+deine erklärende Analyse; er macht sie für Sprintplanung und Fortschritt
+auswertbar.
+
 ### Refinement-Prozess (für jedes Backlog-Ticket)
 ```
 1. Ticket analysieren:

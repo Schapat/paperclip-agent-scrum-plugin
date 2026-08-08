@@ -5,7 +5,7 @@ board state, tickets move through a Kanban board, and the retrospective turns
 finished work into skills the team applies next sprint.
 
 ![Plugin API](https://img.shields.io/badge/plugin%20API-v1-blue.svg)
-![Tests](https://img.shields.io/badge/tests-292%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-344%20passing-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
 ---
@@ -34,13 +34,14 @@ weight. The daily standup was removed for exactly that reason — see
 ## Contents
 
 1. [Install](#install)
-2. [Ceremonies](#ceremonies) — what each one produces
-3. [Triggers](#triggers) — what starts them
-4. [Ticket lifecycle](#ticket-lifecycle)
-5. [Learning loop](#learning-loop) — how the team improves
-6. [Architecture](#architecture) — incl. [Agent hierarchy](#agent-hierarchy)
-7. [Development](#development)
-8. [Verified](#verified) and [Known limitations](#known-limitations)
+2. [Start project work](#start-project-work)
+3. [Ceremonies](#ceremonies) — what each one produces
+4. [Triggers](#triggers) — what starts them
+5. [Ticket lifecycle](#ticket-lifecycle)
+6. [Learning loop](#learning-loop) — how the team improves
+7. [Architecture](#architecture) — incl. [Agent hierarchy](#agent-hierarchy)
+8. [Development](#development)
+9. [Verified](#verified) and [Known limitations](#known-limitations)
 
 ---
 
@@ -79,7 +80,7 @@ paperclipai plugin install /absolute/path/to/paperclip-agent-scrum-plugin
 Expected output:
 
 ```
-✓ Installed schapat.agent-scrum v2.0.0 (ready)
+✓ Installed schapat.agent-scrum v2.0.8 (ready)
 ```
 
 ### 4. Activate the team for your organisation
@@ -102,9 +103,37 @@ Until this is on, the plugin runs, shows an empty board, and creates nothing.
 If the setting cannot be read it stays off — failing closed is the only safe
 direction when the alternative is populating someone's company uninvited.
 
+### Plugin settings
+
+Settings are scoped to an organisation. Configure them in Paperclip's plugin
+settings or with `paperclipai plugin config:set`.
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `enableTeam` | `false` | Creates and maintains the managed Scrum team after explicit opt-in. |
+| `requireProjectSprint` | `true` | Holds a new project at Sprint Planning after backlog approval; a human must start the first sprint before delivery begins. Disable only for direct delivery. |
+| `enableAutoPlanning` | `true` | Enables automatic planning when sprint-ready work is waiting. |
+| `enableAutoRefinement` | `true` | Enables automatic refinement when ready backlog supply runs low. |
+| `enableAutoImpediments` | `true` | Enables blocker resolution and idle-capacity handling. |
+| `enableAutoReview` | `true` | Enables sprint review and retrospective triggers. |
+| `developerCount` | `2` | Sets the planning capacity assumption for local Scrum calculations. |
+| `wipLimitDevelopment` | `4` | Sets the Development work-in-progress limit. |
+| `wipLimitReview` | `3` | Sets the Review work-in-progress limit. |
+| `apiBaseUrl` | `http://127.0.0.1:3100` | Lets the plugin maintain reporting lines through Paperclip's REST API. |
+| `apiToken` | empty | Optional token for reporting-line setup on protected instances. |
+
+For a direct-delivery organisation, explicitly disable the new sprint gate
+before starting its project request:
+
+```bash
+paperclipai plugin config:set schapat.agent-scrum \
+  --company-id <your-company-id> \
+  --payload-json '{"configJson":{"enableTeam":true,"requireProjectSprint":false}}'
+```
+
 ### 5. Open the board
 
-Open **Scrum Board** in the Paperclip navigation.
+Open **Scrum Board** in the **Work** section of the Paperclip sidebar.
 
 This step matters. The six agents are created the first time the board is
 opened (with the team activated).
@@ -126,6 +155,79 @@ paperclipai plugin logs schapat.agent-scrum
 
 While developing, keep `pnpm dev` running — Paperclip watches `dist/` and
 reloads the worker after each rebuild.
+
+## Start project work
+
+Use this flow when an existing Paperclip project already points at a repository
+or local checkout — for example, when a client asks for a new component in an
+established website.
+
+1. In Paperclip, make sure the project has a **primary workspace**. Its
+  repository or local-folder link is the codebase the agents analyze and use
+  for delivery.
+2. Open **Scrum Board** and choose the Paperclip project under **Start a project
+  request**.
+3. Enter the requested outcome and any non-negotiable constraints. For example:
+
+  ```text
+  Build a responsive, accessible image slider.
+  Use the existing design system and do not add a new dependency.
+  ```
+
+4. Select **Start technical analysis**. The plugin creates a project-bound
+  kickoff issue and wakes the Technical Lead. The analysis is recorded on that
+  issue: relevant files and patterns, tests, risks, and a proposed approach.
+5. The Technical Lead closes the analysis comment with
+  `<!-- agent-scrum:technical-analysis-complete -->`. Until then, story
+  discovery stays locked in the board. Review the completed analysis, then
+  select **Start story discovery**. The Product
+  Owner reads the analysis and creates a small initial backlog as child issues
+  of the kickoff issue, retaining the project and workspace context.
+6. Review the proposed backlog and select **Approve backlog for sprint planning**.
+  By default, the plugin records the approval, holds delivery at Sprint Planning,
+  and asks the Technical Lead to refine every unready child issue. A refinement
+  comment ends with
+  `<!-- agent-scrum:refinement:v1 {...} -->`; it contributes story points,
+  acceptance criteria, technical notes, and risks to the board.
+7. Once at least one child issue is refined, estimated, and has acceptance
+  criteria, select **Start first sprint**. The plugin creates the active Sprint
+  context, then host-backed Sprint Planning moves eligible issues from Backlog
+  to TODO in Paperclip, assigns a free developer, and wakes that developer.
+  No project delivery status is mutated only in the plugin.
+8. Set `requireProjectSprint` to `false` before starting a project request only
+  when your organisation intentionally wants the previous direct-delivery flow.
+
+For project-backed work, Paperclip issues are the source of truth for status,
+assignment, and review. The Scrum Board mirrors their current state; change
+delivery status in the Paperclip issue workflow rather than dragging a board
+card.
+
+The kickoff ticket remains visible in the Project work area of the board. It is
+not a backlog story; it is the shared analysis and decision record for the
+project request. Child-issue comments and structured decisions are projected
+into the ticket details, while the project widget reports task progress until
+all stories have estimates and story-point progress afterwards.
+
+### Review routing
+
+When a developer submits a project-backed issue for review, Agent Scrum assigns
+the issue to QA and wakes the QA agent. A developer can request a product
+decision by including `<!-- agent-scrum:po-decision-required -->` in the review
+comment. The plugin assigns that review to the Product Owner until the Product
+Owner records `<!-- agent-scrum:po-decision-resolved -->`; then QA receives the
+technical review.
+
+For project-backed work, a direct Developer transition to Done is returned to
+QA review. QA records `<!-- agent-scrum:qa-review-approved -->` before closing
+the reviewed issue. The board also mirrors active Developer and QA assignments,
+and only releases a blocked issue after every Paperclip blocker is done.
+
+Blocked tickets remain visible in the Backlog column under a separate
+**Blocked** section. They retain their Paperclip `blocked` status; the shared
+column is a compact overview, not a workflow transition.
+
+The first version supports one active project request per organisation. Create
+or finish that request before starting another one.
 
 ---
 
@@ -379,7 +481,7 @@ whom*; the agents decide *what it says*.
 pnpm setup:sdk --paperclip /path/to/paperclip   # once
 pnpm install
 pnpm dev                                        # watch build
-pnpm test                                       # 278 tests
+pnpm test                                       # 344 tests
 pnpm typecheck
 ```
 
@@ -416,9 +518,10 @@ Stated plainly, because the alternative is a README that lies:
   host has no API to rewrite a managed agent's instructions — managed agents
   are reconciled from the manifest. Active skills therefore travel with each
   wake-up prompt rather than living permanently in `AGENTS.md`.
-- **The board is plugin-owned, not Paperclip issues.** Tickets live in plugin
-  state. Making the board operate on Paperclip issues directly would be a
-  rewrite, not a refactor.
+- **Local and project-backed boards have different sources of truth.** Ad-hoc
+  local tickets still live in plugin state. Direct child issues of a project
+  kickoff are projected from Paperclip; their status, assignment, comments,
+  decisions, refinement, and planning transitions are host-backed.
 - **Agent wake-up is not observed.** `ctx.agents.invoke` is called when a
   ceremony requests content, but whether the agents then produce user stories or
   acceptance criteria was not watched end to end.

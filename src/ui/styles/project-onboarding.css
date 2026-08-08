@@ -1,0 +1,200 @@
+.project-onboarding {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.45fr) minmax(0, 1fr);
+  gap: var(--spacing-lg);
+  padding: var(--spacing-md) var(--spacing-lg);
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.project-onboarding-heading {
+  display: grid;
+  align-content: start;
+  gap: var(--spacing-xs);
+}
+
+.project-onboarding-eyebrow {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.project-onboarding-heading h2 {
+  font-size: 1rem;
+  line-height: 1.3;
+}
+
+.project-onboarding-form {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.55fr) minmax(0, 1fr);
+  gap: var(--spacing-sm) var(--spacing-md);
+}
+
+.project-onboarding-field {
+  display: grid;
+  gap: var(--spacing-xs);
+  min-width: 0;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.project-onboarding-field-wide,
+.project-onboarding-actions {
+  grid-column: 1 / -1;
+}
+
+.project-onboarding-field select,
+.project-onboarding-field textarea {
+  width: 100%;
+  border: 1px solid var(--color-surface);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font: inherit;
+}
+
+.project-onboarding-field select {
+  min-height: 36px;
+  padding: 0 var(--spacing-sm);
+}
+
+.project-onboarding-field textarea {
+  min-height: 68px;
+  padding: var(--spacing-sm);
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.project-onboarding-field select:focus-visible,
+.project-onboarding-field textarea:focus-visible,
+.project-onboarding-actions .btn:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+.project-onboarding-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.project-onboarding-status {
+  align-items: center;
+}
+
+.project-onboarding-progress {
+  display: grid;
+  gap: var(--spacing-sm);
+  min-width: 0;
+}
+
+.project-onboarding-kickoff {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: var(--spacing-sm) var(--spacing-md);
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-primary);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-secondary);
+  color: var(--color-text);
+  font-size: 0.8125rem;
+  text-decoration: none;
+}
+
+a.project-onboarding-kickoff:hover {
+  background: var(--color-surface-hover);
+}
+
+.project-onboarding-kickoff-kind {
+  color: var(--color-text-muted);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.project-onboarding-kickoff strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-onboarding-kickoff span:last-child:not(.project-onboarding-kickoff-kind) {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+}
+
+.project-onboarding-stage {
+  min-width: 0;
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+.project-onboarding-stage.is-analysis_in_progress {
+  color: var(--color-warning);
+  font-weight: 600;
+}
+
+.project-onboarding-stage.is-analysis_ready {
+  color: var(--color-success);
+  font-weight: 600;
+}
+
+.project-onboarding-stage.is-active {
+  color: var(--color-success);
+}
+
+.project-onboarding-lock {
+  max-width: 60ch;
+  color: var(--color-text-muted);
+  font-size: 0.8125rem;
+}
+
+.project-onboarding-progress-summary {
+  color: var(--color-text-muted);
+  font-size: 0.8125rem;
+}
+
+.project-onboarding-event {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+  color: var(--color-text-muted);
+  font-size: 0.8125rem;
+}
+
+.project-onboarding-event span {
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.ceremony-bar .btn-secondary:disabled,
+.project-onboarding .btn:disabled,
+.project-onboarding-field select:disabled,
+.project-onboarding-field textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+@media (max-width: 720px) {
+  .project-onboarding,
+  .project-onboarding-form {
+    grid-template-columns: 1fr;
+  }
+
+  .project-onboarding {
+    gap: var(--spacing-md);
+    padding: var(--spacing-md);
+  }
+
+  .project-onboarding-actions {
+    justify-content: stretch;
+  }
+
+  .project-onboarding-actions .btn {
+    width: 100%;
+  }
+}

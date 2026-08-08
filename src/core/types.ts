@@ -413,6 +413,41 @@ export interface ProposedStory {
 }
 
 // =============================================================================
+// Project Onboarding
+// =============================================================================
+
+/** Fortschritt eines vom Human gestarteten Projektauftrags. */
+export type ProjectOnboardingStatus =
+  | 'not_started'
+  | 'analysis_in_progress'
+  | 'analysis_ready'
+  | 'backlog_in_progress'
+  | 'sprint_planning'
+  | 'active';
+
+/**
+ * Der kontrollierte Einstieg eines Teams in ein vorhandenes Paperclip-Projekt.
+ *
+ * Der Root-Issue ist das gemeinsame Arbeitsobjekt fur Human, Technical Lead
+ * und Product Owner. Er tragt Projekt- und Workspace-Kontext; alle daraus
+ * entstehenden Stories werden als Child-Issues angelegt.
+ */
+export interface ProjectOnboarding {
+  status: ProjectOnboardingStatus;
+  projectId: string | null;
+  projectName: string | null;
+  rootIssueId: string | null;
+  /** New projects capture whether a human-approved sprint is required before delivery. */
+  requiresSprint: boolean;
+  /** Child-Issues, fuer die der Technical Lead bereits ein Refinement angefordert bekam. */
+  refinementRequestedTaskIds: string[];
+  brief: string | null;
+  constraints: string | null;
+  startedAt: string | null;
+  updatedAt: string;
+}
+
+// =============================================================================
 // Worker State
 // =============================================================================
 
@@ -421,6 +456,13 @@ export interface ProposedStory {
  */
 export interface WorkerState {
   initialized: boolean;
+  /**
+   * Der explizite Startauftrag fur neue Organisationen.
+   *
+   * Optional bleibt das Feld nur fur gespeicherte Altstande und schlanke
+   * Test-Fixtures; neue Worker-Zustande setzen es immer.
+   */
+  projectOnboarding?: ProjectOnboarding;
   currentSprint: ScrumSprint | null;
   tasks: ScrumTask[];
   agents: ScrumAgent[];

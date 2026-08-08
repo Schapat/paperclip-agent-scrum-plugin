@@ -10,11 +10,26 @@
  * `src/core/triggers/ceremony-triggers.ts`.
  */
 
-import { definePlugin, runWorker, type PluginContext } from "@paperclipai/plugin-sdk";
+import { definePlugin, runWorker, type Issue, type PluginContext } from "@paperclipai/plugin-sdk";
 
 import type { CeremonyType, ScrumTask, TaskStatus, WorkerState } from "./core/types";
 import { createDefaultSettings } from "./core/types";
-import { createScrumTask } from "./core/factories";
+import { createCeremonyRecord, createId, createScrumTask } from "./core/factories";
+import {
+  canStartNewProjectOnboarding,
+  canRunAutomaticDelivery,
+  createBacklogDiscoveryPrompt,
+  createInitialProjectOnboarding,
+  createProjectSprint,
+  createTechnicalAnalysisPrompt,
+  isTechnicalAnalysisComplete,
+  parseProjectOnboardingInput,
+  startProjectOnboarding,
+  transitionProjectOnboarding,
+} from "./core/project-onboarding";
+import { syncProjectOnboardingIssue } from "./core/project-issue-sync";
+import { projectProgress } from "./core/project-issue-projection";
+import { hasQaReviewApproval, reviewOwnerForProjectIssue } from "./core/review-routing";
 import { migrateState } from "./core/storage";
 import { recalculateMetrics, createInitialMetrics, onStatusChange } from "./core/hooks";
 import { collectDecisions } from "./core/communication";
@@ -29,6 +44,7 @@ import {
   type AgentWorkRequest,
   type CeremonyContext,
 } from "./core/ceremonies";
+import { byBusinessValue, isReady } from "./core/ceremonies/types";
 import { collectInstructionUpdates, type InstructionUpdate } from "./core/learning";
 import {
   TEAM,
@@ -55,6 +71,7 @@ function boardScope(companyId: string) {
 function createEmptyState(): WorkerState {
   return {
     initialized: true,
+    projectOnboarding: createInitialProjectOnboarding(),
     currentSprint: null,
     tasks: [],
     agents: [],
@@ -150,6 +167,7 @@ const plugin = definePlugin({
      */
     async function initialise(): Promise<void> {
       await load();
+      await applyConfiguredSettings();
 
       // Creating six agents is a visible, budget-relevant change to someone
       // else's organisation. It only happens on an explicit opt-in — installing
@@ -163,6 +181,9 @@ const plugin = definePlugin({
       }
 
       await reconcileTeam();
+      await syncOnboardingProjectIssues();
+      await requestProjectRefinement("automatic");
+      await requestProjectPlanning();
       teamReady = true;
       await save();
     }
@@ -180,9 +201,694 @@ const plugin = definePlugin({
       return config.enableTeam === true;
     }
 
+    /** Captures the organisation setting when a new project request begins. */
+    async function projectSprintRequired(): Promise<boolean> {
+      const config = await readConfig();
+      return config.requireProjectSprint !== false;
+    }
+
+    /** Mirrors declared organisation settings into the persisted board controls. */
+    async function applyConfiguredSettings(): Promise<void> {
+      const config = await readConfig();
+      const configuredNumber = (key: string, fallback: number, minimum: number, maximum: number) => {
+        const value = Number(config[key]);
+        return Number.isInteger(value) && value >= minimum && value <= maximum ? value : fallback;
+      };
+      const configuredBoolean = (key: string, fallback: boolean) =>
+        typeof config[key] === "boolean" ? config[key] : fallback;
+
+      state.settings = {
+        ...state.settings,
+        teamSize: {
+          ...state.settings.teamSize,
+          developerCount: configuredNumber("developerCount", state.settings.teamSize.developerCount, 1, 5),
+        },
+        wipLimits: {
+          ...state.settings.wipLimits,
+          development: configuredNumber("wipLimitDevelopment", state.settings.wipLimits.development, 1, 50),
+          review: configuredNumber("wipLimitReview", state.settings.wipLimits.review, 1, 50),
+        },
+        events: {
+          ...state.settings.events,
+          enableAutoPlanning: configuredBoolean("enableAutoPlanning", state.settings.events.enableAutoPlanning),
+          enableAutoRefinement: configuredBoolean("enableAutoRefinement", state.settings.events.enableAutoRefinement),
+          enableAutoImpediments: configuredBoolean("enableAutoImpediments", state.settings.events.enableAutoImpediments),
+          enableAutoReview: configuredBoolean("enableAutoReview", state.settings.events.enableAutoReview),
+        },
+      };
+    }
+
     async function save(): Promise<void> {
       if (!companyId) return;
       await ctx.state.set(boardScope(companyId), state);
+    }
+
+    /** Der Worker unterstutzt zunachst einen aktiven Projektauftrag je Organisation. */
+    function canStartProjectOnboarding(): boolean {
+      return canStartNewProjectOnboarding(state.projectOnboarding, {
+        taskCount: state.tasks.length,
+        hasCurrentSprint: state.currentSprint !== null,
+      });
+    }
+
+    function canStartProjectSprint(): boolean {
+      const onboarding = state.projectOnboarding;
+      return Boolean(
+        onboarding?.status === "sprint_planning" &&
+          onboarding.rootIssueId &&
+          state.tasks.some(
+            (task) => task.parentId === onboarding.rootIssueId && task.column === "backlog" && isReady(task)
+          )
+      );
+    }
+
+    async function requestIssueWakeup(issueId: string, reason: string) {
+      if (!companyId) return { queued: false, error: "No company context." };
+
+      try {
+        const wakeup = await ctx.issues.requestWakeup(issueId, companyId, {
+          reason,
+          contextSource: "agent-scrum.project-onboarding",
+          idempotencyKey: `agent-scrum:${issueId}:${reason}`,
+        });
+        return { queued: wakeup.queued, runId: wakeup.runId, error: null };
+      } catch (error) {
+        ctx.logger.warn("Could not queue project onboarding work", {
+          issueId,
+          reason,
+          error: String(error),
+        });
+        return { queued: false, error: String(error) };
+      }
+    }
+
+    /**
+     * Observes the root issue for a completed Technical-Lead analysis.
+     *
+     * The marker belongs to the agent prompt rather than a guessed timestamp:
+     * a comment in progress must not let the PO create stories prematurely.
+     */
+    async function refreshTechnicalAnalysisStatus(): Promise<boolean> {
+      const onboarding = state.projectOnboarding;
+      if (
+        !companyId ||
+        !onboarding?.rootIssueId ||
+        onboarding.status !== "analysis_in_progress"
+      ) {
+        return false;
+      }
+
+      const technicalLead = state.agents.find((agent) => agent.role === "technical_lead");
+      if (!technicalLead) return false;
+
+      try {
+        const comments = await ctx.issues.listComments(onboarding.rootIssueId, companyId);
+        if (!isTechnicalAnalysisComplete(comments, technicalLead.id)) return false;
+
+        state.projectOnboarding = transitionProjectOnboarding(onboarding, "analysis_ready");
+        await save();
+        ctx.logger.info("Technical analysis completed", {
+          rootIssueId: onboarding.rootIssueId,
+          technicalLeadId: technicalLead.id,
+        });
+        return true;
+      } catch (error) {
+        ctx.logger.warn("Could not inspect technical analysis status", {
+          rootIssueId: onboarding.rootIssueId,
+          error: String(error),
+        });
+        return false;
+      }
+    }
+
+    /** True, wenn das Board aktuell Paperclip-Child-Issues eines Kickoffs zeigt. */
+    function hasProjectBackedTasks(): boolean {
+      const rootIssueId = state.projectOnboarding?.rootIssueId;
+      return Boolean(rootIssueId && state.tasks.some((task) => task.parentId === rootIssueId));
+    }
+
+    function isProjectBackedTask(task: ScrumTask): boolean {
+      return Boolean(state.projectOnboarding?.rootIssueId && task.parentId === state.projectOnboarding.rootIssueId);
+    }
+
+    /** Mirrors active project work onto the compact team status shown by the board. */
+    function syncProjectAgentActivity(): boolean {
+      const rootIssueId = state.projectOnboarding?.rootIssueId;
+      if (!rootIssueId) return false;
+
+      const projectTasks = state.tasks.filter((task) => task.parentId === rootIssueId);
+      const projectTaskIds = new Set(projectTasks.map((task) => task.id));
+      let changed = false;
+      const agents = state.agents.map((agent) => {
+        const activeTask = projectTasks.find(
+          (task) => task.assignedAgentId === agent.id && task.column === "in_progress"
+        ) ?? projectTasks.find(
+          (task) => task.assignedAgentId === agent.id && task.column === "in_review"
+        );
+        const blockedTask = projectTasks.find(
+          (task) => task.assignedAgentId === agent.id && task.column === "blocked"
+        );
+        const next = activeTask
+          ? { ...agent, status: "working" as const, currentTaskId: activeTask.id }
+          : blockedTask
+            ? { ...agent, status: "blocked" as const, currentTaskId: blockedTask.id }
+            : agent.currentTaskId && projectTaskIds.has(agent.currentTaskId)
+              ? { ...agent, status: "idle" as const, currentTaskId: null }
+              : agent;
+
+        if (next !== agent) changed = true;
+        return next;
+      });
+
+      if (changed) state.agents = agents;
+      return changed;
+    }
+
+    function isProjectOnboardingChildIssue(issue: Pick<Issue, "id" | "parentId" | "projectId">): boolean {
+      const onboarding = state.projectOnboarding;
+      return Boolean(
+        onboarding?.rootIssueId &&
+          onboarding.projectId &&
+          issue.id !== onboarding.rootIssueId &&
+          issue.parentId === onboarding.rootIssueId &&
+          issue.projectId === onboarding.projectId
+      );
+    }
+
+    /**
+     * Gibt ein technisches Review an QA oder eine ausdrücklich markierte
+     * Produktentscheidung an den Product Owner weiter.
+     */
+    async function routeProjectReview(issue: Issue): Promise<Issue> {
+      if (!companyId || !isProjectOnboardingChildIssue(issue) || issue.status !== "in_review") {
+        return issue;
+      }
+
+      const qa = state.agents.find((agent) => agent.role === "qa_engineer");
+      const productOwner = state.agents.find((agent) => agent.role === "product_owner");
+      if (!qa || !productOwner) return issue;
+
+      try {
+        const comments = await ctx.issues.listComments(issue.id, companyId);
+        const route = reviewOwnerForProjectIssue(issue, comments);
+        if (!route) return issue;
+
+        const reviewer = route.role === "qa_engineer" ? qa : productOwner;
+        if (issue.assigneeAgentId === reviewer.id) return issue;
+
+        const reassigned = await ctx.issues.update(
+          issue.id,
+          { assigneeAgentId: reviewer.id },
+          companyId
+        );
+        const wakeup = await requestIssueWakeup(
+          reassigned.id,
+          route.reason === "technical_review" ? "project_review_qa" : "project_review_product_decision"
+        );
+        ctx.logger.info("Project review routed", {
+          issueId: reassigned.id,
+          reviewer: reviewer.name,
+          reason: route.reason,
+          queued: wakeup.queued,
+        });
+        return reassigned;
+      } catch (error) {
+        ctx.logger.warn("Could not route project review", {
+          issueId: issue.id,
+          error: String(error),
+        });
+        return issue;
+      }
+    }
+
+    /**
+     * Host agents can technically set an issue straight to done. Project work
+     * is stricter: a completion must pass through the assigned QA reviewer.
+     */
+    async function routeProjectCompletionToQa(
+      issue: Issue,
+      actorId: string | null | undefined
+    ): Promise<Issue> {
+      if (!companyId || !isProjectOnboardingChildIssue(issue) || issue.status !== "done") {
+        return issue;
+      }
+
+      const qa = state.agents.find((agent) => agent.role === "qa_engineer");
+      if (!qa) return issue;
+
+      try {
+        const comments = await ctx.issues.listComments(issue.id, companyId);
+        if (
+          actorId === qa.id ||
+          issue.assigneeAgentId === qa.id ||
+          hasQaReviewApproval(comments, qa.id)
+        ) {
+          return issue;
+        }
+
+        const review = await ctx.issues.update(
+          issue.id,
+          { status: "in_review", assigneeAgentId: qa.id },
+          companyId
+        );
+        try {
+          await ctx.issues.createComment(
+            review.id,
+            "## QA review required\n\nAgent Scrum returned this direct completion to QA. Verify all acceptance criteria and tests before approving Done.",
+            companyId
+          );
+        } catch (error) {
+          ctx.logger.warn("Could not record the QA review gate", {
+            issueId: review.id,
+            error: String(error),
+          });
+        }
+        const wakeup = await requestIssueWakeup(review.id, "project_completion_qa");
+        ctx.logger.info("Project completion returned to QA", {
+          issueId: review.id,
+          qaId: qa.id,
+          actorId: actorId ?? null,
+          queued: wakeup.queued,
+        });
+        return review;
+      } catch (error) {
+        ctx.logger.warn("Could not route direct project completion to QA", {
+          issueId: issue.id,
+          error: String(error),
+        });
+        return issue;
+      }
+    }
+
+    /** Re-evaluates open reviews after a comment or when the board is refreshed. */
+    async function routeOpenProjectReviews(): Promise<void> {
+      const onboarding = state.projectOnboarding;
+      if (!companyId || !onboarding?.projectId || !onboarding.rootIssueId) return;
+
+      let offset = 0;
+      const limit = 100;
+      try {
+        while (true) {
+          const issues = await ctx.issues.list({
+            companyId,
+            projectId: onboarding.projectId,
+            status: "in_review",
+            limit,
+            offset,
+          });
+          for (const issue of issues) {
+            await routeProjectReview(issue);
+          }
+          if (issues.length < limit) return;
+          offset += issues.length;
+        }
+      } catch (error) {
+        ctx.logger.warn("Could not inspect project reviews", { error: String(error) });
+      }
+    }
+
+    let blockerResolutionPromise: Promise<void> | null = null;
+
+    async function releaseResolvedProjectBlockers(): Promise<void> {
+      if (blockerResolutionPromise) return;
+
+      blockerResolutionPromise = resolveProjectBlockers().finally(() => {
+        blockerResolutionPromise = null;
+      });
+      await blockerResolutionPromise;
+    }
+
+    /** Returns blocked child issues to TODO only after every native blocker is done. */
+    async function resolveProjectBlockers(): Promise<void> {
+      const onboarding = state.projectOnboarding;
+      if (
+        !companyId ||
+        !onboarding?.projectId ||
+        !onboarding.rootIssueId ||
+        onboarding.status !== "active"
+      ) {
+        return;
+      }
+
+      try {
+        const issues = await ctx.issues.list({
+          companyId,
+          projectId: onboarding.projectId,
+          status: "blocked",
+          limit: 100,
+          offset: 0,
+        });
+        const releasedTaskIds: string[] = [];
+
+        for (const issue of issues) {
+          if (!isProjectOnboardingChildIssue(issue)) continue;
+
+          const relations = await ctx.issues.relations.get(issue.id, companyId);
+          if (
+            relations.blockedBy.length === 0 ||
+            relations.blockedBy.some((blocker) => blocker.status !== "done")
+          ) {
+            continue;
+          }
+
+          const todo = await ctx.issues.update(issue.id, { status: "todo" }, companyId);
+          try {
+            await ctx.issues.createComment(
+              todo.id,
+              "## Blocker resolved\n\nAll linked blocker issues are done. Agent Scrum returned this ticket to TODO.",
+              companyId
+            );
+          } catch (error) {
+            ctx.logger.warn("Could not record resolved project blockers", {
+              issueId: todo.id,
+              error: String(error),
+            });
+          }
+          const result = syncProjectOnboardingIssue(
+            state.tasks,
+            state.projectOnboarding,
+            await withHostComments(todo),
+            null,
+            state.agents
+          );
+          if (result.changed) releasedTaskIds.push(todo.id);
+          await requestIssueWakeup(todo.id, "project_blocker_resolved");
+        }
+
+        const agentActivityChanged = syncProjectAgentActivity();
+        if (releasedTaskIds.length === 0 && !agentActivityChanged) return;
+
+        if (releasedTaskIds.length > 0) {
+          state.metrics = recalculateMetrics(state);
+          state.ceremonies.push(
+            createCeremonyRecord(
+              "impediment_resolution",
+              state.currentSprint?.id ?? null,
+              `Paperclip resolved blockers for ${releasedTaskIds.length} ticket(s).`,
+              { taskIds: releasedTaskIds }
+            )
+          );
+        }
+        await save();
+        if (releasedTaskIds.length > 0) {
+          ctx.logger.info("Project blockers resolved", { taskIds: releasedTaskIds });
+        }
+      } catch (error) {
+        ctx.logger.warn("Could not resolve project blockers", { error: String(error) });
+      }
+    }
+
+    function refinementCandidates(): ScrumTask[] {
+      const rootIssueId = state.projectOnboarding?.rootIssueId;
+      if (!rootIssueId) return [];
+
+      return state.tasks.filter(
+        (task) =>
+          task.parentId === rootIssueId &&
+          !task.refined
+      );
+    }
+
+    function reconcileProjectRefinementRequests(): boolean {
+      const onboarding = state.projectOnboarding;
+      if (!onboarding) return false;
+
+      const candidates = new Set(refinementCandidates().map((task) => task.id));
+      const requested = onboarding.refinementRequestedTaskIds ?? [];
+      const next = requested.filter((taskId) => candidates.has(taskId));
+      if (next.length === requested.length) return false;
+
+      state.projectOnboarding = {
+        ...onboarding,
+        refinementRequestedTaskIds: next,
+        updatedAt: new Date().toISOString(),
+      };
+      return true;
+    }
+
+    async function requestProjectRefinement(
+      source: "automatic" | "manual" = "manual",
+      force = false
+    ) {
+      if (!companyId) return { requested: false, error: "No company context.", taskIds: [] as string[] };
+
+      const requestStateChanged = reconcileProjectRefinementRequests();
+      const onboarding = state.projectOnboarding;
+      if (onboarding?.status !== "active" && onboarding?.status !== "sprint_planning") {
+        if (requestStateChanged) await save();
+        return {
+          requested: false,
+          error: "Approve the project backlog before requesting technical refinement.",
+          taskIds: [] as string[],
+        };
+      }
+
+      const technicalLead = state.agents.find((agent) => agent.role === "technical_lead");
+      const rootIssueId = onboarding.rootIssueId;
+      if (!technicalLead || !rootIssueId) {
+        if (requestStateChanged) await save();
+        return {
+          requested: false,
+          error: "The Technical Lead or project kickoff is not available.",
+          taskIds: [] as string[],
+        };
+      }
+
+      const requestedTaskIds = new Set(onboarding.refinementRequestedTaskIds ?? []);
+      const taskIds = refinementCandidates()
+        .filter((task) => force || !requestedTaskIds.has(task.id))
+        .map((task) => task.id);
+      if (taskIds.length === 0) {
+        if (requestStateChanged) await save();
+        return { requested: false, error: "No project tickets need technical refinement.", taskIds };
+      }
+
+      try {
+        await ctx.agents.invoke(technicalLead.id, companyId, {
+          reason: "Agent Scrum: project refinement",
+          prompt: [
+            "Refine the following Paperclip project issues:",
+            taskIds.map((taskId) => `- ${taskId}`).join("\n"),
+            "Some issues may already be in delivery, review, blocked, or done. Read each issue and the project workspace; do not change issue status or assignee.",
+            "For every issue, add a Technical Refinement comment that ends with exactly:",
+            '<!-- agent-scrum:refinement:v1 {"storyPoints":5,"acceptanceCriteria":["..."],"technicalNotes":"...","risks":[]} -->',
+            "Use a realistic Fibonacci story-point estimate and concrete acceptance criteria.",
+          ].join("\n\n"),
+        });
+        state.projectOnboarding = {
+          ...onboarding,
+          refinementRequestedTaskIds: [...new Set([...requestedTaskIds, ...taskIds])],
+          updatedAt: new Date().toISOString(),
+        };
+        state.ceremonies.push(
+          createCeremonyRecord(
+            "backlog_refinement",
+            state.currentSprint?.id ?? null,
+            `Paperclip refinement requested for ${taskIds.length} ticket(s).`,
+            { taskIds }
+          )
+        );
+        await save();
+        ctx.logger.info("Project refinement requested", { taskIds, technicalLeadId: technicalLead.id, source });
+        return { requested: true, error: null, taskIds };
+      } catch (error) {
+        ctx.logger.warn("Could not request project refinement", {
+          taskIds,
+          error: String(error),
+        });
+        return { requested: false, error: String(error), taskIds };
+      }
+    }
+
+    let projectPlanningPromise: Promise<void> | null = null;
+
+    async function requestProjectPlanning(): Promise<void> {
+      if (projectPlanningPromise) return;
+
+      projectPlanningPromise = planProjectBacklog().finally(() => {
+        projectPlanningPromise = null;
+      });
+      return projectPlanningPromise;
+    }
+
+    /** Plans ready child issues through Paperclip instead of mutating local board state. */
+    async function planProjectBacklog(): Promise<void> {
+      const onboarding = state.projectOnboarding;
+      if (
+        !companyId ||
+        !onboarding?.rootIssueId ||
+        onboarding.status !== "active" ||
+        state.settings.events.enableAutoPlanning === false
+      ) {
+        return;
+      }
+
+      const rootIssueId = onboarding.rootIssueId;
+      const hasTodo = state.tasks.some(
+        (task) => task.parentId === rootIssueId && task.column === "todo"
+      );
+      if (hasTodo) return;
+
+      const currentTodo = state.tasks.filter((task) => task.column === "todo").length;
+      const todoSlots = Math.max(0, state.settings.wipLimits.todo - currentTodo);
+      if (todoSlots === 0) return;
+
+      const availableDevelopers = state.agents.filter(
+        (agent) =>
+          agent.role === "developer" &&
+          !state.tasks.some(
+            (task) =>
+              task.assignedAgentId === agent.id &&
+              (task.column === "todo" || task.column === "in_progress" || task.column === "in_review")
+          )
+      );
+      const readyBacklog = state.tasks
+        .filter(
+          (task) => task.parentId === rootIssueId && task.column === "backlog" && isReady(task)
+        )
+        .sort(byBusinessValue);
+      const planned = readyBacklog.slice(0, Math.min(todoSlots, availableDevelopers.length));
+      if (planned.length === 0) return;
+
+      const productOwner = state.agents.find((agent) => agent.role === "product_owner");
+      const plannedTaskIds: string[] = [];
+
+      for (const [index, task] of planned.entries()) {
+        const developer = availableDevelopers[index];
+        try {
+          const updated = await ctx.issues.update(
+            task.id,
+            { status: "todo", assigneeAgentId: developer.id },
+            companyId
+          );
+          syncProjectOnboardingIssue(
+            state.tasks,
+            state.projectOnboarding,
+            await withHostComments(updated),
+            productOwner?.id ?? null,
+            state.agents
+          );
+          const plannedTask = state.tasks.find((entry) => entry.id === task.id);
+          if (state.currentSprint && plannedTask) {
+            plannedTask.sprintId = state.currentSprint.id;
+            if (!state.currentSprint.taskIds.includes(plannedTask.id)) {
+              state.currentSprint.taskIds.push(plannedTask.id);
+            }
+            state.currentSprint.updatedAt = new Date().toISOString();
+          }
+          plannedTaskIds.push(task.id);
+          await requestIssueWakeup(task.id, "project_sprint_planning");
+        } catch (error) {
+          ctx.logger.warn("Could not plan project issue in Paperclip", {
+            issueId: task.id,
+            developerId: developer.id,
+            error: String(error),
+          });
+        }
+      }
+
+      if (plannedTaskIds.length === 0) return;
+
+      state.metrics = recalculateMetrics(state);
+      state.ceremonies.push(
+        createCeremonyRecord(
+          "sprint_planning",
+          state.currentSprint?.id ?? null,
+          `Paperclip sprint planning moved ${plannedTaskIds.length} ready ticket(s) to TODO.`,
+          { taskIds: plannedTaskIds }
+        )
+      );
+      await save();
+      ctx.logger.info("Project sprint planned", { taskIds: plannedTaskIds });
+    }
+
+    /** Loads host comments so ticket details stay a projection of Paperclip. */
+    async function withHostComments(issue: Issue) {
+      if (!companyId) return { ...issue, comments: [] };
+
+      try {
+        return { ...issue, comments: await ctx.issues.listComments(issue.id, companyId) };
+      } catch (error) {
+        ctx.logger.warn("Could not load project issue comments", {
+          issueId: issue.id,
+          error: String(error),
+        });
+        return { ...issue, comments: [] };
+      }
+    }
+
+    function issueIdFromEvent(event: {
+      entityId?: string;
+      entityType?: string;
+      payload?: unknown;
+    }): string | null {
+      if (event.entityType === "issue" && event.entityId) return event.entityId;
+      const payload = event.payload as { issueId?: unknown } | null;
+      return typeof payload?.issueId === "string" ? payload.issueId : null;
+    }
+
+    /**
+     * Heilt verpasste Events nach einem Worker-Neustart.
+     *
+     * Das Host-Issue bleibt die Quelle der Wahrheit. Daher aktualisiert diese
+     * Funktion nur das lokale Materialisat und startet keine Zeremonie.
+     */
+    async function syncOnboardingProjectIssues(): Promise<boolean> {
+      const onboarding = state.projectOnboarding;
+      if (
+        !companyId ||
+        !onboarding?.projectId ||
+        !onboarding.rootIssueId ||
+        (
+          onboarding.status !== "backlog_in_progress" &&
+          onboarding.status !== "sprint_planning" &&
+          onboarding.status !== "active"
+        )
+      ) {
+        return false;
+      }
+
+      let changed = false;
+      let offset = 0;
+      const limit = 100;
+
+      try {
+        while (true) {
+          const issues = await ctx.issues.list({
+            companyId,
+            projectId: onboarding.projectId,
+            limit,
+            offset,
+          });
+          for (const issue of issues) {
+            const completionGatedIssue = await routeProjectCompletionToQa(issue, null);
+            const routedIssue = await routeProjectReview(completionGatedIssue);
+            const result = syncProjectOnboardingIssue(
+              state.tasks,
+              onboarding,
+              await withHostComments(routedIssue),
+              null,
+              state.agents
+            );
+            changed ||= result.changed;
+          }
+
+          if (issues.length < limit) break;
+          offset += issues.length;
+        }
+      } catch (error) {
+        ctx.logger.warn("Could not hydrate project issues", { error: String(error) });
+        return false;
+      }
+
+      const refinementRequestsChanged = reconcileProjectRefinementRequests();
+      const agentActivityChanged = syncProjectAgentActivity();
+      if (changed || refinementRequestsChanged || agentActivityChanged) {
+        if (changed) state.metrics = recalculateMetrics(state);
+        await save();
+      }
+      await releaseResolvedProjectBlockers();
+      return changed;
     }
 
     /**
@@ -422,6 +1128,14 @@ const plugin = definePlugin({
      * starts a ceremony automatically.
      */
     async function boardChanged(): Promise<void> {
+      // Der Host ist fur projektgebundene Child-Issues die Quelle der Wahrheit.
+      // Lokale Zeremonien wurden Status und Zuweisungen nur im Plugin-State
+      // andern und beim nachsten Host-Event wieder auseinanderlaufen.
+      if (hasProjectBackedTasks()) {
+        await save();
+        return;
+      }
+
       triggers.evaluate();
       await dispatchWork();
       await save();
@@ -475,18 +1189,89 @@ const plugin = definePlugin({
       }
     }
 
+    /**
+     * Spiegelt einen kanonischen Host-Issue in das lokale Board.
+     *
+     * Nur direkte Child-Issues des aktiven Kickoff-Issues gelten als
+     * projektgebundene Stories. Diese Synchronisation speichert bewusst ohne
+     * `boardChanged()`: ein Host-Event soll keine lokale Zeremonie auslosen.
+     */
+    async function syncOnboardingIssue(event: {
+      companyId: string;
+      entityId?: string;
+      actorId?: string;
+    }): Promise<boolean> {
+      if (!companyId || !event.entityId) return false;
+
+      try {
+        const issue = await ctx.issues.get(event.entityId, companyId);
+        if (!issue) return false;
+
+        const completionGatedIssue = await routeProjectCompletionToQa(issue, event.actorId ?? null);
+        const routedIssue = await routeProjectReview(completionGatedIssue);
+        const result = syncProjectOnboardingIssue(
+          state.tasks,
+          state.projectOnboarding,
+          await withHostComments(routedIssue),
+          event.actorId ?? null,
+          state.agents
+        );
+        if (!result.changed) return result.handled;
+
+        reconcileProjectRefinementRequests();
+        syncProjectAgentActivity();
+        state.metrics = recalculateMetrics(state);
+        await save();
+        if (
+          state.projectOnboarding?.status === "active" ||
+          state.projectOnboarding?.status === "sprint_planning"
+        ) {
+          await requestProjectRefinement("automatic");
+          if (state.projectOnboarding.status === "active") {
+            await requestProjectPlanning();
+            await releaseResolvedProjectBlockers();
+          }
+        }
+        ctx.logger.info("Project issue synchronized", {
+          issueId: issue.id,
+          action: result.action,
+        });
+        return true;
+      } catch (error) {
+        ctx.logger.warn("Could not synchronize project issue", {
+          issueId: event.entityId,
+          error: String(error),
+        });
+        return false;
+      }
+    }
+
     // -------------------------------------------------------------------------
     // Host events → board
     // -------------------------------------------------------------------------
 
     ctx.events.on("issue.created", async (event) => {
       await ensureReady(event.companyId);
-      await boardChanged();
+      if (!(await syncOnboardingIssue(event))) await boardChanged();
     });
 
     ctx.events.on("issue.updated", async (event) => {
       await ensureReady(event.companyId);
-      await boardChanged();
+      if (!(await syncOnboardingIssue(event))) await boardChanged();
+    });
+
+    ctx.events.on("issue.comment.created", async (event) => {
+      await ensureReady(event.companyId);
+      const issueId = issueIdFromEvent(event);
+      if (issueId) {
+        await syncOnboardingIssue({
+          companyId: event.companyId,
+          entityId: issueId,
+          actorId: event.actorId,
+        });
+      }
+      await refreshTechnicalAnalysisStatus();
+      await routeOpenProjectReviews();
     });
 
     // -------------------------------------------------------------------------
@@ -495,6 +1280,12 @@ const plugin = definePlugin({
 
     ctx.data.register("board", async (params) => {
       await ensureReady(params.companyId as string | undefined);
+      await refreshTechnicalAnalysisStatus();
+      await syncOnboardingProjectIssues();
+      const rootIssueId = state.projectOnboarding?.rootIssueId;
+      const projectTasks = rootIssueId
+        ? state.tasks.filter((task) => task.parentId === rootIssueId)
+        : [];
       return {
         tasks: state.tasks,
         agents: state.agents,
@@ -502,7 +1293,19 @@ const plugin = definePlugin({
         metrics: state.metrics,
         ceremonies: state.ceremonies,
         settings: state.settings,
+        projectOnboarding: state.projectOnboarding ?? createInitialProjectOnboarding(),
+        canStartProjectOnboarding: canStartProjectOnboarding(),
+        canStartProjectSprint: canStartProjectSprint(),
+        projectProgress: projectProgress(projectTasks),
       };
+    });
+
+    ctx.data.register("projects", async (params) => {
+      await ensureReady(params.companyId as string | undefined);
+      if (!companyId) return [];
+
+      const projects = await ctx.projects.list({ companyId });
+      return projects.map((project) => ({ id: project.id, name: project.name }));
     });
 
     ctx.data.register("log", async (params) => ({
@@ -534,11 +1337,244 @@ const plugin = definePlugin({
       return { task };
     });
 
+    ctx.actions.register("requestProjectRefinement", async (_params, context) => {
+      await ensureReady(context.companyId);
+      return requestProjectRefinement();
+    });
+
+    ctx.actions.register("retryProjectRefinement", async (_params, context) => {
+      await ensureReady(context.companyId);
+      return requestProjectRefinement("manual", true);
+    });
+
+    ctx.actions.register("startProjectOnboarding", async (params, context) => {
+      await ensureReady(context.companyId);
+      if (!companyId) return { started: false, error: "No company context." };
+      if (!canStartProjectOnboarding()) {
+        return {
+          started: false,
+          error: "Finish or reset the active project onboarding before starting another one.",
+        };
+      }
+
+      const parsed = parseProjectOnboardingInput({
+        projectId: params.projectId,
+        brief: params.brief,
+        constraints: params.constraints,
+      });
+      if (!parsed.valid) return { started: false, error: parsed.error };
+
+      const project = await ctx.projects.get(parsed.value.projectId, companyId);
+      if (!project) return { started: false, error: "The selected Paperclip project no longer exists." };
+
+      const workspace = await ctx.projects.getPrimaryWorkspace(project.id, companyId);
+      if (!workspace) {
+        return {
+          started: false,
+          error:
+            "The selected project needs a primary workspace. Add its repository or local folder in Paperclip first.",
+        };
+      }
+
+      const technicalLead = state.agents.find((agent) => agent.role === "technical_lead");
+      if (!technicalLead) {
+        return {
+          started: false,
+          error: "Activate the Scrum team before starting project work.",
+        };
+      }
+
+      const requiresSprint = await projectSprintRequired();
+      const provisionalOnboarding = startProjectOnboarding({
+        input: parsed.value,
+        projectName: project.name,
+        rootIssueId: "pending",
+        requiresSprint,
+      });
+      const rootIssue = await ctx.issues.create({
+        companyId,
+        projectId: project.id,
+        title: `Kickoff: ${project.name}`,
+        description: createTechnicalAnalysisPrompt(provisionalOnboarding),
+        status: "todo",
+        priority: "high",
+        assigneeAgentId: technicalLead.id,
+      });
+
+      state.projectOnboarding = startProjectOnboarding({
+        input: parsed.value,
+        projectName: project.name,
+        rootIssueId: rootIssue.id,
+        requiresSprint,
+      });
+      await save();
+
+      const wakeup = await requestIssueWakeup(rootIssue.id, "project_onboarding_analysis");
+      ctx.logger.info("Project onboarding analysis started", {
+        projectId: project.id,
+        rootIssueId: rootIssue.id,
+        workspaceId: workspace.id,
+        queued: wakeup.queued,
+      });
+
+      return {
+        started: true,
+        rootIssueId: rootIssue.id,
+        projectOnboarding: state.projectOnboarding,
+        wakeup,
+      };
+    });
+
+    ctx.actions.register("startBacklogDiscovery", async (_params, context) => {
+      await ensureReady(context.companyId);
+      if (!companyId) return { started: false, error: "No company context." };
+
+      await refreshTechnicalAnalysisStatus();
+
+      const onboarding = state.projectOnboarding;
+      if (
+        !onboarding ||
+        onboarding.status !== "analysis_ready" ||
+        !onboarding.rootIssueId
+      ) {
+        return {
+          started: false,
+          error: "Wait for the Technical Lead to finish the project analysis before starting Product Owner discovery.",
+        };
+      }
+
+      const productOwner = state.agents.find((agent) => agent.role === "product_owner");
+      if (!productOwner) return { started: false, error: "The Product Owner is not available." };
+
+      const next = transitionProjectOnboarding(onboarding, "backlog_in_progress");
+      await ctx.issues.update(
+        onboarding.rootIssueId,
+        {
+          description: createBacklogDiscoveryPrompt(next),
+          status: "todo",
+          assigneeAgentId: productOwner.id,
+        },
+        companyId
+      );
+      state.projectOnboarding = next;
+      await save();
+
+      const wakeup = await requestIssueWakeup(onboarding.rootIssueId, "project_onboarding_backlog");
+      return { started: true, projectOnboarding: state.projectOnboarding, wakeup };
+    });
+
+    ctx.actions.register("activateProjectOnboarding", async (_params, context) => {
+      await ensureReady(context.companyId);
+      if (!companyId) return { activated: false, error: "No company context." };
+
+      const onboarding = state.projectOnboarding;
+      if (!onboarding || onboarding.status !== "backlog_in_progress" || !onboarding.rootIssueId) {
+        return {
+          activated: false,
+          error: "Start Product Owner discovery before approving the backlog.",
+        };
+      }
+      const rootIssueId = onboarding.rootIssueId;
+      const nextStatus = onboarding.requiresSprint ? "sprint_planning" : "active";
+
+      state.projectOnboarding = transitionProjectOnboarding(onboarding, nextStatus);
+      await syncOnboardingProjectIssues();
+      await save();
+
+      let commentError: string | null = null;
+      try {
+        await ctx.issues.createComment(
+          rootIssueId,
+          onboarding.requiresSprint
+            ? "## Backlog approved\n\nThe human approved the initial backlog. Technical refinement must finish before the human starts the first sprint; do not advance child issues into delivery yet."
+            : "## Backlog approved\n\nThe human approved the initial backlog. Assign and advance the approved child issues through the Paperclip issue workflow.",
+          companyId
+        );
+      } catch (error) {
+        commentError = String(error);
+        ctx.logger.warn("Could not record project backlog approval", {
+          issueId: onboarding.rootIssueId,
+          error: commentError,
+        });
+      }
+
+      const wakeup = await requestIssueWakeup(
+        rootIssueId,
+        onboarding.requiresSprint ? "project_onboarding_sprint_planning" : "project_onboarding_delivery"
+      );
+      const refinement = await requestProjectRefinement("automatic");
+      if (!onboarding.requiresSprint) await requestProjectPlanning();
+      return {
+        activated: true,
+        awaitingSprint: onboarding.requiresSprint,
+        projectOnboarding: state.projectOnboarding,
+        wakeup,
+        commentError,
+        refinement,
+      };
+    });
+
+    ctx.actions.register("startProjectSprint", async (_params, context) => {
+      await ensureReady(context.companyId);
+      if (!companyId) return { started: false, error: "No company context." };
+
+      await syncOnboardingProjectIssues();
+      const onboarding = state.projectOnboarding;
+      if (!onboarding || onboarding.status !== "sprint_planning" || !onboarding.rootIssueId) {
+        return {
+          started: false,
+          error: "Approve a backlog that requires sprint planning before starting a project sprint.",
+        };
+      }
+      if (!canStartProjectSprint()) {
+        return {
+          started: false,
+          error: "Refine and estimate at least one backlog ticket before starting the sprint.",
+        };
+      }
+
+      const sprint = createProjectSprint({
+        onboarding,
+        id: createId(),
+        sprintNumber: state.completedSprints.length + 1,
+        lengthWeeks: state.settings.sprint.lengthWeeks,
+      });
+      state.currentSprint = sprint;
+      state.projectOnboarding = transitionProjectOnboarding(onboarding, "active");
+      await save();
+
+      try {
+        await ctx.issues.createComment(
+          onboarding.rootIssueId,
+          `## ${sprint.name} started\n\nThe human approved the first sprint. Agent Scrum will plan refined backlog issues through the Paperclip workflow.`,
+          companyId
+        );
+      } catch (error) {
+        ctx.logger.warn("Could not record project sprint start", {
+          issueId: onboarding.rootIssueId,
+          error: String(error),
+        });
+      }
+
+      await requestProjectPlanning();
+      return {
+        started: true,
+        sprint: state.currentSprint,
+        projectOnboarding: state.projectOnboarding,
+      };
+    });
+
     ctx.actions.register("moveTask", async (params, context) => {
       await ensureReady(context.companyId);
 
       const task = state.tasks.find((t) => t.id === params.taskId);
       if (!task) return { moved: false, error: "Unknown ticket" };
+      if (isProjectBackedTask(task)) {
+        return {
+          moved: false,
+          error: "Project-backed tickets are updated through their Paperclip issue workflow.",
+        };
+      }
 
       const target = params.column as TaskStatus;
       const result = await onStatusChange(task, task.column, target, {
@@ -558,6 +1594,14 @@ const plugin = definePlugin({
     ctx.actions.register("reviewTicket", async (params, context) => {
       await ensureReady(context.companyId);
 
+      const task = state.tasks.find((entry) => entry.id === String(params.taskId));
+      if (task && isProjectBackedTask(task)) {
+        return {
+          reviewed: false,
+          error: "Project-backed tickets are reviewed through their Paperclip issue workflow.",
+        };
+      }
+
       const result = reviewTicket(state, String(params.taskId), {
         metCriterionIds: params.metCriterionIds as string[] | undefined,
         notes: params.notes as string | undefined,
@@ -574,6 +1618,22 @@ const plugin = definePlugin({
 
       const ceremony = params.ceremony as CeremonyType;
       if (!CEREMONIES[ceremony]) return { started: false, error: `Unknown ceremony: ${ceremony}` };
+      if (hasProjectBackedTasks()) {
+        return {
+          started: false,
+          error: "Project-backed tickets are coordinated through their Paperclip issue workflow.",
+        };
+      }
+      if (
+        (ceremony === "sprint_planning" || ceremony === "backlog_refinement") &&
+        state.projectOnboarding &&
+        !canRunAutomaticDelivery(state.projectOnboarding)
+      ) {
+        return {
+          started: false,
+          error: "Approve the project backlog before starting planning or refinement.",
+        };
+      }
 
       const record = runCeremony(ceremony);
       await dispatchWork();

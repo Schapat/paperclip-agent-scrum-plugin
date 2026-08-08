@@ -7,13 +7,14 @@
  * ersten Zeremonie-Lauf werfen.
  */
 
-import type { ScrumTask, WorkerState } from '../types';
+import type { ProjectOnboarding, ScrumTask, WorkerState } from '../types';
 import { normalizeScrumTask } from '../factories';
+import { createInitialProjectOnboarding } from '../project-onboarding';
 
 /**
  * Aktuelle Schema-Version des persistierten States.
  */
-export const STATE_SCHEMA_VERSION = 3;
+export const STATE_SCHEMA_VERSION = 6;
 
 /**
  * Stellt einen geladenen State auf das aktuelle Schema um.
@@ -23,8 +24,31 @@ export const STATE_SCHEMA_VERSION = 3;
  * beim ersten Zeremonie-Lauf werfen.
  */
 export function migrateState(raw: Partial<WorkerState>): Partial<WorkerState> {
+  // Eine vor dem Onboarding gespeicherte Organisation soll beim Upgrade ihre
+  // bisherige Automation behalten. Frisch angelegte Boards setzen dagegen im
+  // Worker explizit den Status `not_started`.
+  const legacyOnboarding = {
+    ...createInitialProjectOnboarding(),
+    status: 'active' as const,
+  };
+  const savedOnboarding = raw.projectOnboarding as Partial<ProjectOnboarding> | undefined;
+  const projectOnboarding = savedOnboarding
+    ? {
+        ...createInitialProjectOnboarding(),
+        ...savedOnboarding,
+        requiresSprint:
+          typeof savedOnboarding.requiresSprint === 'boolean'
+            ? savedOnboarding.requiresSprint
+            : savedOnboarding.status === 'not_started',
+        refinementRequestedTaskIds: Array.isArray(savedOnboarding.refinementRequestedTaskIds)
+          ? savedOnboarding.refinementRequestedTaskIds.filter((taskId): taskId is string => typeof taskId === 'string')
+          : [],
+      }
+    : legacyOnboarding;
+
   return {
     ...raw,
+    projectOnboarding,
     tasks: (raw.tasks ?? []).map((t) => normalizeScrumTask(t as Partial<ScrumTask> & { id: string })),
     agents: raw.agents ?? [],
     messages: raw.messages ?? [],

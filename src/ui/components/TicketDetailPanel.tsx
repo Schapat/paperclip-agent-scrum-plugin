@@ -14,7 +14,8 @@
  */
 
 import { useEffect, useRef, useState, useCallback, KeyboardEvent } from 'react';
-import type { ScrumTask } from '../../core/types';
+import type { AgentDecision, ScrumAgent, ScrumTask } from '../../core/types';
+import { agentIcon, agentPresentation } from './agent-presentation';
 
 // =============================================================================
 // Types
@@ -38,6 +39,8 @@ export interface TicketDetailPanelProps {
    * anzuzeigen (Spec §5). Fehlt die Liste, fällt die Anzeige auf die ID zurück.
    */
   allTasks?: ScrumTask[];
+  /** Managed team members used to resolve audit IDs to readable names. */
+  agents?: Array<Pick<ScrumAgent, 'id' | 'name' | 'role'>>;
 }
 
 export interface Comment {
@@ -51,7 +54,7 @@ export interface Comment {
 
 export interface Decision {
   id: string;
-  type: 'auto_assign' | 'status_change' | 'priority_change' | 'estimation' | 'blocked' | 'unblocked';
+  type: AgentDecision['type'];
   description: string;
   reasoning: string;
   madeBy: string;
@@ -137,6 +140,7 @@ export function TicketDetailPanel({
   onFetchComments,
   onFetchDecisions,
   allTasks,
+  agents = [],
 }: TicketDetailPanelProps) {
   // ---------------------------------------------------------------------------
   // State
@@ -180,39 +184,27 @@ export function TicketDetailPanel({
     return () => document.removeEventListener('keydown', handleEscape);
   }, [isOpen, onClose]);
 
-  // Prevent body scroll when panel is open
-  useEffect(() => {
-    if (isOpen) {
-      document.body.style.overflow = 'hidden';
-    } else {
-      document.body.style.overflow = '';
-    }
-    return () => {
-      document.body.style.overflow = '';
-    };
-  }, [isOpen]);
-
   // Fetch comments when tab switches
   useEffect(() => {
-    if (activeTab === 'comments' && task && onFetchComments && comments.length === 0) {
-      setIsLoadingComments(true);
-      onFetchComments(task.id)
-        .then(setComments)
-        .catch(() => setComments([]))
-        .finally(() => setIsLoadingComments(false));
-    }
-  }, [activeTab, task, onFetchComments, comments.length]);
+    if (activeTab !== 'comments' || !task || !onFetchComments) return;
+
+    setIsLoadingComments(true);
+    onFetchComments(task.id)
+      .then(setComments)
+      .catch(() => setComments([]))
+      .finally(() => setIsLoadingComments(false));
+  }, [activeTab, task?.id, task?.updatedAt, onFetchComments]);
 
   // Fetch decisions when tab switches
   useEffect(() => {
-    if (activeTab === 'decisions' && task && onFetchDecisions && decisions.length === 0) {
-      setIsLoadingDecisions(true);
-      onFetchDecisions(task.id)
-        .then(setDecisions)
-        .catch(() => setDecisions([]))
-        .finally(() => setIsLoadingDecisions(false));
-    }
-  }, [activeTab, task, onFetchDecisions, decisions.length]);
+    if (activeTab !== 'decisions' || !task || !onFetchDecisions) return;
+
+    setIsLoadingDecisions(true);
+    onFetchDecisions(task.id)
+      .then(setDecisions)
+      .catch(() => setDecisions([]))
+      .finally(() => setIsLoadingDecisions(false));
+  }, [activeTab, task?.id, task?.updatedAt, onFetchDecisions]);
 
   // Reset state when task changes
   useEffect(() => {
@@ -314,15 +306,7 @@ export function TicketDetailPanel({
     return formatDate(dateString);
   };
 
-  const getAgentIcon = (agentId: string | null): string => {
-    if (!agentId) return AGENT_ICONS.default;
-    for (const [role, icon] of Object.entries(AGENT_ICONS)) {
-      if (agentId.toLowerCase().includes(role.replace('_', ''))) {
-        return icon;
-      }
-    }
-    return AGENT_ICONS.default;
-  };
+  const getAgentIcon = (agentId: string | null): string => agentIcon(agentPresentation(agentId, agents)?.role);
 
   // ---------------------------------------------------------------------------
   // Render Helpers
@@ -341,6 +325,7 @@ export function TicketDetailPanel({
 
     const subtasks = allTasks?.filter((t) => t.parentId === task.id) ?? [];
     const metCriteria = task.acceptanceCriteria.filter((c) => c.met).length;
+    const assignee = agentPresentation(task.assignedAgentId, agents);
 
     return (
       <div className="ticket-detail-overview">
@@ -383,12 +368,12 @@ export function TicketDetailPanel({
         </div>
 
         {/* Assignee */}
-        {task.assignedAgentId && (
+        {assignee && (
           <div className="ticket-detail-assignee">
             <span className="ticket-detail-meta-label">Zugewiesen an</span>
             <div className="ticket-detail-assignee-info">
-              <span className="ticket-detail-assignee-icon">{getAgentIcon(task.assignedAgentId)}</span>
-              <span className="ticket-detail-assignee-name">{task.assignedAgentId}</span>
+              <span className="ticket-detail-assignee-icon">{agentIcon(assignee.role)}</span>
+              <span className="ticket-detail-assignee-name">{assignee.name}</span>
             </div>
           </div>
         )}
@@ -444,7 +429,7 @@ export function TicketDetailPanel({
                     {criterion.met && criterion.verifiedBy && (
                       <span className="ticket-detail-criterion-meta">
                         {' '}
-                        — geprüft von {criterion.verifiedBy}
+                        — geprüft von {agentPresentation(criterion.verifiedBy, agents)?.name ?? criterion.verifiedBy}
                       </span>
                     )}
                   </span>
@@ -704,8 +689,12 @@ export function TicketDetailPanel({
       status_change: '🔄',
       priority_change: '⚡',
       estimation: '📊',
+      refinement: '🔧',
+      review_passed: '✅',
+      review_rejected: '↩️',
       blocked: '🚫',
       unblocked: '✅',
+      ceremony: '🧭',
     };
 
     return (

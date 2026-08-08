@@ -1,87 +1,84 @@
 /**
- * Global Styles für das Scrum Board Plugin
+ * Base styles for the Agent Scrum root.
+ *
+ * `styles.tsx` embeds and scopes this stylesheet because Paperclip imports a
+ * plugin's JavaScript entry but does not automatically link esbuild's CSS file.
  */
 
-/* Import Kanban-specific styles */
-@import './kanban.css';
+:scope {
+  --color-bg: var(--background, #ffffff);
+  --color-bg-secondary: var(--card, #ffffff);
+  --color-surface: var(--muted, #f4f4f5);
+  --color-surface-hover: var(--accent, #e4e4e7);
+  --color-text: var(--foreground, #18181b);
+  --color-text-muted: var(--muted-foreground, #71717a);
+  --color-primary: var(--primary, #18181b);
+  --color-primary-hover: var(--primary, #18181b);
+  --color-success: #15803d;
+  --color-warning: #a16207;
+  --color-error: #dc2626;
+  --color-border: var(--border, #e4e4e7);
 
-/* Import Settings Modal styles */
-@import './settings.css';
-
-/* Import Zeremonie-Leiste und Dashboard-Widgets */
-@import './ceremonies.css';
-
-/* CSS Reset */
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-}
-
-/* Root Variables */
-:root {
-  /* Colors */
-  --color-bg: #1a1a2e;
-  --color-bg-secondary: #16213e;
-  --color-surface: #0f3460;
-  --color-surface-hover: #1a4a7a;
-  --color-text: #eaeaea;
-  --color-text-muted: #a0a0a0;
-  --color-primary: #e94560;
-  --color-primary-hover: #ff6b6b;
-  --color-success: #10b981;
-  --color-warning: #f59e0b;
-  --color-error: #ef4444;
-
-  /* Spacing */
   --spacing-xs: 4px;
   --spacing-sm: 8px;
   --spacing-md: 16px;
   --spacing-lg: 24px;
   --spacing-xl: 32px;
 
-  /* Border Radius */
   --radius-sm: 4px;
   --radius-md: 8px;
   --radius-lg: 12px;
 
-  /* Shadows */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
-  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.3);
-  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.4);
+  --shadow-sm: 0 1px 2px rgb(15 23 42 / 0.06);
+  --shadow-md: 0 6px 16px rgb(15 23 42 / 0.08);
+  --shadow-lg: 0 18px 36px rgb(15 23 42 / 0.12);
 
-  /* Transitions */
   --transition-fast: 150ms ease;
   --transition-normal: 250ms ease;
-}
 
-/* Body */
-body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-  background-color: var(--color-bg);
+  display: block;
+  min-width: 0;
   color: var(--color-text);
+  font-family: inherit;
   line-height: 1.5;
-  min-height: 100vh;
 }
 
-/* App Container */
+:scope,
+:scope *,
+:scope *::before,
+:scope *::after {
+  box-sizing: border-box;
+}
+
+:scope :where(h1, h2, h3, p, ul, ol) {
+  margin: 0;
+}
+
+:scope :where(ul, ol) {
+  padding: 0;
+}
+
+:scope :where(button, input, select, textarea) {
+  font: inherit;
+}
+
 .app {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  min-width: 0;
   overflow: hidden;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
 }
 
-/* Header */
 .header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: var(--spacing-md) var(--spacing-lg);
   background-color: var(--color-bg-secondary);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 1px solid var(--color-border);
 }
 
 .header-left,
@@ -125,7 +122,7 @@ body {
 
 /* Main Content */
 .main-content {
-  flex: 1;
+  min-width: 0;
   padding: var(--spacing-lg);
   overflow-x: auto;
 }
@@ -285,8 +282,10 @@ body {
 /* Buttons */
 .btn {
   padding: var(--spacing-sm) var(--spacing-md);
-  border: none;
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
   font-size: 0.875rem;
   font-weight: 500;
   cursor: pointer;
@@ -295,7 +294,8 @@ body {
 
 .btn-primary {
   background-color: var(--color-primary);
-  color: white;
+  border-color: var(--color-primary);
+  color: var(--primary-foreground, #ffffff);
 }
 
 .btn-primary:hover {
@@ -322,7 +322,7 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  height: 100vh;
+  min-height: 18rem;
   gap: var(--spacing-md);
 }
 
@@ -347,7 +347,7 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  height: 100vh;
+  min-height: 18rem;
   gap: var(--spacing-md);
   color: var(--color-error);
 }

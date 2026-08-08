@@ -16,7 +16,7 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 import { TEAM } from "./team";
 
 const PLUGIN_ID = "schapat.agent-scrum";
-const PLUGIN_VERSION = "2.0.0";
+const PLUGIN_VERSION = "2.0.8";
 
 const manifest: PaperclipPluginManifestV1 = {
   id: PLUGIN_ID,
@@ -39,11 +39,14 @@ const manifest: PaperclipPluginManifestV1 = {
     "issue.relations.write",
     // Assignment and the retrospective's skill delivery need agent access.
     "agents.read",
+    "agents.invoke",
     "agents.managed",
     // Learned skills become real company skills the host reconciles.
     "skills.managed",
     "projects.read",
+    "project.workspaces.read",
     "companies.read",
+    "issues.wakeup",
     // Board state (tickets, learnings, ceremony log) lives in plugin state.
     "plugin.state.read",
     "plugin.state.write",
@@ -54,6 +57,7 @@ const manifest: PaperclipPluginManifestV1 = {
     // credentials the plugin only reports the drift.
     "http.outbound",
     "ui.page.register",
+    "ui.sidebar.register",
     "ui.dashboardWidget.register",
   ],
 
@@ -123,6 +127,13 @@ const manifest: PaperclipPluginManifestV1 = {
         title: "Automatic sprint planning",
         description: "Start planning when TODO runs empty and refined tickets are waiting.",
       },
+      requireProjectSprint: {
+        type: "boolean",
+        default: true,
+        title: "Require sprint planning before project delivery",
+        description:
+          "New project requests stay in sprint planning until a human starts the first sprint after Technical Lead refinement. Disable only to allow immediate project delivery after backlog approval.",
+      },
       enableAutoRefinement: {
         type: "boolean",
         default: true,
@@ -172,6 +183,12 @@ const manifest: PaperclipPluginManifestV1 = {
 
   ui: {
     slots: [
+      {
+        type: "sidebar",
+        id: "scrum-board-sidebar",
+        displayName: "Scrum Board",
+        exportName: "ScrumBoardSidebarLink",
+      },
       {
         type: "page",
         id: "scrum-board",

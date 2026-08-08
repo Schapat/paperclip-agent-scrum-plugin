@@ -1,0 +1,152 @@
+import { describe, expect, it } from 'vitest';
+
+import { syncProjectOnboardingIssue, type ProjectIssueSnapshot } from '../project-issue-sync';
+import { startProjectOnboarding, parseProjectOnboardingInput } from '../project-onboarding';
+import type { ScrumTask } from '../types';
+
+function onboarding() {
+  const input = parseProjectOnboardingInput({
+    projectId: 'project-bmw',
+    brief: 'Build an image slider.',
+  });
+  if (!input.valid) throw new Error(input.error);
+
+  return {
+    ...startProjectOnboarding({
+      input: input.value,
+      projectName: 'BMW Website',
+      rootIssueId: 'issue-kickoff',
+    }),
+    status: 'backlog_in_progress' as const,
+  };
+}
+
+function issue(overrides: Partial<ProjectIssueSnapshot> = {}): ProjectIssueSnapshot {
+  const now = new Date('2026-08-08T12:00:00.000Z');
+  return {
+    id: 'issue-slider',
+    projectId: 'project-bmw',
+    parentId: 'issue-kickoff',
+    title: 'Add image slider',
+    description: 'As a visitor, I want to browse images.',
+    status: 'backlog',
+    priority: 'high',
+    assigneeAgentId: null,
+    startedAt: null,
+    completedAt: null,
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+describe('project issue synchronization', () => {
+  it('creates a local task only for a direct kickoff child', () => {
+    const tasks: ScrumTask[] = [];
+
+    const result = syncProjectOnboardingIssue(tasks, onboarding(), issue(), 'agent-po');
+
+    expect(result).toEqual({ handled: true, changed: true, action: 'created', taskId: 'issue-slider' });
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]).toMatchObject({
+      id: 'issue-slider',
+      parentId: 'issue-kickoff',
+      column: 'backlog',
+      priority: 'high',
+    });
+    expect(tasks[0].statusHistory).toEqual([
+      {
+        from: null,
+        to: 'backlog',
+        timestamp: '2026-08-08T12:00:00.000Z',
+        triggeredBy: 'agent-po',
+      },
+    ]);
+  });
+
+  it('replaces local refinement with the authoritative host refinement and comments', () => {
+    const tasks: ScrumTask[] = [];
+    syncProjectOnboardingIssue(tasks, onboarding(), issue());
+    tasks[0].refined = true;
+    tasks[0].storyPoints = 13;
+    tasks[0].technicalNotes = 'Stale local refinement.';
+
+    const result = syncProjectOnboardingIssue(
+      tasks,
+      onboarding(),
+      issue({
+        title: 'Add accessible image slider',
+        status: 'todo',
+        assigneeAgentId: 'developer-1',
+        updatedAt: new Date('2026-08-08T12:10:00.000Z'),
+        comments: [
+          {
+            id: 'comment-refinement',
+            authorAgentId: 'id-tl',
+            authorUserId: null,
+            authorType: 'agent',
+            createdAt: '2026-08-08T12:09:00.000Z',
+            body:
+              '## Technical refinement\n<!-- agent-scrum:refinement:v1 ' +
+              '{"storyPoints":5,"acceptanceCriteria":["Keyboard controls work"],"technicalNotes":"Use the existing media primitives."} -->',
+          },
+        ],
+      }),
+      'agent-po',
+      [{ id: 'id-tl', name: 'Technical Lead', role: 'technical_lead' }]
+    );
+
+    expect(result).toEqual({ handled: true, changed: true, action: 'updated', taskId: 'issue-slider' });
+    expect(tasks[0]).toMatchObject({
+      title: 'Add accessible image slider',
+      column: 'todo',
+      assignedAgentId: 'developer-1',
+      refined: true,
+      storyPoints: 5,
+      technicalNotes: 'Use the existing media primitives.',
+    });
+    expect(tasks[0].acceptanceCriteria.map((criterion) => criterion.text)).toEqual(['Keyboard controls work']);
+    expect(tasks[0].comments).toEqual([
+      expect.objectContaining({ id: 'comment-refinement', authorName: 'Technical Lead' }),
+    ]);
+    expect(tasks[0].statusHistory.at(-1)).toEqual({
+      from: 'backlog',
+      to: 'todo',
+      timestamp: '2026-08-08T12:10:00.000Z',
+      triggeredBy: 'agent-po',
+    });
+  });
+
+  it('removes a mirrored task when its host issue is cancelled or leaves the kickoff', () => {
+    const tasks: ScrumTask[] = [];
+    syncProjectOnboardingIssue(tasks, onboarding(), issue());
+
+    expect(syncProjectOnboardingIssue(tasks, onboarding(), issue({ status: 'cancelled' }))).toMatchObject({
+      handled: true,
+      changed: true,
+      action: 'removed',
+    });
+    expect(tasks).toEqual([]);
+
+    syncProjectOnboardingIssue(tasks, onboarding(), issue());
+    expect(
+      syncProjectOnboardingIssue(tasks, onboarding(), issue({ parentId: 'another-parent' }))
+    ).toMatchObject({ handled: true, changed: true, action: 'removed' });
+    expect(tasks).toEqual([]);
+  });
+
+  it('ignores project siblings and the kickoff issue itself', () => {
+    const tasks: ScrumTask[] = [];
+
+    expect(
+      syncProjectOnboardingIssue(tasks, onboarding(), issue({ parentId: null, id: 'issue-unrelated' }))
+    ).toEqual({ handled: false, changed: false, action: 'ignored' });
+    expect(syncProjectOnboardingIssue(tasks, onboarding(), issue({ id: 'issue-kickoff' }))).toEqual({
+      handled: true,
+      changed: false,
+      action: 'unchanged',
+      taskId: 'issue-kickoff',
+    });
+    expect(tasks).toEqual([]);
+  });
+});

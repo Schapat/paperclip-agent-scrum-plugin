@@ -19,6 +19,7 @@
 import type { CeremonyType, WorkerState } from '../types';
 import { isReady } from '../ceremonies/types';
 import { MIN_READY_BACKLOG } from '../ceremonies/refinement';
+import { canRunAutomaticDelivery } from '../project-onboarding';
 
 /**
  * Eine zustandsbasierte Auslösebedingung.
@@ -192,6 +193,17 @@ const ENABLE_FLAG: Record<CeremonyType, keyof WorkerState['settings']['events']>
  * Schalter betrifft nur den automatischen Trigger.
  */
 export function isCeremonyEnabled(state: WorkerState, ceremony: CeremonyType): boolean {
+  // Der Human kontrolliert den Einstieg in ein neues Projekt. Ohne die
+  // Freigabe durfte ein leeres Board sonst sofort einen generischen PO-Auftrag
+  // auslosen, bevor der Technical Lead die vorhandene Codebasis analysiert hat.
+  if (
+    (ceremony === 'sprint_planning' || ceremony === 'backlog_refinement') &&
+    state.projectOnboarding &&
+    !canRunAutomaticDelivery(state.projectOnboarding)
+  ) {
+    return false;
+  }
+
   return state.settings.events[ENABLE_FLAG[ceremony]] !== false;
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "@schapat/paperclip-agent-scrum-plugin",
-  "version": "2.0.0",
+  "version": "2.0.8",
   "type": "module",
   "private": true,
   "description": "Autonomous Scrum team for Paperclip: state-driven ceremonies, a live Kanban board, and a team that learns from finished work.",

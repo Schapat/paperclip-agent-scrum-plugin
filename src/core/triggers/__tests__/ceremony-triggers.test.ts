@@ -9,6 +9,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { CeremonyType, ScrumAgent, ScrumSprint, ScrumTask, WorkerState } from '../../types';
 import { createDefaultSettings } from '../../types';
 import { createAcceptanceCriterion, createCeremonyRecord, createScrumTask } from '../../factories';
+import { createInitialProjectOnboarding } from '../../project-onboarding';
 import {
   CeremonyTriggerEngine,
   MAX_CASCADE,
@@ -251,6 +252,16 @@ describe('Flankensteuerung', () => {
 // =============================================================================
 
 describe('Ein-/Ausschalter der Trigger', () => {
+  it('wartet bei einem neuen Projekt auf die Backlog-Freigabe', () => {
+    const state = createState({ tasks: stockedBacklog() });
+    state.projectOnboarding = createInitialProjectOnboarding();
+
+    const fired = newlyFired(state, new Set()).map((entry) => entry.ceremony);
+
+    expect(fired).not.toContain('sprint_planning');
+    expect(fired).not.toContain('backlog_refinement');
+  });
+
   it('unterdrückt eine abgeschaltete Zeremonie', () => {
     const state = createState({ tasks: stockedBacklog() });
     state.settings.events.enableAutoPlanning = false;

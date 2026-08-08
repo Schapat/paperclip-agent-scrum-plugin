@@ -208,6 +208,17 @@ Implementiert zugewiesene Tickets, schreibt Tests und Dokumentation, erstellt Pu
 4. Kommentar: "Ready for Review" mit PR-Link
 ```
 
+### Produktentscheidung im Review
+
+Technische Reviews gehen standardmäßig an QA. Falls ein Ticket ohne eine
+Produktentscheidung nicht abgeschlossen werden kann:
+
+1. Erstelle den Review-Kommentar mit Entscheidungskontext und Optionen.
+2. Ergänze exakt `<!-- agent-scrum:po-decision-required -->`.
+3. PATCH das Ticket nach `in_review`.
+4. Das Plugin delegiert den Review an den Product Owner. Warte auf dessen
+   Entscheidung, statt eine Human Review anzufordern.
+
 ### Bei Feedback vom QA (Review → Development)
 ```
 1. QA findet Mängel → Ticket wird auf `in_progress` gesetzt

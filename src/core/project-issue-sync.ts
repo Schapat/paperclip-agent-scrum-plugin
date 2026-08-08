@@ -1,0 +1,224 @@
+/**
+ * Materialisiert projektgebundene Paperclip-Issues im lokalen Scrum Board.
+ *
+ * Das Modul kennt nur einen kleinen Snapshot des Host-Issues. Der Worker
+ * liefert diesen nach einem kanonischen `ctx.issues.get()` und entscheidet
+ * anschliessend, ob der geaenderte State gespeichert werden muss.
+ */
+
+import { createScrumTask } from './factories';
+import {
+  projectIssueProjection,
+  type ProjectIssueCommentSnapshot,
+} from './project-issue-projection';
+import type { ProjectOnboarding, ScrumAgent, ScrumTask, TaskStatus } from './types';
+
+type ProjectIssueStatus = TaskStatus | 'cancelled';
+type HostTimestamp = Date | string;
+
+/** Die fuer das Board benoetigte, stabile Teilmenge eines Paperclip-Issues. */
+export interface ProjectIssueSnapshot {
+  id: string;
+  projectId: string | null;
+  parentId: string | null;
+  title: string;
+  description: string | null;
+  status: ProjectIssueStatus;
+  priority: ScrumTask['priority'];
+  assigneeAgentId: string | null;
+  startedAt: HostTimestamp | null;
+  completedAt: HostTimestamp | null;
+  createdAt: HostTimestamp;
+  updatedAt: HostTimestamp;
+  comments?: ProjectIssueCommentSnapshot[];
+}
+
+export type ProjectIssueSyncAction = 'ignored' | 'unchanged' | 'created' | 'updated' | 'removed';
+
+export interface ProjectIssueSyncResult {
+  /** Der Event gehoert zum aktuellen Projekt-Onboarding und braucht keine Zeremonie-Auswertung. */
+  handled: boolean;
+  changed: boolean;
+  action: ProjectIssueSyncAction;
+  taskId?: string;
+}
+
+/**
+ * Synchronisiert einen direkten Child-Issue des Kickoff-Issues in das lokale
+ * Board. Lokale Refinement-Felder, Kommentare und Entscheidungen bleiben bei
+ * Host-Updates erhalten; ausschliesslich Host-eigene Felder werden ersetzt.
+ */
+export function syncProjectOnboardingIssue(
+  tasks: ScrumTask[],
+  onboarding: ProjectOnboarding | undefined,
+  issue: ProjectIssueSnapshot,
+  actorId: string | null = null,
+  agents: Array<Pick<ScrumAgent, 'id' | 'name' | 'role'>> = []
+): ProjectIssueSyncResult {
+  if (!onboarding?.rootIssueId || !onboarding.projectId) {
+    return ignored();
+  }
+
+  // Der Root-Issue ist ein Steuerobjekt, kein Kanban-Ticket.
+  if (issue.id === onboarding.rootIssueId) {
+    return { handled: true, changed: false, action: 'unchanged', taskId: issue.id };
+  }
+
+  const existingIndex = tasks.findIndex((task) => task.id === issue.id);
+  const isDirectChild =
+    issue.projectId === onboarding.projectId && issue.parentId === onboarding.rootIssueId;
+
+  // Wird eine bereits gespiegelte Story verschoben, umgehaengt oder storniert,
+  // verschwindet sie auch aus diesem projektgebundenen Board.
+  if (!isDirectChild || issue.status === 'cancelled') {
+    if (existingIndex === -1) return ignored();
+    tasks.splice(existingIndex, 1);
+    return { handled: true, changed: true, action: 'removed', taskId: issue.id };
+  }
+
+  // Vor der PO-Story-Erstellung darf ein Child-Issue keine Delivery-Automation
+  // anstossen. Das Event ist trotzdem verarbeitet und soll nicht in die
+  // bestehende, lokale Event-Auswertung fallen.
+  if (
+    onboarding.status !== 'backlog_in_progress' &&
+    onboarding.status !== 'sprint_planning' &&
+    onboarding.status !== 'active'
+  ) {
+    return { handled: true, changed: false, action: 'unchanged', taskId: issue.id };
+  }
+
+  const hostFields = toHostFields(issue, agents);
+  if (existingIndex === -1) {
+    tasks.push(
+      createScrumTask({
+        id: issue.id,
+        title: hostFields.title,
+        description: hostFields.description,
+        column: hostFields.column,
+        priority: hostFields.priority,
+        assignedAgentId: hostFields.assignedAgentId,
+        parentId: hostFields.parentId,
+        createdAt: hostFields.createdAt,
+        updatedAt: hostFields.updatedAt,
+        startedAt: hostFields.startedAt,
+        completedAt: hostFields.completedAt,
+        statusHistory: [
+          {
+            from: null,
+            to: hostFields.column,
+            timestamp: hostFields.updatedAt,
+            triggeredBy: actorId,
+          },
+        ],
+      })
+    );
+    return { handled: true, changed: true, action: 'created', taskId: issue.id };
+  }
+
+  const existing = tasks[existingIndex];
+  if (hasSameHostFields(existing, hostFields)) {
+    return { handled: true, changed: false, action: 'unchanged', taskId: issue.id };
+  }
+
+  if (existing.column !== hostFields.column) {
+    existing.statusHistory.push({
+      from: existing.column,
+      to: hostFields.column,
+      timestamp: hostFields.updatedAt,
+      triggeredBy: actorId,
+    });
+  }
+
+  Object.assign(existing, hostFields);
+  return { handled: true, changed: true, action: 'updated', taskId: issue.id };
+}
+
+interface HostTaskFields {
+  title: string;
+  description: string;
+  column: TaskStatus;
+  priority: ScrumTask['priority'];
+  assignedAgentId: string | null;
+  parentId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  storyPoints: number;
+  acceptanceCriteria: ScrumTask['acceptanceCriteria'];
+  technicalNotes: string | null;
+  risks: ScrumTask['risks'];
+  refined: boolean;
+  comments: ScrumTask['comments'];
+  decisions: ScrumTask['decisions'];
+}
+
+function toHostFields(
+  issue: ProjectIssueSnapshot,
+  agents: Array<Pick<ScrumAgent, 'id' | 'name' | 'role'>>
+): HostTaskFields {
+  if (issue.status === 'cancelled') {
+    throw new Error('Cancelled issues cannot be materialized as Scrum tasks.');
+  }
+
+  const projection = projectIssueProjection({
+    issueId: issue.id,
+    description: issue.description,
+    comments: issue.comments ?? [],
+    agents,
+  });
+
+  return {
+    title: issue.title,
+    description: issue.description ?? '',
+    column: issue.status,
+    priority: issue.priority,
+    assignedAgentId: issue.assigneeAgentId,
+    parentId: issue.parentId,
+    createdAt: toIso(issue.createdAt),
+    updatedAt: toIso(issue.updatedAt),
+    startedAt: issue.startedAt ? toIso(issue.startedAt) : null,
+    completedAt: issue.completedAt ? toIso(issue.completedAt) : null,
+    storyPoints: projection.refinement.storyPoints,
+    acceptanceCriteria: projection.refinement.acceptanceCriteria,
+    technicalNotes: projection.refinement.technicalNotes,
+    risks: projection.refinement.risks,
+    refined: projection.refinement.refined,
+    comments: projection.comments,
+    decisions: projection.decisions,
+  };
+}
+
+function hasSameHostFields(task: ScrumTask, fields: HostTaskFields): boolean {
+  return (
+    task.title === fields.title &&
+    task.description === fields.description &&
+    task.column === fields.column &&
+    task.priority === fields.priority &&
+    task.assignedAgentId === fields.assignedAgentId &&
+    task.parentId === fields.parentId &&
+    task.createdAt === fields.createdAt &&
+    task.updatedAt === fields.updatedAt &&
+    task.startedAt === fields.startedAt &&
+    task.completedAt === fields.completedAt &&
+    task.storyPoints === fields.storyPoints &&
+    task.technicalNotes === fields.technicalNotes &&
+    task.refined === fields.refined &&
+    sameJson(task.acceptanceCriteria, fields.acceptanceCriteria) &&
+    sameJson(task.risks, fields.risks) &&
+    sameJson(task.comments, fields.comments) &&
+    sameJson(task.decisions, fields.decisions)
+  );
+}
+
+function sameJson(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function toIso(value: HostTimestamp): string {
+  return value instanceof Date ? value.toISOString() : value;
+}
+
+function ignored(): ProjectIssueSyncResult {
+  return { handled: false, changed: false, action: 'ignored' };
+}

@@ -13,8 +13,9 @@
  */
 
 import { useRef, KeyboardEvent, DragEvent, MouseEvent } from 'react';
-import type { ScrumTask } from '../../core/types';
+import type { ScrumAgent, ScrumTask } from '../../core/types';
 import { useDragDropOptional, isDraggable, getDragId, DragDropContextValue } from './DragDropContext';
+import { agentIcon, agentPresentation } from './agent-presentation';
 
 interface KanbanCardProps {
   task: ScrumTask;
@@ -28,6 +29,8 @@ interface KanbanCardProps {
   onKeyboardNavigation?: (direction: 'up' | 'down' | 'left' | 'right', index: number) => void;
   /** Optionally inject the drag context (if not available via hook) */
   dragDropContext?: DragDropContextValue | null;
+  /** Managed team members used to render the assignee by name rather than UUID. */
+  agents?: Array<Pick<ScrumAgent, 'id' | 'name' | 'role'>>;
 }
 
 // Priorität zu Farbe Mapping
@@ -65,6 +68,7 @@ export function KanbanCard({
   index = 0,
   onKeyboardNavigation,
   dragDropContext: injectedDragContext,
+  agents = [],
 }: KanbanCardProps) {
   const cardRef = useRef<HTMLDivElement>(null);
   const priorityStyle = PRIORITY_COLORS[task.priority];
@@ -74,6 +78,7 @@ export function KanbanCard({
   const criteriaTotal = task.acceptanceCriteria.length;
   const criteriaMet = task.acceptanceCriteria.filter((c) => c.met).length;
   const shortId = task.id.slice(0, 8);
+  const assignee = agentPresentation(task.assignedAgentId, agents);
 
   // Drag & Drop Context - use injected context or try the hook
   const hookContext = useDragDropOptional();
@@ -81,19 +86,6 @@ export function KanbanCard({
 
   const canDrag = Boolean(enableDragDrop && dragContext && isDraggable(task, dragContext.allowedTransitions));
   const isDraggingTask = Boolean(dragContext?.state.isDragging && dragContext?.state.draggedTask?.id === task.id);
-
-  // Agent-Info extrahieren (falls vorhanden)
-  const getAgentIcon = (agentId: string | null): string => {
-    if (!agentId) return '';
-    // Versuche Rolle aus Agent-ID zu extrahieren (vereinfacht)
-    // In Produktion würde man hier den Agent-Namen nachschlagen
-    for (const [role, icon] of Object.entries(AGENT_ICONS)) {
-      if (agentId.toLowerCase().includes(role.replace('_', ''))) {
-        return icon;
-      }
-    }
-    return AGENT_ICONS.default;
-  };
 
   // ---------------------------------------------------------------------------
   // Event Handlers
@@ -276,9 +268,10 @@ export function KanbanCard({
         </div>
 
         {/* Assignee */}
-        {task.assignedAgentId && (
-          <div className="kanban-card-assignee" title={`Zugewiesen: ${task.assignedAgentId}`}>
-            <span className="kanban-card-assignee-icon">{getAgentIcon(task.assignedAgentId)}</span>
+        {assignee && (
+          <div className="kanban-card-assignee" title={`Zugewiesen: ${assignee.name}`}>
+            <span className="kanban-card-assignee-icon">{agentIcon(assignee.role)}</span>
+            <span className="kanban-card-assignee-name">{assignee.name}</span>
           </div>
         )}
       </div>

@@ -145,6 +145,14 @@ Qualitätskontrolle und Code Review. Prüft alle Akzeptanzkriterien, führt Test
 
 ## Workflow-Regeln
 
+### Projekt-Review
+
+Bei projektgebundenen Tickets ist QA der Standardreviewer. Wenn ein Developer
+ein Ticket nach `in_review` verschiebt, weist das Plugin es QA zu und weckt dich
+auf. Prüfe dann die Akzeptanzkriterien, Tests und Qualitätsanforderungen wie im
+Review-Prozess beschrieben. Ein Ticket mit offener Produktentscheidung geht
+zuerst an den Product Owner und kommt nach dessen Abschlussmarker zu dir zurück.
+
 ### Review-Prozess (vollständig)
 ```
 1. Ticket ist in `in_review`
@@ -185,9 +193,10 @@ Qualitätskontrolle und Code Review. Prüft alle Akzeptanzkriterien, führt Test
 ```
 1. Alle Prüfungen bestanden
    ↓
-2. PATCH Ticket: status → "done"
+2. Kommentar: "✅ Review Approved" mit vollständiger Checkliste und exakt
+   `<!-- agent-scrum:qa-review-approved -->`
    ↓
-3. Kommentar: "✅ Review Approved" mit vollständiger Checkliste
+3. PATCH Ticket: status → "done"
    ↓
 4. PR kann gemergt werden
 ```

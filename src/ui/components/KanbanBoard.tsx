@@ -14,7 +14,7 @@
  */
 
 import { useEffect, useState, useCallback } from 'react';
-import type { ScrumTask, TaskStatus } from '../../core/types';
+import type { ScrumAgent, ScrumTask, TaskStatus } from '../../core/types';
 import { KanbanColumn } from './KanbanColumn';
 import { KanbanCard } from './KanbanCard';
 import { DragDropProvider, useDragDrop, DEFAULT_ALLOWED_TRANSITIONS } from './DragDropContext';
@@ -48,6 +48,8 @@ interface KanbanBoardProps {
   onFetchComments?: (taskId: string) => Promise<Comment[]>;
   /** Callback to fetch decisions for a task */
   onFetchDecisions?: (taskId: string) => Promise<Decision[]>;
+  /** Managed team members used by cards and details to resolve assignee IDs. */
+  agents?: Array<Pick<ScrumAgent, 'id' | 'name' | 'role'>>;
 }
 
 interface BoardState {
@@ -71,6 +73,17 @@ export const COLUMNS: Column[] = [
   { id: 'done', displayName: 'Done', color: '#10B981' },
 ];
 
+/** The backlog column keeps delivery blockers visible without becoming a sixth workflow column. */
+export function sharedBacklogSections(tasks: ScrumTask[]): {
+  backlog: ScrumTask[];
+  blocked: ScrumTask[];
+} {
+  return {
+    backlog: tasks.filter((task) => task.column === 'backlog'),
+    blocked: tasks.filter((task) => task.column === 'blocked'),
+  };
+}
+
 // =============================================================================
 // Component
 // =============================================================================
@@ -88,6 +101,7 @@ function KanbanBoardInner({
   enableDragDrop = true,
   onFetchComments,
   onFetchDecisions,
+  agents = [],
 }: KanbanBoardProps) {
   // ---------------------------------------------------------------------------
   // State
@@ -108,6 +122,21 @@ function KanbanBoardInner({
   // ---------------------------------------------------------------------------
   // Data Fetching
   // ---------------------------------------------------------------------------
+
+  // `initialTasks` is the live host projection supplied by the plugin bridge.
+  // Keep the internal interaction state in sync when comments, estimates, or
+  // host status changes arrive after the board first mounted.
+  useEffect(() => {
+    setState((previous) => ({
+      ...previous,
+      tasks: initialTasks,
+      isLoading: false,
+      lastUpdated: new Date(),
+      selectedTask: previous.selectedTask
+        ? initialTasks.find((task) => task.id === previous.selectedTask?.id) ?? null
+        : null,
+    }));
+  }, [initialTasks]);
 
   const fetchTasks = useCallback(async () => {
     if (!onFetchTasks) return;
@@ -171,6 +200,19 @@ function KanbanBoardInner({
       totalPoints: tasks.reduce((sum, t) => sum + (t.storyPoints || 0), 0),
     };
   };
+
+  const renderCards = (tasks: ScrumTask[]) =>
+    tasks.map((task) => (
+      <KanbanCard
+        key={task.id}
+        task={task}
+        onOpenDetails={handleOpenDetails}
+        enableDragDrop={enableDragDrop}
+        index={state.tasks.findIndex((candidate) => candidate.id === task.id)}
+        onKeyboardNavigation={handleKeyboardNavigation}
+        agents={agents}
+      />
+    ));
 
   // ---------------------------------------------------------------------------
   // Task Operations
@@ -373,7 +415,9 @@ function KanbanBoardInner({
       {/* Columns */}
       <div className="kanban-columns">
         {COLUMNS.map((column) => {
-          const tasks = getTasksForColumn(column.id);
+          const backlogSections = column.id === 'backlog' ? sharedBacklogSections(state.tasks) : null;
+          const tasks = backlogSections?.backlog ?? getTasksForColumn(column.id);
+          const blockedTasks = backlogSections?.blocked ?? [];
           const stats = getColumnStats(column.id);
 
           return (
@@ -392,19 +436,24 @@ function KanbanBoardInner({
               getDropValidation={dragContext.getDropValidation}
               onDrop={handleMoveTask}
             >
-              {tasks.length === 0 ? (
+              {tasks.length === 0 && blockedTasks.length === 0 ? (
                 <div className="kanban-column-empty">Keine Tasks</div>
               ) : (
-                tasks.map((task, index) => (
-                  <KanbanCard
-                    key={task.id}
-                    task={task}
-                    onOpenDetails={handleOpenDetails}
-                    enableDragDrop={enableDragDrop}
-                    index={index}
-                    onKeyboardNavigation={handleKeyboardNavigation}
-                  />
-                ))
+                <>
+                  {renderCards(tasks)}
+                  {blockedTasks.length > 0 && (
+                    <section
+                      className="kanban-blocked-section"
+                      aria-label={`${blockedTasks.length} blockierte Tickets`}
+                    >
+                      <div className="kanban-blocked-section-header">
+                        <span className="kanban-blocked-section-title">Blockiert</span>
+                        <span className="kanban-blocked-section-count">{blockedTasks.length}</span>
+                      </div>
+                      {renderCards(blockedTasks)}
+                    </section>
+                  )}
+                </>
               )}
             </KanbanColumn>
           );
@@ -420,6 +469,7 @@ function KanbanBoardInner({
         onFetchDecisions={onFetchDecisions}
         // Damit das Panel Subtasks und verlinkte Tickets mit Titel auflösen kann
         allTasks={state.tasks}
+        agents={agents}
       />
     </div>
   );
@@ -430,17 +480,14 @@ function KanbanBoardInner({
 // =============================================================================
 
 export function KanbanBoard(props: KanbanBoardProps) {
-  const { onMoveTask, enableDragDrop = true } = props;
+  const { onMoveTask } = props;
 
-  // Wrap in DragDropProvider if drag & drop is enabled
-  if (enableDragDrop) {
-    return (
-      <DragDropProvider onMoveTask={onMoveTask} allowedTransitions={DEFAULT_ALLOWED_TRANSITIONS}>
-        <KanbanBoardInner {...props} />
-      </DragDropProvider>
-    );
-  }
-
-  // Render without provider if drag & drop is disabled
-  return <KanbanBoardInner {...props} />;
+  // KanbanBoardInner always reads the drag context for drop validation. In the
+  // host-controlled mode only the interactions are disabled; the provider must
+  // remain mounted so that a read-only board still renders safely.
+  return (
+    <DragDropProvider onMoveTask={onMoveTask} allowedTransitions={DEFAULT_ALLOWED_TRANSITIONS}>
+      <KanbanBoardInner {...props} />
+    </DragDropProvider>
+  );
 }
