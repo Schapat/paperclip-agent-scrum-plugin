@@ -328,18 +328,32 @@ Developers report to the Technical Lead; everyone else reports to the company
 lead. That mirrors how ceremonies actually escalate — the Tech Lead receives
 blocked tickets and refinement work and hands implementation down.
 
-**The plugin cannot set this structurally.** The managed-agent schema has no
+**The plugin API cannot express this.** The managed-agent schema has no
 `reportsTo` field, the host's `declarationPatch` does not map one, and
 `ctx.agents` offers no update method. Managed agents are therefore always
 created without a superior.
 
-Two things the plugin does instead:
+The host's REST API *can* do it, though: `PATCH /api/agents/:id` accepts
+`reportsTo` — `updateAgentSchema` inherits the field from `createAgentSchema`
+and the handler passes the body straight to `svc.update`. Verified directly:
 
-- **Each agent's instructions state its reporting line**, so escalation
-  behaviour is correct even when the org chart is flat.
-- **Drift is reported.** After every reconcile the plugin compares the actual
-  reporting line against the intended one and logs any difference, so an
-  operator can wire the org chart up by hand.
+```bash
+curl -X PATCH http://127.0.0.1:3100/api/agents/<developer-id> \
+  -H 'content-type: application/json' \
+  -d '{"reportsTo":"<technical-lead-id>"}'
+```
+
+So the plugin takes three steps, in order of preference:
+
+1. **Set it over the REST API.** Fill in `apiBaseUrl` (and `apiToken` on a
+   protected instance) in the plugin settings, and the reporting line is
+   applied right after the team is created. ⚠️ *Implemented but not yet
+   confirmed working end to end — see [Known limitations](#known-limitations).*
+2. **Report drift.** Without credentials, the plugin logs which agent should
+   report to whom after each reconcile.
+3. **State it in the instructions.** Each agent's `AGENTS.md` names its
+   reporting line, so escalation behaviour is right even when the org chart is
+   flat.
 
 The single source for all of this is `src/team.ts` — the manifest derives its
 agent declarations from it, so the two cannot drift apart.
@@ -398,9 +412,14 @@ Stated plainly, because the alternative is a README that lies:
   acceptance criteria was not watched end to end.
 - **Ceremony summaries and agent messages are in German.** The code, README and
   comments are English; the operational text the agents read is not yet.
-- **The reporting line has to be set by hand.** See
-  [Agent hierarchy](#agent-hierarchy) — the plugin states the intent and
-  reports drift, but the host API gives it no way to set a superior.
+- **Automatic hierarchy setup is unconfirmed.** `PATCH /api/agents/:id` with
+  `reportsTo` demonstrably works (verified with curl), the capability and
+  settings are in place, and the code path is wired — but in a live run the
+  reporting line stayed empty and the cause could not be isolated without
+  worker logs. If it does not apply on your instance, look for
+  "Could not set reporting line" or "Reporting line applied" in the plugin
+  worker log, and set the two links by hand in the meantime:
+  Developer 1 and Developer 2 → Technical Lead.
 - **No performance measurements.** Nothing here has been profiled under load.
 
 ---

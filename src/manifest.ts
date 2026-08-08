@@ -49,6 +49,10 @@ const manifest: PaperclipPluginManifestV1 = {
     "plugin.state.write",
     // Ceremonies are triggered by board events, not by a schedule.
     "events.subscribe",
+    // Setting the reporting line goes through the host's REST API: the plugin
+    // API has no way to give a managed agent a superior. Optional — without
+    // credentials the plugin only reports the drift.
+    "http.outbound",
     "ui.page.register",
     "ui.dashboardWidget.register",
   ],
@@ -94,6 +98,24 @@ const manifest: PaperclipPluginManifestV1 = {
         title: "Activate the Scrum team for this organisation",
         description:
           "Creates and maintains the six Scrum agents (Product Owner, Scrum Master, Technical Lead, two Developers, QA). Leave off to install the plugin without adding agents.",
+      },
+      // Optional: lets the plugin set the reporting line itself. The plugin
+      // API cannot give a managed agent a superior, so this goes through the
+      // host's REST API. Leave empty and the plugin only reports the drift.
+      apiBaseUrl: {
+        type: "string",
+        default: "http://127.0.0.1:3100",
+        title: "Paperclip API base URL",
+        description:
+          "Used only to set the agent reporting line, which the plugin API cannot do. Leave the token empty to skip this.",
+      },
+      apiToken: {
+        type: "string",
+        default: "",
+        format: "password",
+        title: "API token for hierarchy setup",
+        description:
+          "A token with 'agent_config:update' permission. Only used to set each agent's superior after the team is created. Leave empty to wire the org chart up by hand.",
       },
       enableAutoPlanning: {
         type: "boolean",

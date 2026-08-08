@@ -30,7 +30,12 @@ import {
   type CeremonyContext,
 } from "./core/ceremonies";
 import { collectInstructionUpdates, type InstructionUpdate } from "./core/learning";
-import { TEAM, describeReportingLine, detectReportingDrift } from "./team";
+import {
+  TEAM,
+  describeReportingLine,
+  detectReportingDrift,
+  type ReportingDrift,
+} from "./team";
 
 /** Where the board lives in plugin state. */
 const STATE_SCOPE = { scopeKind: "instance", stateKey: "board" } as const;
@@ -132,15 +137,8 @@ const plugin = definePlugin({
     async function teamEnabled(): Promise<boolean> {
       if (!companyId) return false;
 
-      try {
-        const config = await ctx.config.get(companyId);
-        return config.enableTeam === true;
-      } catch (error) {
-        ctx.logger.warn("Could not read plugin settings — leaving the team inactive", {
-          error: String(error),
-        });
-        return false;
-      }
+      const config = await readConfig();
+      return config.enableTeam === true;
     }
 
     async function save(): Promise<void> {
@@ -208,15 +206,103 @@ const plugin = definePlugin({
         roles: team.map((a) => a.role).join(", "),
       });
 
-      // The host creates managed agents without a superior and offers no way
-      // to set one, so the plugin can only surface the gap. Reported once per
-      // reconcile so an operator can wire the org chart up by hand.
+      // Managed agents are always created without a superior, and the plugin
+      // API has no way to give them one. If the operator supplied credentials
+      // we set the reporting line over the host's REST API; otherwise we can
+      // only surface the gap.
       const drift = detectReportingDrift(resolved);
-      if (drift.length > 0) {
+      if (drift.length === 0) return;
+
+      const applied = await applyReportingLine(resolved, drift);
+      if (!applied) {
         ctx.logger.warn("Reporting line differs from the intended hierarchy", {
           agents: drift.map((d) => `${d.displayName} should report to ${d.expected}`),
           intended: describeReportingLine(),
+          hint: "Set 'API token for hierarchy setup' in the plugin settings to have this applied automatically.",
         });
+      }
+    }
+
+    /**
+     * Sets each agent's superior over the host's REST API.
+     *
+     * `PATCH /api/agents/:id` accepts `reportsTo` — `updateAgentSchema` inherits
+     * it from `createAgentSchema` and the handler passes the body straight to
+     * `svc.update`. The plugin API offers no equivalent, which is the only
+     * reason this reaches for HTTP at all.
+     *
+     * Returns false when no credentials are configured, so the caller can fall
+     * back to reporting the drift.
+     */
+    async function applyReportingLine(
+      resolved: Map<string, { agentId: string; reportsTo: string | null }>,
+      drift: ReportingDrift[],
+    ): Promise<boolean> {
+      if (!companyId) return false;
+
+      const config = await readConfig();
+      const baseUrl = String(config.apiBaseUrl ?? "").trim().replace(/\/+$/, "");
+      if (!baseUrl) return false;
+
+      // The token is optional: an instance running in `local_trusted` mode
+      // accepts the call without one. On a protected instance the request comes
+      // back 401 and is reported like any other failure.
+      const token = String(config.apiToken ?? "").trim();
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (token) headers.authorization = `Bearer ${token}`;
+
+      let changed = 0;
+      for (const entry of drift) {
+        const member = TEAM.find((m) => m.agentKey === entry.agentKey);
+        const target = resolved.get(entry.agentKey);
+        if (!member || !target) continue;
+
+        // `null` means the company lead, which the plugin does not own — it can
+        // only clear a wrong superior, not point at the CEO.
+        const superiorId = member.reportsTo ? resolved.get(member.reportsTo)?.agentId ?? null : null;
+
+        try {
+          const response = await ctx.http.fetch(`${baseUrl}/api/agents/${target.agentId}`, {
+            method: "PATCH",
+            headers,
+            body: JSON.stringify({ reportsTo: superiorId }),
+          });
+
+          if (!response.ok) {
+            ctx.logger.warn("Could not set reporting line", {
+              agent: entry.displayName,
+              status: response.status,
+            });
+            continue;
+          }
+          changed += 1;
+        } catch (error) {
+          ctx.logger.warn("Could not reach the API to set the reporting line", {
+            agent: entry.displayName,
+            error: String(error),
+          });
+        }
+      }
+
+      if (changed > 0) {
+        ctx.logger.info("Reporting line applied", {
+          updated: changed,
+          intended: describeReportingLine(),
+        });
+      }
+
+      // Reported as handled only if every drifting agent was fixed; a partial
+      // run should still show the operator what is left.
+      return changed === drift.length;
+    }
+
+    /** Reads the plugin config, tolerating a host that cannot supply it. */
+    async function readConfig(): Promise<Record<string, unknown>> {
+      if (!companyId) return {};
+      try {
+        return await ctx.config.get(companyId);
+      } catch {
+        return {};
       }
     }
 
