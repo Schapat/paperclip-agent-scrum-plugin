@@ -262,7 +262,11 @@ const plugin = definePlugin({
         const superiorId = member.reportsTo ? resolved.get(member.reportsTo)?.agentId ?? null : null;
 
         try {
-          const response = await ctx.http.fetch(`${baseUrl}/api/agents/${target.agentId}`, {
+          // Node's global fetch, not `ctx.http.fetch`. The host client applies
+          // SSRF protection and blocks private IPs, so it can never reach the
+          // Paperclip instance itself — which is the only host this call ever
+          // targets. The SDK explicitly allows plugins to use fetch directly.
+          const response = await fetch(`${baseUrl}/api/agents/${target.agentId}`, {
             method: "PATCH",
             headers,
             body: JSON.stringify({ reportsTo: superiorId }),

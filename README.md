@@ -343,17 +343,23 @@ curl -X PATCH http://127.0.0.1:3100/api/agents/<developer-id> \
   -d '{"reportsTo":"<technical-lead-id>"}'
 ```
 
-So the plugin takes three steps, in order of preference:
+So the plugin sets it over the REST API right after creating the team. Fill in
+`apiBaseUrl` in the plugin settings (default `http://127.0.0.1:3100`), plus
+`apiToken` on an instance that requires authentication — one running in
+`local_trusted` mode accepts the call without a token.
 
-1. **Set it over the REST API.** Fill in `apiBaseUrl` (and `apiToken` on a
-   protected instance) in the plugin settings, and the reporting line is
-   applied right after the team is created. ⚠️ *Implemented but not yet
-   confirmed working end to end — see [Known limitations](#known-limitations).*
-2. **Report drift.** Without credentials, the plugin logs which agent should
-   report to whom after each reconcile.
-3. **State it in the instructions.** Each agent's `AGENTS.md` names its
-   reporting line, so escalation behaviour is right even when the org chart is
-   flat.
+One detail worth knowing: this uses Node's global `fetch`, **not**
+`ctx.http.fetch`. The host client applies SSRF protection and blocks private
+IPs, so it can never reach the Paperclip instance itself — which is the only
+host this call ever targets. The SDK explicitly permits plugins to use `fetch`
+directly.
+
+Two fallbacks, if no `apiBaseUrl` is configured or a call fails:
+
+- **Drift is reported.** After each reconcile the plugin logs which agent
+  should report to whom.
+- **The instructions state it.** Each agent's `AGENTS.md` names its reporting
+  line, so escalation behaviour is right even when the org chart is flat.
 
 The single source for all of this is `src/team.ts` — the manifest derives its
 agent declarations from it, so the two cannot drift apart.
@@ -395,6 +401,8 @@ call carrying company scope):
   on the Scrum board.
 - Creating a ticket works, and an unrefined ticket **automatically triggers
   Backlog Refinement** — the state-driven trigger chain works end to end.
+- **The reporting line is applied automatically:** after activation both
+  developers report to the Technical Lead, everyone else to the company lead.
 
 ## Known limitations
 
@@ -412,14 +420,10 @@ Stated plainly, because the alternative is a README that lies:
   acceptance criteria was not watched end to end.
 - **Ceremony summaries and agent messages are in German.** The code, README and
   comments are English; the operational text the agents read is not yet.
-- **Automatic hierarchy setup is unconfirmed.** `PATCH /api/agents/:id` with
-  `reportsTo` demonstrably works (verified with curl), the capability and
-  settings are in place, and the code path is wired — but in a live run the
-  reporting line stayed empty and the cause could not be isolated without
-  worker logs. If it does not apply on your instance, look for
-  "Could not set reporting line" or "Reporting line applied" in the plugin
-  worker log, and set the two links by hand in the meantime:
-  Developer 1 and Developer 2 → Technical Lead.
+- **Hierarchy setup needs a reachable API.** The plugin sets the reporting line
+  over `PATCH /api/agents/:id`. On an instance requiring authentication, set
+  `apiToken` in the plugin settings; without a reachable API the plugin falls
+  back to reporting the drift.
 - **No performance measurements.** Nothing here has been profiled under load.
 
 ---
