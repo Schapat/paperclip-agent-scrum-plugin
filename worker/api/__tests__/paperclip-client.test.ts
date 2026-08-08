@@ -545,18 +545,6 @@ describe('PaperclipClient', () => {
       });
     });
 
-    describe('deleteRoutine', () => {
-      it('should delete a routine', async () => {
-        mockFetch.mockResolvedValueOnce(createMockResponse(undefined));
-
-        await client.deleteRoutine('routine-1');
-
-        expect(mockFetch).toHaveBeenCalledWith(
-          'http://localhost:3100/api/routines/routine-1',
-          expect.objectContaining({ method: 'DELETE' })
-        );
-      });
-    });
   });
 
   // ===========================================================================

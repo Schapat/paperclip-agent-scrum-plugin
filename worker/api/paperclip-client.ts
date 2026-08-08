@@ -123,6 +123,43 @@ export interface AgentHireRequest {
   sourceIssueId?: string;
 }
 
+/**
+ * Datei im Instruktions-Bundle eines Agents.
+ */
+export interface AgentInstructionsFile {
+  path: string;
+  content?: string;
+  size?: number;
+}
+
+/**
+ * Skill in der Bibliothek einer Company.
+ */
+export interface CompanySkill {
+  id: string;
+  slug: string;
+  name: string;
+  description?: string | null;
+  markdown?: string | null;
+  categories?: string[];
+}
+
+/**
+ * Skill-Status eines Agents.
+ *
+ * `entries[].desired` sagt, ob der Skill zugewiesen ist; `state` beschreibt,
+ * ob er in der Laufzeitumgebung tatsächlich verfügbar ist.
+ */
+export interface AgentSkillSnapshot {
+  entries?: Array<{
+    key: string;
+    desired: boolean;
+    state?: string;
+    runtimeName?: string | null;
+  }>;
+  supported?: boolean;
+}
+
 export interface AgentHireResponse {
   agent: PaperclipAgent;
   approval?: {
@@ -475,9 +512,10 @@ export class PaperclipClient {
   /**
    * Update an existing agent's configuration.
    *
-   * `instructionsBundle` überschreibt die Instruktionsdateien des Agents —
-   * darüber fließen die in der Retrospektive gelernten Skills in seine
-   * `AGENTS.md` ein. Beim Hire wird dasselbe Feld verwendet.
+   * Achtung: `instructionsBundle` gehört hier *nicht* hinein. Das Zod-Schema
+   * des Servers erlaubt das Feld zwar (es erbt von `createAgentSchema`), der
+   * PATCH-Handler verarbeitet es aber nicht — der Aufruf liefert 200 und
+   * schreibt nichts. Für Instruktionen ist `writeInstructionsFile` zuständig.
    */
   async updateAgent(
     agentId: string,
@@ -490,10 +528,87 @@ export class PaperclipClient {
       adapterConfig: Record<string, unknown>;
       runtimeConfig: Record<string, unknown>;
       budgetMonthlyCents: number;
-      instructionsBundle: { files: Record<string, string> };
     }>
   ): Promise<PaperclipAgent> {
     return this.request<PaperclipAgent>('PATCH', `/api/agents/${agentId}`, params);
+  }
+
+  /**
+   * Schreibt eine einzelne Datei in das Instruktions-Bundle eines Agents.
+   *
+   * Das ist der Weg, über den gelernte Skills in die `AGENTS.md` gelangen.
+   */
+  async writeInstructionsFile(
+    agentId: string,
+    path: string,
+    content: string
+  ): Promise<AgentInstructionsFile> {
+    return this.request<AgentInstructionsFile>(
+      'PUT',
+      `/api/agents/${agentId}/instructions-bundle/file`,
+      { path, content }
+    );
+  }
+
+  /**
+   * Liest eine Datei aus dem Instruktions-Bundle eines Agents.
+   */
+  async readInstructionsFile(agentId: string, path: string): Promise<AgentInstructionsFile> {
+    const query = new URLSearchParams({ path }).toString();
+    return this.request<AgentInstructionsFile>(
+      'GET',
+      `/api/agents/${agentId}/instructions-bundle/file?${query}`
+    );
+  }
+
+  // ===========================================================================
+  // Skills API
+  // ===========================================================================
+
+  /**
+   * Legt einen Skill in der Skill-Bibliothek der Company an.
+   *
+   * Paperclip führt Skills als eigenes Konzept: erst in der Bibliothek anlegen,
+   * dann über `syncAgentSkills` einem Agent zuweisen.
+   */
+  async createCompanySkill(
+    companyId: string,
+    params: {
+      name: string;
+      slug?: string;
+      description?: string;
+      markdown?: string;
+      categories?: string[];
+      tagline?: string;
+    }
+  ): Promise<CompanySkill> {
+    return this.request<CompanySkill>('POST', `/api/companies/${companyId}/skills`, params);
+  }
+
+  /**
+   * Listet die Skills der Company.
+   */
+  async listCompanySkills(companyId: string): Promise<CompanySkill[]> {
+    return this.request<CompanySkill[]>('GET', `/api/companies/${companyId}/skills`);
+  }
+
+  /**
+   * Weist einem Agent die gewünschten Skills zu (aktivieren).
+   *
+   * Die Liste ist absolut: nicht genannte Skills werden abgewählt. Deshalb
+   * immer den vollständigen Sollzustand übergeben.
+   */
+  async syncAgentSkills(agentId: string, desiredSkills: string[]): Promise<AgentSkillSnapshot> {
+    return this.request<AgentSkillSnapshot>('POST', `/api/agents/${agentId}/skills/sync`, {
+      desiredSkills,
+    });
+  }
+
+  /**
+   * Liest den Skill-Status eines Agents.
+   */
+  async listAgentSkills(agentId: string): Promise<AgentSkillSnapshot> {
+    return this.request<AgentSkillSnapshot>('GET', `/api/agents/${agentId}/skills`);
   }
 
   // ===========================================================================
@@ -564,12 +679,8 @@ export class PaperclipClient {
     return this.request<PaperclipRoutine>('PATCH', `/api/routines/${routineId}`, { status });
   }
 
-  /**
-   * Delete a routine
-   */
-  async deleteRoutine(routineId: string): Promise<void> {
-    await this.request<void>('DELETE', `/api/routines/${routineId}`);
-  }
+  // Kein `deleteRoutine`: der Paperclip-Server bietet keine DELETE-Route für
+  // Routinen an. Zum Deaktivieren dient `updateRoutineStatus`.
 
   // ===========================================================================
   // Dashboard / Inbox

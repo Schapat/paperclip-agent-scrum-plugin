@@ -30,6 +30,15 @@ export {
 } from './instructions';
 
 export {
+  toSkillSlug,
+  toSkillMarkdown,
+  ensureLibrarySkills,
+  assignSkillsToAgent,
+  type SkillSyncClient,
+  type SkillSyncResult,
+} from './skill-sync';
+
+export {
   collectProposals,
   proposeFromUnmetCriteria,
   proposeFromRisks,

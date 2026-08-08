@@ -24,6 +24,8 @@
 | QA-Review mit Feedback-Schleife | ✅ PASS | `qa-review.test.ts` — 10 Tests |
 | Agentenkommunikation & Entscheidungslog | ✅ PASS | `message-bus.test.ts` — 14 Tests |
 | Agenten-Log (Nachrichten + Entscheidungen) | ✅ PASS | `log-aggregation.test.ts` — 4 Tests |
+| API-Endpunkte gegen Paperclip-Server verifiziert | ✅ PASS | 26/26 Endpunkte existieren (Abgleich mit `server/src/routes/`) |
+| Skill-Bibliothek-Abgleich | ✅ PASS | `skill-sync.test.ts` — 13 Tests |
 | Skills in den Agenten-Instruktionen | ✅ PASS | `instructions.test.ts` — 21 Tests |
 | Learnings & Skills aus der Retro | ✅ PASS | `learning.test.ts` — 30 Tests |
 | Impediment Resolution & Retro-Output | ✅ PASS | `impediment-retro.test.ts` — 14 Tests |
@@ -34,7 +36,7 @@
 | Typecheck / Lint | ✅ PASS | 0 Errors (47 `no-console`-Warnings) |
 | Performance (Board-Update <100ms) | ⚠️ OFFEN | Nur im Live-Deployment messbar |
 
-**Gesamt: 437 Tests, ~84 % Statement-Coverage.**
+**Gesamt: 449 Tests, ~84 % Statement-Coverage.**
 
 ---
 
@@ -131,10 +133,15 @@ referenziert nun benannte Exports aus dem gebauten Library-Bundle.
   Metriken) und fordern die *inhaltliche* Arbeit — User Stories schreiben,
   Akzeptanzkriterien formulieren, schätzen — per `requestAgentWork` bei den
   echten KI-Agents an. Das Plugin erfindet diese Inhalte bewusst nicht selbst.
+- **Alle 26 genutzten API-Endpunkte wurden gegen `server/src/routes/` des
+  Paperclip-Repos abgeglichen und existieren.** Zwei Fehler kamen dabei ans
+  Licht: der Instruktions-Schreibweg lief über einen Endpunkt, der das Feld
+  stillschweigend verwirft, und `deleteRoutine` sprach eine Route an, die es
+  serverseitig nicht gibt. Beides behoben.
 - **Der `AGENT_WORK_REQUESTED`-Pfad ist nur bis zur Worker-Grenze getestet.**
   Ob der Paperclip-Agent daraufhin tatsächlich Tickets anlegt, lässt sich erst
   gegen ein echtes Backend prüfen.
-- **50 `no-console`-Warnings** im Worker — bewusst belassen, das strukturierte
+- **51 `no-console`-Warnings** im Worker — bewusst belassen, das strukturierte
   Logging in `worker/utils/logger.ts` ist dort noch nicht durchgezogen.
 
 ---

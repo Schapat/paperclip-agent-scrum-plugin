@@ -39,7 +39,6 @@ function createMockClient(): PaperclipClient {
     getRoutine: vi.fn(),
     createRoutine: vi.fn(),
     updateRoutineStatus: vi.fn(),
-    deleteRoutine: vi.fn(),
     getInbox: vi.fn(),
     getDashboard: vi.fn(),
   } as unknown as PaperclipClient;

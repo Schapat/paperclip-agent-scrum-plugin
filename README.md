@@ -2,9 +2,9 @@
 
 > KI-basiertes Scrum-Team mit Event-Driven Workflow und Live-Kanban-Board für Paperclip.
 
-![Version](https://img.shields.io/badge/version-1.3.0-blue.svg)
+![Version](https://img.shields.io/badge/version-1.3.1-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
-![Tests](https://img.shields.io/badge/tests-437%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-449%20passing-brightgreen.svg)
 ![Coverage](https://img.shields.io/badge/coverage-84%25-yellow.svg)
 
 ## 🚀 Features
@@ -451,11 +451,27 @@ Sprint weiter anwachsen und irgendwann das Kontextfenster des Agents auffressen.
 Die Basis-Instruktionen bleiben dabei unangetastet; sie liegen im State, damit
 sich der Text jederzeit sauber neu zusammensetzen lässt.
 
-Geschrieben wird über `PATCH /api/agents/:id` mit `instructionsBundle` — dasselbe
-Feld, über das die Instruktionen beim Anlegen des Agents gesetzt werden. Ohne
-API-Verbindung bleibt es bei einer lokalen Aktualisierung; da der Text jederzeit
-aus Basis + aktiven Skills neu entsteht, wird er beim nächsten Lauf mit
-Verbindung nachgezogen.
+Ausgeliefert wird auf zwei Wegen, gegen die echte Paperclip-API verifiziert:
+
+1. **Instruktionsdatei** — `PUT /api/agents/:id/instructions-bundle/file` mit
+   `{ path: "AGENTS.md", content }`. Das ist der wirksame Weg, unabhängig vom
+   Adapter des Agents.
+2. **Skill-Bibliothek** — `POST /api/companies/:id/skills` legt den Skill in der
+   Bibliothek der Company an, `POST /api/agents/:id/skills/sync` weist ihn dem
+   Agent zu. Damit taucht er als eigenständiger Skill in der Paperclip-UI auf.
+
+> **Nicht** über `PATCH /api/agents/:id` mit `instructionsBundle`: Das
+> Zod-Schema erlaubt das Feld (es erbt von `createAgentSchema`), der
+> Server-Handler verarbeitet es aber nicht. Der Aufruf liefert 200 und schreibt
+> nichts — ein stiller Fehlschlag.
+
+Beim Skill-Sync wird der bereits zugewiesene Stand des Agents zuerst gelesen und
+beibehalten: `skills/sync` erwartet den *vollständigen* Sollzustand, nicht
+genannte Skills würden sonst abgewählt.
+
+Ohne API-Verbindung bleibt es bei einer lokalen Aktualisierung; da der Text
+jederzeit aus Basis + aktiven Skills neu entsteht, wird er beim nächsten Lauf
+mit Verbindung nachgezogen.
 
 ### Event-Trigger im Detail
 

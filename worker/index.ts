@@ -45,7 +45,7 @@ import { collectDecisions } from './communication';
 
 import { CeremonyTriggerEngine } from './triggers';
 
-import type { InstructionUpdate } from './learning';
+import { assignSkillsToAgent, ensureLibrarySkills, type InstructionUpdate } from './learning';
 
 import {
   DebouncedSaver,
@@ -594,6 +594,45 @@ function createCeremonyContext(): CeremonyContext {
 }
 
 /**
+ * Gleicht die gelernten Skills mit der Paperclip-Skill-Bibliothek ab.
+ *
+ * Fehler werden protokolliert, aber nicht weitergereicht: die Bibliothek ist
+ * ein Zusatzweg, der je nach Adapter des Agents gar nicht unterstützt wird.
+ */
+async function syncSkillLibrary(update: InstructionUpdate): Promise<void> {
+  const companyId = pluginConfig.companyId || process.env.PAPERCLIP_COMPANY_ID;
+  if (!paperclipClient || !companyId || update.skillIds.length === 0) return;
+
+  const skills = state.skills.filter((s) => update.skillIds.includes(s.id));
+  if (skills.length === 0) return;
+
+  try {
+    const { slugs, created } = await ensureLibrarySkills(paperclipClient, companyId, skills);
+    const assigned = await assignSkillsToAgent(
+      paperclipClient,
+      update.agentId,
+      skills.map((s) => slugs.get(s.id)!).filter(Boolean)
+    );
+
+    if (created.length > 0 || assigned) {
+      console.log(
+        `[Skills] Bibliothek abgeglichen für ${update.agentName}: ${created.length} neu angelegt, zugewiesen=${assigned}`
+      );
+    }
+  } catch (error) {
+    console.warn(`[Skills] Skill-Bibliothek für ${update.agentName} nicht abgleichbar:`, error);
+  }
+}
+
+/**
+ * Datei im Instruktions-Bundle, in die der Skill-Abschnitt geschrieben wird.
+ *
+ * Entspricht der Datei, die beim Anlegen des Agents als `AGENTS.md` im Bundle
+ * hinterlegt wird.
+ */
+const INSTRUCTIONS_FILE = 'AGENTS.md';
+
+/**
  * Schreibt aktualisierte Instruktionen an einen Agent.
  *
  * Ohne API-Verbindung bleibt es bei der UI-Benachrichtigung — der neue Text
@@ -618,10 +657,20 @@ async function applyInstructionUpdate(update: InstructionUpdate): Promise<void> 
     return;
   }
 
+  // Zusätzlich zum Instruktionstext die native Skill-Bibliothek pflegen. Sie
+  // ist adapterabhängig; schlägt sie fehl, bleibt die Instruktionsdatei der
+  // wirksame Weg — deshalb getrennt behandelt.
+  void syncSkillLibrary(update);
+
   try {
-    await paperclipClient.updateAgent(update.agentId, {
-      instructionsBundle: { files: { 'AGENTS.md': update.instructions } },
-    });
+    // Bewusst NICHT über `updateAgent`: dessen Schema erlaubt zwar
+    // `instructionsBundle`, der Server-Handler verarbeitet es aber nicht — der
+    // Aufruf liefert 200 und schreibt nichts. Nur dieser Endpunkt wirkt.
+    await paperclipClient.writeInstructionsFile(
+      update.agentId,
+      INSTRUCTIONS_FILE,
+      update.instructions
+    );
     console.log(
       `[Skills] Instruktionen für ${update.agentName} aktualisiert (${update.skillIds.length} aktive Skills)`
     );
