@@ -1,9 +1,12 @@
-# esbuilds postinstall ersetzt bin/esbuild durch die native Binärdatei. pnpm
-# erzeugt den .bin-Shim aber schon vorher und ruft ihn über `node` auf — danach
-# scheitert jeder CLI-Aufruf mit "Invalid or unexpected token".
-#
-# Ohne das postinstall bleibt bin/esbuild der JS-Shim, der die passende
-# @esbuild/<platform>-Binärdatei zur Laufzeit selbst auflöst. Die JS-API
-# (vite, vitest) ist davon ohnehin nicht betroffen.
+# pnpm 11 liest Overrides nicht mehr aus package.json. Ohne diesen Eintrag holt
+# pnpm @paperclipai/shared aus der npm-Registry statt aus dem SDK-Snapshot —
+# das Plugin-SDK importiert dann Konstanten, die es dort nicht gibt.
+overrides:
+  "@paperclipai/shared": "file:.paperclip-sdk/paperclipai-shared-0.3.1.tgz"
+
+# esbuild wird über seine JS-API benutzt (esbuild.config.mjs), nicht über die
+# CLI. Dafür genügt das plattformspezifische @esbuild/<platform>-Paket; das
+# postinstall würde nur bin/esbuild durch die Binärdatei ersetzen und den
+# von pnpm erzeugten node-Shim unbrauchbar machen.
 allowBuilds:
   esbuild: false

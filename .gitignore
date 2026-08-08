@@ -1,5 +1,6 @@
-node_modules
 dist
+node_modules
+.paperclip-sdk
+coverage
 *.log
 .DS_Store
-coverage

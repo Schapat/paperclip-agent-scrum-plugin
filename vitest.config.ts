@@ -1,23 +1,14 @@
-import { defineConfig } from 'vitest/config';
-import path from 'path';
+import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    globals: true,
-    environment: 'node',
-    include: ['**/*.test.ts', '**/*.spec.ts'],
-    exclude: ['node_modules', 'dist'],
+    // Tests live next to the code they cover, under src/core/**/__tests__.
+    include: ["src/**/*.test.ts", "tests/**/*.spec.ts"],
+    environment: "node",
     coverage: {
-      provider: 'v8',
-      reporter: ['text', 'json', 'html'],
-      include: ['worker/**/*.ts', 'shared/**/*.ts'],
-      exclude: ['**/*.test.ts', '**/*.spec.ts', '**/index.ts'],
-    },
-  },
-  resolve: {
-    alias: {
-      '@shared': path.resolve(__dirname, './shared'),
-      '@worker': path.resolve(__dirname, './worker'),
+      provider: "v8",
+      include: ["src/core/**/*.ts"],
+      exclude: ["**/__tests__/**", "**/__integration__/**", "**/index.ts"],
     },
   },
 });

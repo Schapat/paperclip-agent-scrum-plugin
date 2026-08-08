@@ -1,62 +1,54 @@
 {
-  "name": "plugin-scrum-team",
-  "version": "1.3.1",
-  "description": "Autonomous Scrum Team Plugin für Paperclip - KI-basiertes Scrum-Team mit Event-Driven Workflow und Live-Kanban-Board",
-  "main": "dist/worker/index.js",
+  "name": "@schapat/paperclip-agent-scrum-plugin",
+  "version": "2.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Autonomous Scrum team for Paperclip: state-driven ceremonies, a live Kanban board, and a team that learns from finished work.",
   "scripts": {
-    "build": "pnpm run build:worker && pnpm run build:ui && pnpm run build:manifest",
-    "build:worker": "esbuild worker/index.ts --bundle --outfile=dist/worker/index.js --platform=neutral --target=es2020 --format=esm",
-    "build:ui": "vite build --config vite.config.ts",
-    "build:manifest": "node scripts/build-manifest.js",
-    "dev": "concurrently \"pnpm run dev:worker\" \"pnpm run dev:ui\"",
-    "dev:worker": "esbuild worker/index.ts --bundle --outfile=dist/worker/index.js --platform=neutral --target=es2020 --format=esm --watch",
-    "dev:ui": "vite --config vite.config.ts",
-    "lint": "eslint . --ext .ts,.tsx",
-    "lint:fix": "eslint . --ext .ts,.tsx --fix",
-    "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
-    "format:check": "prettier --check \"**/*.{ts,tsx,js,json,md}\"",
+    "setup:sdk": "node ./scripts/link-sdk.mjs",
+    "build": "node ./esbuild.config.mjs",
+    "dev": "node ./esbuild.config.mjs --watch",
+    "dev:ui": "paperclip-plugin-dev-server --root . --ui-dir dist/ui --port 4177",
+    "test": "vitest run --config ./vitest.config.ts",
+    "test:watch": "vitest --config ./vitest.config.ts",
+    "test:coverage": "vitest run --coverage --config ./vitest.config.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
     "clean": "rm -rf dist"
+  },
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js",
+    "worker": "./dist/worker.js",
+    "ui": "./dist/ui/"
   },
   "keywords": [
     "paperclip",
     "plugin",
     "scrum",
     "kanban",
-    "ai",
-    "workflow"
+    "agents",
+    "automation"
   ],
-  "author": "Roblox Fabrik",
+  "author": "Schapat",
   "license": "MIT",
-  "devDependencies": {
-    "@types/node": "^20.11.0",
-    "@types/react": "^18.2.48",
-    "@types/react-dom": "^18.2.18",
-    "@typescript-eslint/eslint-plugin": "^6.19.0",
-    "@typescript-eslint/parser": "^6.19.0",
-    "@vitejs/plugin-react": "^4.2.1",
-    "@vitest/coverage-v8": "^1.2.0",
-    "concurrently": "^8.2.2",
-    "esbuild": "^0.19.12",
-    "eslint": "^8.56.0",
-    "eslint-config-prettier": "^9.1.0",
-    "eslint-plugin-react": "^7.33.2",
-    "eslint-plugin-react-hooks": "^4.6.0",
-    "prettier": "^3.2.4",
-    "typescript": "^5.3.3",
-    "vite": "^5.0.12",
-    "vitest": "^1.2.0"
+  "pnpm": {
+    "overrides": {
+      "@paperclipai/shared": "file:.paperclip-sdk/paperclipai-shared-0.3.1.tgz"
+    }
   },
-  "dependencies": {
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "zustand": "^4.5.0"
+  "devDependencies": {
+    "@paperclipai/plugin-sdk": "file:.paperclip-sdk/paperclipai-plugin-sdk-1.0.0.tgz",
+    "@paperclipai/shared": "file:.paperclip-sdk/paperclipai-shared-0.3.1.tgz",
+    "@types/node": "^24.6.0",
+    "@types/react": "^19.0.8",
+    "@vitest/coverage-v8": "^3.0.5",
+    "esbuild": "^0.27.3",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  },
+  "peerDependencies": {
+    "react": ">=18"
   },
   "engines": {
-    "node": ">=18.0.0",
-    "pnpm": ">=8.0.0"
+    "node": ">=22"
   }
 }
