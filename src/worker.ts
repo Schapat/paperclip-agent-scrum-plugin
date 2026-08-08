@@ -34,6 +34,7 @@ import {
   TEAM,
   describeReportingLine,
   detectReportingDrift,
+  expectedSuperiorId,
   type ReportingDrift,
 } from "./team";
 
@@ -185,6 +186,25 @@ const plugin = definePlugin({
     }
 
     /**
+     * Finds the company lead the Scrum roles report to.
+     *
+     * The lead is an ordinary agent with role `ceo`. Without it the roles would
+     * sit beside the CEO in the org chart rather than underneath, because an
+     * empty `reportsTo` means "top level", not "reports to the lead".
+     */
+    async function findCompanyLead(): Promise<string | null> {
+      if (!companyId) return null;
+
+      try {
+        const agents = await ctx.agents.list({ companyId });
+        return agents.find((a) => a.role === "ceo")?.id ?? null;
+      } catch (error) {
+        ctx.logger.warn("Could not look up the company lead", { error: String(error) });
+        return null;
+      }
+    }
+
+    /**
      * Creates the Scrum team from the manifest declarations and adopts it.
      *
      * Declaring managed agents is not enough — the host only materialises them
@@ -200,6 +220,7 @@ const plugin = definePlugin({
     async function reconcileTeam(): Promise<void> {
       if (!companyId) return;
 
+      const companyLeadId = await findCompanyLead();
       const team: WorkerState["agents"] = [];
       const resolved = new Map<string, { agentId: string; reportsTo: string | null }>();
 
@@ -249,10 +270,10 @@ const plugin = definePlugin({
       // API has no way to give them one. If the operator supplied credentials
       // we set the reporting line over the host's REST API; otherwise we can
       // only surface the gap.
-      const drift = detectReportingDrift(resolved);
+      const drift = detectReportingDrift(resolved, companyLeadId);
       if (drift.length === 0) return;
 
-      const applied = await applyReportingLine(resolved, drift);
+      const applied = await applyReportingLine(resolved, drift, companyLeadId);
       if (!applied) {
         ctx.logger.warn("Reporting line differs from the intended hierarchy", {
           agents: drift.map((d) => `${d.displayName} should report to ${d.expected}`),
@@ -276,6 +297,7 @@ const plugin = definePlugin({
     async function applyReportingLine(
       resolved: Map<string, { agentId: string; reportsTo: string | null }>,
       drift: ReportingDrift[],
+      companyLeadId: string | null,
     ): Promise<boolean> {
       if (!companyId) return false;
 
@@ -296,9 +318,7 @@ const plugin = definePlugin({
         const target = resolved.get(entry.agentKey);
         if (!member || !target) continue;
 
-        // `null` means the company lead, which the plugin does not own — it can
-        // only clear a wrong superior, not point at the CEO.
-        const superiorId = member.reportsTo ? resolved.get(member.reportsTo)?.agentId ?? null : null;
+        const superiorId = expectedSuperiorId(member, resolved, companyLeadId);
 
         try {
           // Node's global fetch, not `ctx.http.fetch`. The host client applies

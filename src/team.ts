@@ -151,13 +151,33 @@ export interface ReportingDrift {
 }
 
 /**
+ * Resolves the agent a team member should report to.
+ *
+ * `reportsTo: null` means the company lead. That is an *agent* in the company
+ * (role `ceo`), not the absence of a superior — leaving the field empty puts
+ * the Scrum roles beside the CEO in the org chart instead of underneath.
+ *
+ * Returns `null` only when the company genuinely has no lead, in which case
+ * these roles really are top level.
+ */
+export function expectedSuperiorId(
+  member: TeamMember,
+  resolved: Map<string, { agentId: string; reportsTo: string | null }>,
+  companyLeadId: string | null,
+): string | null {
+  if (member.reportsTo === null) return companyLeadId;
+  return resolved.get(member.reportsTo)?.agentId ?? null;
+}
+
+/**
  * Compares the intended reporting line against what the host actually stored.
  *
- * Only reports drift the operator can act on: an agent whose superior is set
- * to something other than the intended one, or missing entirely.
+ * Only reports drift the operator can act on: an agent whose superior differs
+ * from the intended one.
  */
 export function detectReportingDrift(
   resolved: Map<string, { agentId: string; reportsTo: string | null }>,
+  companyLeadId: string | null = null,
 ): ReportingDrift[] {
   const drift: ReportingDrift[] = [];
 
@@ -165,30 +185,22 @@ export function detectReportingDrift(
     const actual = resolved.get(member.agentKey);
     if (!actual) continue;
 
-    if (member.reportsTo === null) {
-      // Reporting to the company lead is the host's default for a new agent;
-      // only a superior *inside* the team would be wrong here.
-      const inTeam = [...resolved.values()].some((r) => r.agentId === actual.reportsTo);
-      if (inTeam) {
-        drift.push({
-          agentKey: member.agentKey,
-          displayName: member.displayName,
-          expected: "the company lead",
-          actualAgentId: actual.reportsTo,
-        });
-      }
-      continue;
-    }
+    const expected = expectedSuperiorId(member, resolved, companyLeadId);
 
-    const superior = resolved.get(member.reportsTo);
-    if (superior && actual.reportsTo !== superior.agentId) {
-      drift.push({
-        agentKey: member.agentKey,
-        displayName: member.displayName,
-        expected: teamMember(member.reportsTo)?.displayName ?? member.reportsTo,
-        actualAgentId: actual.reportsTo,
-      });
-    }
+    // Nothing to compare against — the superior itself was not resolved, or
+    // the company has no lead and this role is genuinely top level.
+    if (expected === null && member.reportsTo !== null) continue;
+    if (expected === actual.reportsTo) continue;
+
+    drift.push({
+      agentKey: member.agentKey,
+      displayName: member.displayName,
+      expected:
+        member.reportsTo === null
+          ? "the company lead"
+          : teamMember(member.reportsTo)?.displayName ?? member.reportsTo,
+      actualAgentId: actual.reportsTo,
+    });
   }
 
   return drift;

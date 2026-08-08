@@ -11,6 +11,7 @@ import {
   TEAM,
   describeReportingLine,
   detectReportingDrift,
+  expectedSuperiorId,
   teamMember,
   type TeamAgentKey,
 } from "../team";
@@ -118,9 +119,28 @@ describe("detectReportingDrift", () => {
     expect(drift[0].actualAgentId).toBe("id-product-owner");
   });
 
-  it("accepts a null superior for roles that report to the company lead", () => {
-    // The plugin does not own the CEO, so "no superior" is not drift here
+  it("accepts a null superior when the company has no lead", () => {
+    // Without a CEO these roles genuinely are top level
     expect(detectReportingDrift(resolutions({ "product-owner": null }))).toEqual([]);
+  });
+
+  it("flags a lead-level role not reporting to the CEO", () => {
+    // An empty reportsTo puts the role *beside* the CEO in the org chart
+    const drift = detectReportingDrift(resolutions({ "product-owner": null }), "id-ceo");
+
+    expect(drift.map((d) => d.displayName)).toContain("Product Owner");
+    expect(drift.find((d) => d.displayName === "Product Owner")?.expected).toBe(
+      "the company lead",
+    );
+  });
+
+  it("accepts lead-level roles that already report to the CEO", () => {
+    const withCeo = resolutions();
+    for (const member of TEAM.filter((m) => m.reportsTo === null)) {
+      withCeo.set(member.agentKey, { agentId: `id-${member.agentKey}`, reportsTo: "id-ceo" });
+    }
+
+    expect(detectReportingDrift(withCeo, "id-ceo")).toEqual([]);
   });
 
   it("flags a lead-level role that reports into the team", () => {
@@ -128,6 +148,16 @@ describe("detectReportingDrift", () => {
 
     expect(drift).toHaveLength(1);
     expect(drift[0].expected).toBe("the company lead");
+  });
+
+  it("resolves the intended superior for each role", () => {
+    const map = resolutions();
+    const dev = TEAM.find((m) => m.agentKey === "developer-1")!;
+    const po = TEAM.find((m) => m.agentKey === "product-owner")!;
+
+    expect(expectedSuperiorId(dev, map, "id-ceo")).toBe("id-technical-lead");
+    expect(expectedSuperiorId(po, map, "id-ceo")).toBe("id-ceo");
+    expect(expectedSuperiorId(po, map, null)).toBeNull();
   });
 
   it("ignores members that were not resolved", () => {
