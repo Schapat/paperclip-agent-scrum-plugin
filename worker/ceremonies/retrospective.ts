@@ -23,6 +23,7 @@ import { createCeremonyRecord } from '@shared/factories';
 import { broadcast, findAgentByRole, sendMessage } from '../communication';
 import {
   collectCandidates,
+  collectInstructionUpdates,
   collectProposals,
   createSkill,
   findMatchingSkill,
@@ -262,6 +263,8 @@ export function runRetrospective(ctx: CeremonyContext): CeremonyRecord {
 
   // Aktivierte Skills betreffen konkrete Rollen — die erfahren es direkt
   const activated = [...newSkills, ...reinforced].filter((s) => s.active);
+  let instructionUpdates = 0;
+
   if (activated.length > 0) {
     const affectedRoles = new Set(activated.flatMap((s) => s.roles));
     const recipients = state.agents.filter((a) => affectedRoles.has(a.role));
@@ -277,6 +280,14 @@ export function runRetrospective(ctx: CeremonyContext): CeremonyRecord {
         ceremony: 'sprint_retrospective',
       }).id
     );
+
+    // Entscheidend: Der Skill wird erst dadurch wirksam, dass er in der
+    // AGENTS.md des Agents landet. Eine Nachricht allein ändert sein Verhalten
+    // bei der nächsten Aufgabe nicht.
+    for (const update of collectInstructionUpdates(state, affectedRoles)) {
+      ctx.updateAgentInstructions?.(update);
+      instructionUpdates += 1;
+    }
   }
 
   if (proposals.length > 0) {
@@ -321,7 +332,7 @@ export function runRetrospective(ctx: CeremonyContext): CeremonyRecord {
 
   const summary =
     `Retrospektive: ${learningIds.length} Learning(s), ` +
-    `${skillIds.length} Skill(s) (${activated.length} aktiv), ` +
+    `${skillIds.length} Skill(s) (${activated.length} aktiv, ${instructionUpdates} Instruktion(en) aktualisiert), ` +
     `${proposals.length} Story-Vorschlag/-Vorschläge, ` +
     `${retrospective.bottlenecks.length} Bottleneck(s).`;
 

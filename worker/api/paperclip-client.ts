@@ -473,7 +473,11 @@ export class PaperclipClient {
   }
 
   /**
-   * Update an existing agent's configuration
+   * Update an existing agent's configuration.
+   *
+   * `instructionsBundle` überschreibt die Instruktionsdateien des Agents —
+   * darüber fließen die in der Retrospektive gelernten Skills in seine
+   * `AGENTS.md` ein. Beim Hire wird dasselbe Feld verwendet.
    */
   async updateAgent(
     agentId: string,
@@ -486,6 +490,7 @@ export class PaperclipClient {
       adapterConfig: Record<string, unknown>;
       runtimeConfig: Record<string, unknown>;
       budgetMonthlyCents: number;
+      instructionsBundle: { files: Record<string, string> };
     }>
   ): Promise<PaperclipAgent> {
     return this.request<PaperclipAgent>('PATCH', `/api/agents/${agentId}`, params);

@@ -41,6 +41,7 @@ function createState(overrides: Partial<WorkerState> = {}): WorkerState {
     learnings: [],
     skills: [],
     proposedStories: [],
+    agentInstructions: {},
     ...overrides,
   };
 }

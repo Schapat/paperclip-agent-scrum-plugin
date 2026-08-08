@@ -31,7 +31,7 @@ const manifest = {
   // ==========================================================================
 
   name: 'Autonomous Scrum Team',
-  version: '1.2.0',
+  version: '1.3.0',
   description:
     'Vollständig autonomes Scrum-Team mit KI-Agents. Automatisiert Sprint-Planung, Daily Standups, Task-Bearbeitung und Retrospektiven.',
   author: 'Roblox Fabrik',

@@ -19,6 +19,17 @@ export {
 } from './extract';
 
 export {
+  SKILL_BLOCK_START,
+  SKILL_BLOCK_END,
+  renderSkillBlock,
+  stripSkillBlock,
+  applySkillBlock,
+  buildInstructionsForRole,
+  collectInstructionUpdates,
+  type InstructionUpdate,
+} from './instructions';
+
+export {
   collectProposals,
   proposeFromUnmetCriteria,
   proposeFromRisks,

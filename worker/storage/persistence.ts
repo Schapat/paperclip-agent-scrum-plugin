@@ -156,6 +156,7 @@ export function migrateState(raw: Partial<WorkerState>): Partial<WorkerState> {
     learnings: raw.learnings ?? [],
     skills: raw.skills ?? [],
     proposedStories: raw.proposedStories ?? [],
+    agentInstructions: raw.agentInstructions ?? {},
   };
 }
 

@@ -45,6 +45,8 @@ import { collectDecisions } from './communication';
 
 import { CeremonyTriggerEngine } from './triggers';
 
+import type { InstructionUpdate } from './learning';
+
 import {
   DebouncedSaver,
   clearState,
@@ -99,6 +101,7 @@ function createEmptyState(): WorkerState {
     learnings: [],
     skills: [],
     proposedStories: [],
+    agentInstructions: {},
   };
 }
 
@@ -117,6 +120,14 @@ let stateMachine: StateMachine | null = null;
 
 // Action Executor for bridging state machine to Paperclip API
 let actionExecutor: ActionExecutor | null = null;
+
+/**
+ * Paperclip-Client, sofern konfiguriert.
+ *
+ * Wird über den ActionExecutor hinaus gebraucht, um gelernte Skills in die
+ * Instruktionen der Agents zu schreiben.
+ */
+let paperclipClient: ReturnType<typeof createClientFromEnv> | null = null;
 
 // Plugin configuration (set during install)
 let pluginConfig: {
@@ -244,11 +255,13 @@ function initializeActionExecutor(): void {
     if (!apiUrl || !apiKey || !companyId) {
       console.log('[Worker] Paperclip API not configured, running in UI-only mode');
       actionExecutor = null;
+      paperclipClient = null;
       return;
     }
 
     // Create Paperclip client
     const client = createClientFromEnv();
+    paperclipClient = client;
 
     // Create action executor
     actionExecutor = createActionExecutor({
@@ -275,6 +288,7 @@ function initializeActionExecutor(): void {
   } catch (error) {
     console.warn('[Worker] Failed to initialize Action Executor:', error);
     actionExecutor = null;
+    paperclipClient = null;
   }
 }
 
@@ -573,7 +587,53 @@ function createCeremonyContext(): CeremonyContext {
         payload: request,
       });
     },
+    updateAgentInstructions: (update: InstructionUpdate) => {
+      void applyInstructionUpdate(update);
+    },
   };
+}
+
+/**
+ * Schreibt aktualisierte Instruktionen an einen Agent.
+ *
+ * Ohne API-Verbindung bleibt es bei der UI-Benachrichtigung — der neue Text
+ * steht dann trotzdem im State und wird beim nächsten Lauf mit Verbindung
+ * nachgezogen, weil er aus Basis + aktiven Skills jederzeit neu entsteht.
+ */
+async function applyInstructionUpdate(update: InstructionUpdate): Promise<void> {
+  postMessage({
+    type: 'AGENT_INSTRUCTIONS_UPDATED',
+    payload: {
+      agentId: update.agentId,
+      agentName: update.agentName,
+      role: update.role,
+      skillCount: update.skillIds.length,
+    },
+  });
+
+  if (!paperclipClient) {
+    console.log(
+      `[Skills] Keine API-Verbindung — Instruktionen für ${update.agentName} nur lokal aktualisiert`
+    );
+    return;
+  }
+
+  try {
+    await paperclipClient.updateAgent(update.agentId, {
+      instructionsBundle: { files: { 'AGENTS.md': update.instructions } },
+    });
+    console.log(
+      `[Skills] Instruktionen für ${update.agentName} aktualisiert (${update.skillIds.length} aktive Skills)`
+    );
+  } catch (error) {
+    // Ein fehlgeschlagenes Update darf die Retrospektive nicht abbrechen: die
+    // Skills bleiben im State und werden beim nächsten Lauf erneut geschrieben.
+    console.error(`[Skills] Instruktionen für ${update.agentName} nicht schreibbar:`, error);
+    postMessage({
+      type: 'AGENT_INSTRUCTIONS_FAILED',
+      payload: { agentId: update.agentId, error: String(error) },
+    });
+  }
 }
 
 /**
@@ -1188,6 +1248,13 @@ async function handlePluginInstall(payload: Record<string, unknown>): Promise<On
         currentTaskId: null,
         capabilities: [],
       }));
+    }
+
+    // Basis-Instruktionen merken: aus ihnen wird später Basis + gelernte Skills
+    // neu zusammengesetzt. Ohne sie ließe sich ein einmal eingefügter
+    // Skill-Abschnitt nicht sauber ersetzen.
+    for (const [role, text] of agentInstructions) {
+      state.agentInstructions[role] = text;
     }
 
     return result;

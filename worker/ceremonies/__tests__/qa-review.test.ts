@@ -34,6 +34,7 @@ function createState(): WorkerState {
     learnings: [],
     skills: [],
     proposedStories: [],
+    agentInstructions: {},
   };
 }
 

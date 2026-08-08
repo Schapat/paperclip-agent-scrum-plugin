@@ -24,6 +24,7 @@
 | QA-Review mit Feedback-Schleife | ✅ PASS | `qa-review.test.ts` — 10 Tests |
 | Agentenkommunikation & Entscheidungslog | ✅ PASS | `message-bus.test.ts` — 14 Tests |
 | Agenten-Log (Nachrichten + Entscheidungen) | ✅ PASS | `log-aggregation.test.ts` — 4 Tests |
+| Skills in den Agenten-Instruktionen | ✅ PASS | `instructions.test.ts` — 21 Tests |
 | Learnings & Skills aus der Retro | ✅ PASS | `learning.test.ts` — 30 Tests |
 | Impediment Resolution & Retro-Output | ✅ PASS | `impediment-retro.test.ts` — 14 Tests |
 | Event-Trigger der Zeremonien | ✅ PASS | `ceremony-triggers.test.ts` — 29 Tests |
@@ -33,7 +34,7 @@
 | Typecheck / Lint | ✅ PASS | 0 Errors (47 `no-console`-Warnings) |
 | Performance (Board-Update <100ms) | ⚠️ OFFEN | Nur im Live-Deployment messbar |
 
-**Gesamt: 413 Tests, ~84 % Statement-Coverage.**
+**Gesamt: 437 Tests, ~84 % Statement-Coverage.**
 
 ---
 
@@ -133,7 +134,7 @@ referenziert nun benannte Exports aus dem gebauten Library-Bundle.
 - **Der `AGENT_WORK_REQUESTED`-Pfad ist nur bis zur Worker-Grenze getestet.**
   Ob der Paperclip-Agent daraufhin tatsächlich Tickets anlegt, lässt sich erst
   gegen ein echtes Backend prüfen.
-- **48 `no-console`-Warnings** im Worker — bewusst belassen, das strukturierte
+- **50 `no-console`-Warnings** im Worker — bewusst belassen, das strukturierte
   Logging in `worker/utils/logger.ts` ist dort noch nicht durchgezogen.
 
 ---

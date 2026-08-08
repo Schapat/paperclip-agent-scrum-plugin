@@ -13,6 +13,7 @@ import { createDefaultSettings } from '@shared/types';
 import { createAcceptanceCriterion, createScrumTask } from '@shared/factories';
 import { runImpedimentResolution } from '../impediment-resolution';
 import { runRetrospective } from '../retrospective';
+import { SKILL_BLOCK_END, SKILL_BLOCK_START, type InstructionUpdate } from '../../learning';
 
 // =============================================================================
 // Fixtures
@@ -67,6 +68,7 @@ function createState(overrides: Partial<WorkerState> = {}): WorkerState {
     learnings: [],
     skills: [],
     proposedStories: [],
+    agentInstructions: {},
     ...overrides,
   };
 }
@@ -309,6 +311,65 @@ describe('Retrospektive erzeugt Learnings und Skills', () => {
 
     const fromOldSprint = state.learnings.some((l) => l.sourceTaskIds.includes('alt'));
     expect(fromOldSprint).toBe(false);
+  });
+
+  it('schreibt aktivierte Skills in die Instruktionen der betroffenen Agents', () => {
+    // Ohne Basis-Instruktionen gäbe es nichts zu ergänzen
+    state.agentInstructions = { developer: '# Developer\n\nDu implementierst Tickets.' };
+    state.tasks.push(rejected('a', 'Fehlerbehandlung getestet'), rejected('b', 'Fehlerbehandlung getestet'));
+
+    const updates: InstructionUpdate[] = [];
+    const ctx: CeremonyContext = {
+      state,
+      requestAgentWork: () => {},
+      updateAgentInstructions: (u) => updates.push(u),
+    };
+
+    runRetrospective(ctx);
+
+    const devUpdate = updates.find((u) => u.agentId === 'dev-1');
+    expect(devUpdate).toBeDefined();
+    // Der Skill steht jetzt im Text, an dem sich der Agent orientiert
+    expect(devUpdate!.instructions).toContain('Fehlerbehandlung getestet');
+    expect(devUpdate!.instructions).toContain('Du implementierst Tickets.');
+  });
+
+  it('aktualisiert keine Instruktionen ohne bekannte Basis', () => {
+    state.tasks.push(rejected('a', 'Tests'), rejected('b', 'Tests'));
+
+    const updates: InstructionUpdate[] = [];
+    runRetrospective({
+      state,
+      requestAgentWork: () => {},
+      updateAgentInstructions: (u) => updates.push(u),
+    });
+
+    expect(updates).toEqual([]);
+  });
+
+  it('dupliziert den Skill-Abschnitt über mehrere Retros nicht', () => {
+    state.agentInstructions = { developer: '# Developer\n\nDu implementierst Tickets.' };
+    state.tasks.push(rejected('a', 'Tests ergänzt'), rejected('b', 'Tests ergänzt'));
+
+    const updates: InstructionUpdate[] = [];
+    const ctx: CeremonyContext = {
+      state,
+      requestAgentWork: () => {},
+      updateAgentInstructions: (u) => updates.push(u),
+    };
+
+    runRetrospective(ctx);
+    runRetrospective(ctx);
+    runRetrospective(ctx);
+
+    for (const update of updates) {
+      // Der Inhalt darf wachsen, wenn neue Skills aktiv werden — der Abschnitt
+      // selbst muss aber genau einmal vorkommen, sonst liefe der Text voll
+      expect(update.instructions.split(SKILL_BLOCK_START)).toHaveLength(2);
+      expect(update.instructions.split(SKILL_BLOCK_END)).toHaveLength(2);
+      // Die Basis bleibt in jedem Durchlauf erhalten
+      expect(update.instructions).toContain('Du implementierst Tickets.');
+    }
   });
 
   it('kommt mit einem sauberen Sprint ohne Learnings zurecht', () => {

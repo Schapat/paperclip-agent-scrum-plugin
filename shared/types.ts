@@ -441,6 +441,14 @@ export interface WorkerState {
   skills: AgentSkill[];
   /** Von Review/Retro vorgeschlagene Backlog-Items */
   proposedStories: ProposedStory[];
+  /**
+   * Basis-Instruktionen je Rolle, wie sie beim Onboarding geladen wurden.
+   *
+   * Grundlage, um die Instruktionen eines Agents jederzeit neu zu bauen: Basis
+   * plus der aktuell aktiven Skills. Ohne die Basis ließe sich ein einmal
+   * eingefügter Skill-Abschnitt nicht sauber ersetzen.
+   */
+  agentInstructions: Record<string, string>;
 }
 
 /**

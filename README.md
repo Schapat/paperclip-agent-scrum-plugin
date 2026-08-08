@@ -2,9 +2,9 @@
 
 > KI-basiertes Scrum-Team mit Event-Driven Workflow und Live-Kanban-Board für Paperclip.
 
-![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)
+![Version](https://img.shields.io/badge/version-1.3.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
-![Tests](https://img.shields.io/badge/tests-413%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-437%20passing-brightgreen.svg)
 ![Coverage](https://img.shields.io/badge/coverage-84%25-yellow.svg)
 
 ## 🚀 Features
@@ -172,7 +172,7 @@ graph TB
 | **Worker-Brücke** | `ui/lib/worker-bridge.ts` | Transport UI ↔ Worker (Host-Bridge oder Web Worker) |
 | **Shared** | `shared/types.ts` | Type-Definitionen, Interfaces |
 | **Zeremonien** | `worker/ceremonies/` | Planning, Refinement, Impediments, Review, Retro, QA-Review |
-| **Learning** | `worker/learning/` | Learnings aus erledigten Tickets, Skills, Story-Vorschläge |
+| **Learning** | `worker/learning/` | Learnings, Skills, Story-Vorschläge, Einbettung in die Agenten-Instruktionen |
 | **Kommunikation** | `worker/communication/` | Agenten-Nachrichten, Entscheidungslog |
 | **Persistenz** | `worker/storage/` | State speichern, laden, migrieren |
 | **Event-Trigger** | `worker/triggers/` | Zustandsbasierte Auslösung der Zeremonien |
@@ -220,6 +220,8 @@ interface WorkerState {
   skills: AgentSkill[];
   /** Von Review/Retro vorgeschlagene Backlog-Items */
   proposedStories: ProposedStory[];
+  /** Basis-Instruktionen je Rolle — Grundlage für Basis + gelernte Skills */
+  agentInstructions: Record<string, string>;
 }
 ```
 
@@ -426,6 +428,34 @@ Anweisungen an. Wiederkehrende Erkenntnisse **bestärken** den vorhandenen Skill
 statt Duplikate anzulegen.
 
 Aktive Skills sind im Board unter *Agenten-Log → Learnings* einsehbar.
+
+#### Wie ein Skill wirksam wird
+
+Ein Skill im State ändert das Verhalten eines Agents noch nicht. Wirksam wird er
+erst, wenn er in seiner `AGENTS.md` steht — dem Text, an dem er sich bei jeder
+Aufgabe orientiert. Die Retrospektive schreibt ihn deshalb dorthin:
+
+```
+Basis-Instruktionen (aus agents/<rolle>.md, beim Onboarding geladen)
++ <!-- scrum-team:skills:start -->
+  ## Gelernte Arbeitsweisen
+  ### Qualität
+  - **Fehlerfälle testen** _(3× bestätigt)_
+    Vor der Übergabe ins Review sicherstellen: Fehlerbehandlung getestet
+  <!-- scrum-team:skills:end -->
+```
+
+Der Abschnitt ist durch Marker begrenzt und wird bei jeder Retrospektive
+**ersetzt**, nicht angehängt — sonst würde die Instruktionsdatei mit jedem
+Sprint weiter anwachsen und irgendwann das Kontextfenster des Agents auffressen.
+Die Basis-Instruktionen bleiben dabei unangetastet; sie liegen im State, damit
+sich der Text jederzeit sauber neu zusammensetzen lässt.
+
+Geschrieben wird über `PATCH /api/agents/:id` mit `instructionsBundle` — dasselbe
+Feld, über das die Instruktionen beim Anlegen des Agents gesetzt werden. Ohne
+API-Verbindung bleibt es bei einer lokalen Aktualisierung; da der Text jederzeit
+aus Basis + aktiven Skills neu entsteht, wird er beim nächsten Lauf mit
+Verbindung nachgezogen.
 
 ### Event-Trigger im Detail
 

@@ -12,6 +12,7 @@
  */
 
 import type { CeremonyType, ScrumTask, WorkerState } from '@shared/types';
+import type { InstructionUpdate } from '../learning/instructions';
 
 /**
  * Anforderung inhaltlicher Arbeit an einen KI-Agent.
@@ -35,6 +36,14 @@ export interface CeremonyContext {
   state: WorkerState;
   /** Fordert inhaltliche Arbeit von einem KI-Agent an */
   requestAgentWork?: (request: AgentWorkRequest) => void;
+  /**
+   * Schreibt neue Instruktionen an einen Agent.
+   *
+   * Darüber werden gelernte Skills wirksam: ohne Aktualisierung der
+   * `AGENTS.md` bliebe ein Skill reiner State und würde das Verhalten des
+   * Agents nicht verändern.
+   */
+  updateAgentInstructions?: (update: InstructionUpdate) => void;
 }
 
 /**
