@@ -1,0 +1,9 @@
+# esbuilds postinstall ersetzt bin/esbuild durch die native Binärdatei. pnpm
+# erzeugt den .bin-Shim aber schon vorher und ruft ihn über `node` auf — danach
+# scheitert jeder CLI-Aufruf mit "Invalid or unexpected token".
+#
+# Ohne das postinstall bleibt bin/esbuild der JS-Shim, der die passende
+# @esbuild/<platform>-Binärdatei zur Laufzeit selbst auflöst. Die JS-API
+# (vite, vitest) ist davon ohnehin nicht betroffen.
+allowBuilds:
+  esbuild: false

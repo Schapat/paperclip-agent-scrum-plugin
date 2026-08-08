@@ -1,0 +1,312 @@
+/**
+ * Styles für die Zeremonie-Leiste, Board-Hinweise und Dashboard-Widgets
+ */
+
+/* --------------------------------------------------------------------------
+   Zeremonie-Leiste
+   -------------------------------------------------------------------------- */
+
+.ceremony-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: var(--color-bg-secondary);
+  border-bottom: 1px solid var(--color-surface);
+}
+
+.ceremony-bar .btn-secondary {
+  padding: var(--spacing-xs) var(--spacing-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.ceremony-bar .btn-secondary:hover {
+  background: var(--color-surface-hover);
+}
+
+.ceremony-bar .btn-secondary:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* Zusammenfassung der zuletzt gelaufenen Zeremonie */
+.ceremony-last {
+  margin-left: auto;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  /* Lange Zusammenfassungen dürfen die Leiste nicht sprengen */
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------------------------
+   Board-Hinweise
+   -------------------------------------------------------------------------- */
+
+.board-notice {
+  padding: var(--spacing-sm) var(--spacing-md);
+  font-size: 13px;
+}
+
+.board-notice-error {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--color-error);
+  border-bottom: 1px solid var(--color-error);
+}
+
+/* --------------------------------------------------------------------------
+   Dashboard-Widgets
+   -------------------------------------------------------------------------- */
+
+.widget {
+  padding: var(--spacing-md);
+  background: var(--color-bg-secondary);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+}
+
+.widget h3 {
+  margin-bottom: var(--spacing-sm);
+  font-size: 14px;
+}
+
+.widget-meta {
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.widget-loading,
+.widget-empty {
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+
+.progress-bar {
+  height: 8px;
+  margin-bottom: var(--spacing-sm);
+  background: var(--color-surface);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: var(--color-success);
+  transition: width 0.3s ease;
+}
+
+.team-list {
+  display: grid;
+  gap: var(--spacing-xs);
+  list-style: none;
+}
+
+.team-member {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+  font-size: 13px;
+}
+
+.team-member-task {
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Statusfarbe als Punkt vor dem Namen */
+.team-member-name::before {
+  content: '●';
+  margin-right: var(--spacing-xs);
+  color: var(--color-text-muted);
+}
+
+.team-member-working .team-member-name::before {
+  color: var(--color-success);
+}
+
+.team-member-blocked .team-member-name::before {
+  color: var(--color-error);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-bar-fill {
+    transition: none;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Agenten-Log (Spec §7)
+   -------------------------------------------------------------------------- */
+
+.agent-log-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  justify-content: flex-end;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.agent-log {
+  display: flex;
+  flex-direction: column;
+  width: min(520px, 100%);
+  height: 100%;
+  padding: var(--spacing-md);
+  background: var(--color-bg);
+  border-left: 1px solid var(--color-surface);
+  overflow-y: auto;
+}
+
+.agent-log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--spacing-md);
+}
+
+.agent-log-filters {
+  display: flex;
+  gap: var(--spacing-xs);
+  margin-bottom: var(--spacing-md);
+}
+
+.agent-log-filter {
+  padding: var(--spacing-xs) var(--spacing-sm);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.agent-log-filter.is-active {
+  background: var(--color-primary);
+  color: #fff;
+}
+
+.agent-log-empty {
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+
+.agent-log-entries {
+  display: grid;
+  gap: var(--spacing-sm);
+  list-style: none;
+}
+
+.agent-log-entry {
+  padding: var(--spacing-sm);
+  background: var(--color-bg-secondary);
+  border-left: 3px solid var(--color-surface);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+/* Entscheidungen heben sich vom reinen Nachrichtenverkehr ab */
+.agent-log-entry.is-decision {
+  border-left-color: var(--color-warning);
+}
+
+.agent-log-entry-head {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  margin-bottom: var(--spacing-xs);
+  font-size: 12px;
+}
+
+.agent-log-actor {
+  font-weight: 600;
+}
+
+.agent-log-kind,
+.agent-log-time {
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+.agent-log-time {
+  margin-left: auto;
+}
+
+.agent-log-title {
+  font-weight: 600;
+}
+
+.agent-log-body,
+.agent-log-reasoning,
+.agent-log-ticket {
+  margin-top: var(--spacing-xs);
+  /* Nachrichten enthalten Zeilenumbrüche (z.B. Listen offener Kriterien) */
+  white-space: pre-wrap;
+}
+
+.agent-log-reasoning,
+.agent-log-ticket {
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+/* --------------------------------------------------------------------------
+   Learnings und Skills
+   -------------------------------------------------------------------------- */
+
+.learnings-panel {
+  display: grid;
+  gap: var(--spacing-lg);
+}
+
+.learnings-panel h3 {
+  margin-bottom: var(--spacing-sm);
+  font-size: 13px;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.learnings-list {
+  display: grid;
+  gap: var(--spacing-sm);
+  list-style: none;
+}
+
+.learning-item {
+  padding: var(--spacing-sm);
+  background: var(--color-bg-secondary);
+  border-left: 3px solid var(--color-surface);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+/* Aktive Skills gelten verbindlich — das soll man sehen */
+.learning-item.is-active {
+  border-left-color: var(--color-success);
+}
+
+.learning-title {
+  font-weight: 600;
+  margin-bottom: var(--spacing-xs);
+}
+
+.learning-body {
+  line-height: 1.5;
+}
+
+.learning-meta {
+  margin-top: var(--spacing-xs);
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
