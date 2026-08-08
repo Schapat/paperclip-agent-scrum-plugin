@@ -37,8 +37,16 @@ import {
   type ReportingDrift,
 } from "./team";
 
-/** Where the board lives in plugin state. */
-const STATE_SCOPE = { scopeKind: "instance", stateKey: "board" } as const;
+/**
+ * Where a company's board lives in plugin state.
+ *
+ * Scoped per company, not per instance: two organisations using this plugin
+ * each get their own board. An instance-wide key would have them share one,
+ * and switching organisation would overwrite the other's tickets.
+ */
+function boardScope(companyId: string) {
+  return { scopeKind: "company", scopeId: companyId, stateKey: "board" } as const;
+}
 
 /**
  * Creates an empty board.
@@ -85,14 +93,26 @@ const plugin = definePlugin({
     let teamReady = false;
 
     /**
-     * Loads the board.
+     * In-flight initialisation, shared by concurrent callers.
      *
-     * Plugin state is not company-scoped, so this part is safe to do at
-     * startup. Persisted state may come from an older plugin version and is
-     * migrated — otherwise a missing array would throw on the first ceremony.
+     * The host issues several `getData` requests at once when a page mounts.
+     * Without this, each one started its own reconcile: the parallel runs
+     * collided on the host's managed-resource inserts, and each overwrote
+     * `state.agents` with its own partial result — which is why the team showed
+     * up as two or four agents instead of six.
+     */
+    let readyPromise: Promise<void> | null = null;
+
+    /**
+     * Loads this company's board from plugin state.
+     *
+     * Persisted data may come from an older plugin version and is migrated —
+     * otherwise a missing array would throw on the first ceremony.
      */
     async function load(): Promise<void> {
-      const stored = await ctx.state.get(STATE_SCOPE);
+      if (!companyId) return;
+
+      const stored = await ctx.state.get(boardScope(companyId));
       if (stored && typeof stored === "object") {
         state = { ...state, ...migrateState(stored as Partial<WorkerState>) };
         state.metrics = recalculateMetrics(state);
@@ -107,11 +127,28 @@ const plugin = definePlugin({
      * first run.
      */
     async function ensureReady(scope: string | null | undefined): Promise<void> {
+      // Switching organisation means a different board and a different team.
       if (scope && scope !== companyId) {
         companyId = scope;
         teamReady = false;
+        readyPromise = null;
+        state = createEmptyState();
       }
       if (teamReady || !companyId) return;
+
+      // Concurrent callers wait on the same run instead of starting their own.
+      readyPromise ??= initialise().finally(() => {
+        readyPromise = null;
+      });
+
+      await readyPromise;
+    }
+
+    /**
+     * Loads this company's board and, if activated, creates the team.
+     */
+    async function initialise(): Promise<void> {
+      await load();
 
       // Creating six agents is a visible, budget-relevant change to someone
       // else's organisation. It only happens on an explicit opt-in — installing
@@ -126,6 +163,7 @@ const plugin = definePlugin({
 
       await reconcileTeam();
       teamReady = true;
+      await save();
     }
 
     /**
@@ -142,7 +180,8 @@ const plugin = definePlugin({
     }
 
     async function save(): Promise<void> {
-      await ctx.state.set(STATE_SCOPE, state);
+      if (!companyId) return;
+      await ctx.state.set(boardScope(companyId), state);
     }
 
     /**
@@ -522,12 +561,8 @@ const plugin = definePlugin({
       return { started: true, record };
     });
 
-    await load();
-
     ctx.logger.info("Agent Scrum loaded", {
-      tickets: state.tasks.length,
-      skills: state.skills.length,
-      note: "team is reconciled on the first company-scoped request",
+      note: "board and team are loaded on the first company-scoped request",
     });
   },
 

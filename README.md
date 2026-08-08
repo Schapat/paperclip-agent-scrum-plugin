@@ -403,6 +403,10 @@ call carrying company scope):
   Backlog Refinement** — the state-driven trigger chain works end to end.
 - **The reporting line is applied automatically:** after activation both
   developers report to the Technical Lead, everyone else to the company lead.
+- **Concurrent page loads are safe.** Three simultaneous `getData` calls produce
+  exactly six agents, not partial teams.
+- **Organisations are isolated.** Each company gets its own board and its own
+  opt-in; activating one leaves the other untouched.
 
 ## Known limitations
 
