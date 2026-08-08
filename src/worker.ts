@@ -66,33 +66,49 @@ const plugin = definePlugin({
     /**
      * Company the board belongs to.
      *
-     * Nearly every host call is company-scoped. The plugin resolves it once at
-     * startup rather than threading it through every call site.
+     * Deliberately not resolved at startup. The host only grants company scope
+     * inside an invocation it initiated (event, action, getData); a call made
+     * from `setup()` carries no invocation id and is rejected with
+     * "company context is required". So the company arrives with the first
+     * request instead — which is also the *correct* company, rather than
+     * whichever one happened to be listed first.
      */
     let companyId: string | null = null;
 
+    /** True once the team has been reconciled for `companyId`. */
+    let teamReady = false;
+
     /**
-     * Loads the board once at startup.
+     * Loads the board.
      *
-     * Persisted state may come from an older plugin version, so it is migrated
-     * before use — otherwise a missing array would throw on the first ceremony.
+     * Plugin state is not company-scoped, so this part is safe to do at
+     * startup. Persisted state may come from an older plugin version and is
+     * migrated — otherwise a missing array would throw on the first ceremony.
      */
     async function load(): Promise<void> {
-      try {
-        const companies = await ctx.companies.list({ limit: 1 });
-        companyId = companies[0]?.id ?? null;
-      } catch (error) {
-        ctx.logger.warn("Could not resolve company", { error: String(error) });
-      }
-
-      await reconcileTeam();
-
       const stored = await ctx.state.get(STATE_SCOPE);
       if (stored && typeof stored === "object") {
         state = { ...state, ...migrateState(stored as Partial<WorkerState>) };
         state.metrics = recalculateMetrics(state);
       }
-      await syncAgentsFromHost();
+    }
+
+    /**
+     * Binds the board to a company and prepares the team.
+     *
+     * Called from every host-initiated entry point, because that is the only
+     * context in which company-scoped calls are permitted. Cheap after the
+     * first run.
+     */
+    async function ensureReady(scope: string | null | undefined): Promise<void> {
+      if (scope && scope !== companyId) {
+        companyId = scope;
+        teamReady = false;
+      }
+      if (teamReady || !companyId) return;
+
+      await reconcileTeam();
+      teamReady = true;
     }
 
     async function save(): Promise<void> {
@@ -100,19 +116,44 @@ const plugin = definePlugin({
     }
 
     /**
-     * Creates the Scrum team from the manifest declarations.
+     * Creates the Scrum team from the manifest declarations and adopts it.
      *
      * Declaring managed agents is not enough — the host only materialises them
      * when the plugin reconciles each key. Reconciling is idempotent, so this
-     * runs on every start and repairs drift (renamed agent, changed
-     * instructions) without creating duplicates.
+     * runs whenever the company changes and repairs drift without creating
+     * duplicates.
+     *
+     * The board is built from the resolutions rather than from
+     * `ctx.agents.list()`: a company usually has agents this plugin does not
+     * own (a CEO, other teams). Listing them all would put strangers on the
+     * Scrum board and offer them for assignment.
      */
     async function reconcileTeam(): Promise<void> {
       if (!companyId) return;
 
+      const team: WorkerState["agents"] = [];
+
       for (const declared of ctx.manifest.agents ?? []) {
         try {
-          await ctx.agents.managed.reconcile(declared.agentKey, companyId);
+          const resolution = await ctx.agents.managed.reconcile(declared.agentKey, companyId);
+          const agent = resolution.agent;
+          if (!agent || !resolution.agentId) continue;
+
+          // Keep whatever the board already knew about this agent (current
+          // ticket, status) so a reconcile does not reset live assignment.
+          const existing = state.agents.find((a) => a.id === resolution.agentId);
+
+          team.push({
+            id: resolution.agentId,
+            name: agent.name ?? declared.displayName,
+            // The declared role is authoritative: assignment and ceremonies
+            // match on it, and the host may store a different one.
+            role: declared.role ?? agent.role ?? "developer",
+            status: existing?.status ?? "idle",
+            currentTaskId: existing?.currentTaskId ?? null,
+            capabilities: existing?.capabilities ?? [],
+            skills: existing?.skills,
+          });
         } catch (error) {
           ctx.logger.warn("Could not reconcile managed agent", {
             agentKey: declared.agentKey,
@@ -120,36 +161,13 @@ const plugin = definePlugin({
           });
         }
       }
-    }
 
-    /**
-     * Mirrors the host's agents into the board.
-     *
-     * The six Scrum agents are managed by Paperclip (declared in the manifest),
-     * so the host — not this plugin — owns their identity. Assignment needs
-     * their real IDs.
-     */
-    async function syncAgentsFromHost(): Promise<void> {
-      if (!companyId) return;
-
-      try {
-        const agents = await ctx.agents.list({ companyId });
-        if (!Array.isArray(agents) || agents.length === 0) return;
-
-        state.agents = agents.map((agent) => {
-          const existing = state.agents.find((a) => a.id === agent.id);
-          return {
-            id: agent.id,
-            name: agent.name ?? agent.id,
-            role: agent.role ?? "developer",
-            status: existing?.status ?? "idle",
-            currentTaskId: existing?.currentTaskId ?? null,
-            capabilities: existing?.capabilities ?? [],
-            skills: existing?.skills,
-          };
+      if (team.length > 0) {
+        state.agents = team;
+        ctx.logger.info("Scrum team ready", {
+          agents: team.length,
+          roles: team.map((a) => a.role).join(", "),
         });
-      } catch (error) {
-        ctx.logger.warn("Could not read agents from host", { error: String(error) });
       }
     }
 
@@ -263,12 +281,13 @@ const plugin = definePlugin({
     // Host events → board
     // -------------------------------------------------------------------------
 
-    ctx.events.on("issue.created", async () => {
-      await syncAgentsFromHost();
+    ctx.events.on("issue.created", async (event) => {
+      await ensureReady(event.companyId);
       await boardChanged();
     });
 
-    ctx.events.on("issue.updated", async () => {
+    ctx.events.on("issue.updated", async (event) => {
+      await ensureReady(event.companyId);
       await boardChanged();
     });
 
@@ -276,14 +295,17 @@ const plugin = definePlugin({
     // Data the UI reads
     // -------------------------------------------------------------------------
 
-    ctx.data.register("board", async () => ({
-      tasks: state.tasks,
-      agents: state.agents,
-      currentSprint: state.currentSprint,
-      metrics: state.metrics,
-      ceremonies: state.ceremonies,
-      settings: state.settings,
-    }));
+    ctx.data.register("board", async (params) => {
+      await ensureReady(params.companyId as string | undefined);
+      return {
+        tasks: state.tasks,
+        agents: state.agents,
+        currentSprint: state.currentSprint,
+        metrics: state.metrics,
+        ceremonies: state.ceremonies,
+        settings: state.settings,
+      };
+    });
 
     ctx.data.register("log", async (params) => ({
       messages: state.messages,
@@ -297,7 +319,9 @@ const plugin = definePlugin({
     // Actions the UI triggers
     // -------------------------------------------------------------------------
 
-    ctx.actions.register("createTask", async (params) => {
+    ctx.actions.register("createTask", async (params, context) => {
+      await ensureReady(context.companyId);
+
       const task = createScrumTask({
         title: String(params.title ?? "Untitled"),
         description: String(params.description ?? ""),
@@ -312,7 +336,9 @@ const plugin = definePlugin({
       return { task };
     });
 
-    ctx.actions.register("moveTask", async (params) => {
+    ctx.actions.register("moveTask", async (params, context) => {
+      await ensureReady(context.companyId);
+
       const task = state.tasks.find((t) => t.id === params.taskId);
       if (!task) return { moved: false, error: "Unknown ticket" };
 
@@ -331,7 +357,9 @@ const plugin = definePlugin({
       return { moved: true, task };
     });
 
-    ctx.actions.register("reviewTicket", async (params) => {
+    ctx.actions.register("reviewTicket", async (params, context) => {
+      await ensureReady(context.companyId);
+
       const result = reviewTicket(state, String(params.taskId), {
         metCriterionIds: params.metCriterionIds as string[] | undefined,
         notes: params.notes as string | undefined,
@@ -343,7 +371,9 @@ const plugin = definePlugin({
       return { reviewed: true, passed: result.passed, unmetCriteria: result.unmetCriteria };
     });
 
-    ctx.actions.register("runCeremony", async (params) => {
+    ctx.actions.register("runCeremony", async (params, context) => {
+      await ensureReady(context.companyId);
+
       const ceremony = params.ceremony as CeremonyType;
       if (!CEREMONIES[ceremony]) return { started: false, error: `Unknown ceremony: ${ceremony}` };
 
@@ -354,14 +384,11 @@ const plugin = definePlugin({
     });
 
     await load();
-    // Evaluate once at startup: after a restart the board should pick up where
-    // it left off rather than waiting for the next change.
-    await boardChanged();
 
-    ctx.logger.info("Agent Scrum ready", {
+    ctx.logger.info("Agent Scrum loaded", {
       tickets: state.tasks.length,
-      agents: state.agents.length,
       skills: state.skills.length,
+      note: "team is reconciled on the first company-scoped request",
     });
   },
 

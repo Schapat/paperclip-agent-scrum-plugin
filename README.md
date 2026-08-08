@@ -40,7 +40,7 @@ weight. The daily standup was removed for exactly that reason — see
 5. [Learning loop](#learning-loop) — how the team improves
 6. [Architecture](#architecture)
 7. [Development](#development)
-8. [Known limitations](#known-limitations)
+8. [Verified](#verified) and [Known limitations](#known-limitations)
 
 ---
 
@@ -86,10 +86,15 @@ Expected output:
 
 Open **Scrum Board** in the Paperclip navigation.
 
-This step matters. The plugin worker starts lazily — until something asks it
-for data it has not run, which also means the six agents do not exist yet.
-Opening the board starts the worker, which reconciles the managed agents
-declared in the manifest and then renders the board.
+This step matters. The six agents do not exist until the board is opened.
+
+The reason is a host rule worth knowing about: company-scoped calls are only
+permitted inside an invocation the host started — an event, an action, or a
+`getData` request. A call made from the worker's `setup()` carries no
+invocation id and is rejected with *"company context is required"*. So the
+plugin waits for the first request, takes the company from it, and reconciles
+the team then. That also means it always binds to the company you are actually
+looking at, instead of guessing.
 
 ### 5. Verify
 
@@ -307,18 +312,22 @@ Tests live next to the code they cover, under `src/core/**/__tests__/`.
 
 ---
 
+## Verified
+
+Against a live instance (`paperclipai plugin install`, then a `bridge:data`
+call carrying company scope):
+
+- Installs and reaches `ready`; registry, manifest and status health checks pass.
+- All six managed agents are created and adopted — and only those six. A company
+  usually has other agents (a CEO, other teams); they are deliberately not put
+  on the Scrum board.
+- Creating a ticket works, and an unrefined ticket **automatically triggers
+  Backlog Refinement** — the state-driven trigger chain works end to end.
+
 ## Known limitations
 
 Stated plainly, because the alternative is a README that lies:
 
-- **Agent reconciliation is not verified end-to-end.** The manifest declares
-  six managed agents and the worker reconciles them at startup. Installation
-  and health checks pass, but all six agents were not observed being created in
-  a live company — the worker starts lazily, so this happens on first board
-  open.
-- **Company selection is naive.** The worker takes the first company from
-  `ctx.companies.list()`. On an instance with several companies that may not be
-  the one you meant.
 - **Skills are delivered per invocation, not written into instructions.** The
   host has no API to rewrite a managed agent's instructions — managed agents
   are reconciled from the manifest. Active skills therefore travel with each
@@ -326,6 +335,11 @@ Stated plainly, because the alternative is a README that lies:
 - **The board is plugin-owned, not Paperclip issues.** Tickets live in plugin
   state. Making the board operate on Paperclip issues directly would be a
   rewrite, not a refactor.
+- **Agent wake-up is not observed.** `ctx.agents.invoke` is called when a
+  ceremony requests content, but whether the agents then produce user stories or
+  acceptance criteria was not watched end to end.
+- **Ceremony summaries and agent messages are in German.** The code, README and
+  comments are English; the operational text the agents read is not yet.
 - **No performance measurements.** Nothing here has been profiled under load.
 
 ---
