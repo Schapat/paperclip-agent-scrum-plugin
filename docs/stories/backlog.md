@@ -42,3 +42,4 @@
 | FE-009 | Feature | Kompakten Onboarding-Pfad fuer Kleinimplementierungen anbieten | Erledigt | 2026-08-09 |
 | DF-027 | Defekt | Aktive Sprints ohne nachtraegliche Human-Approvals ausfuehren | Erledigt | 2026-08-09 |
 | OP-004 | Betrieb | README und Plugin-Aenderungen veroeffentlichen | Erledigt | 2026-08-09 |
+| DF-028 | Defekt | Lokale Plugin-Instanz aktualisiert Sprintautonomie nicht | Erledigt | 2026-08-09 |

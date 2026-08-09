@@ -111,6 +111,12 @@ For a local-path installation, Paperclip retains the package binding and reloads
 the rebuilt `dist/` files. The upgrade preserves organisation-scoped plugin
 configuration and state.
 
+Pushing commits to Git does not reload a running local Paperclip instance. After
+each local upgrade, open the Scrum Board once for every affected organisation.
+That board request reconciles existing managed-agent instruction bundles, so new
+workflow rules such as active-sprint autonomy take effect for agents that were
+already created.
+
 ### 4. Activate the team for your organisation
 
 Installing the plugin does **not** create agents. Creating six agents is a
