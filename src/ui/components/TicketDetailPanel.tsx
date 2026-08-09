@@ -51,6 +51,10 @@ export interface TicketDetailPanelProps {
   agents?: Array<Pick<ScrumAgent, 'id' | 'name' | 'role'>>;
   /** Resolves a human product decision through the board workflow. */
   onResolveProductDecision?: (taskId: string) => Promise<boolean>;
+  /** Gibt eine abgeschlossene Technical-Lead-Analyse frei und startet die Story Discovery. */
+  onApproveTechnicalAnalysis?: () => Promise<boolean>;
+  /** Gibt eine abgeschlossene Technical-Lead-Analyse mit Human-Feedback zurueck. */
+  onRejectTechnicalAnalysis?: (reason: string) => Promise<boolean>;
 }
 
 export interface Comment {
@@ -165,6 +169,8 @@ export function TicketDetailPanel({
   allTasks,
   agents = [],
   onResolveProductDecision,
+  onApproveTechnicalAnalysis,
+  onRejectTechnicalAnalysis,
 }: TicketDetailPanelProps) {
   // ---------------------------------------------------------------------------
   // State
@@ -179,6 +185,10 @@ export function TicketDetailPanel({
   const [isLoadingCommitChanges, setIsLoadingCommitChanges] = useState(false);
   const [isResolvingProductDecision, setIsResolvingProductDecision] = useState(false);
   const [productDecisionError, setProductDecisionError] = useState<string | null>(null);
+  const [analysisRevisionReason, setAnalysisRevisionReason] = useState('');
+  const [isApprovingTechnicalAnalysis, setIsApprovingTechnicalAnalysis] = useState(false);
+  const [isRejectingTechnicalAnalysis, setIsRejectingTechnicalAnalysis] = useState(false);
+  const [technicalAnalysisError, setTechnicalAnalysisError] = useState<string | null>(null);
 
   // Refs for focus management
   const panelRef = useRef<HTMLDivElement>(null);
@@ -274,6 +284,8 @@ export function TicketDetailPanel({
     setCommitChanges({});
     setActiveTab('overview');
     setProductDecisionError(null);
+    setAnalysisRevisionReason('');
+    setTechnicalAnalysisError(null);
   }, [task?.id]);
 
   // ---------------------------------------------------------------------------
@@ -376,6 +388,9 @@ export function TicketDetailPanel({
       task.comments.some((comment) => comment.body.includes(PRODUCT_DECISION_REQUIRED_MARKER)) &&
       !task.comments.some((comment) => comment.body.includes(PRODUCT_DECISION_RESOLVED_MARKER))
   );
+  const hasPendingTechnicalAnalysisApproval = Boolean(
+    task && onApproveTechnicalAnalysis && onRejectTechnicalAnalysis
+  );
 
   const handleResolveProductDecision = async () => {
     if (!task || !onResolveProductDecision) return;
@@ -390,6 +405,50 @@ export function TicketDetailPanel({
       setProductDecisionError(error instanceof Error ? error.message : 'Die Produktentscheidung konnte nicht freigegeben werden.');
     } finally {
       setIsResolvingProductDecision(false);
+    }
+  };
+
+  const handleApproveTechnicalAnalysis = async () => {
+    if (!onApproveTechnicalAnalysis) return;
+
+    setIsApprovingTechnicalAnalysis(true);
+    setTechnicalAnalysisError(null);
+    try {
+      if (!await onApproveTechnicalAnalysis()) {
+        setTechnicalAnalysisError('The technical analysis could not be approved.');
+      }
+    } catch (error) {
+      setTechnicalAnalysisError(
+        error instanceof Error ? error.message : 'The technical analysis could not be approved.'
+      );
+    } finally {
+      setIsApprovingTechnicalAnalysis(false);
+    }
+  };
+
+  const handleRejectTechnicalAnalysis = async () => {
+    if (!onRejectTechnicalAnalysis) return;
+
+    const reason = analysisRevisionReason.trim();
+    if (!reason) {
+      setTechnicalAnalysisError('Describe the changes needed from the Technical Lead.');
+      return;
+    }
+
+    setIsRejectingTechnicalAnalysis(true);
+    setTechnicalAnalysisError(null);
+    try {
+      if (await onRejectTechnicalAnalysis(reason)) {
+        setAnalysisRevisionReason('');
+      } else {
+        setTechnicalAnalysisError('The technical analysis could not be returned for revision.');
+      }
+    } catch (error) {
+      setTechnicalAnalysisError(
+        error instanceof Error ? error.message : 'The technical analysis could not be returned for revision.'
+      );
+    } finally {
+      setIsRejectingTechnicalAnalysis(false);
     }
   };
 
@@ -487,6 +546,50 @@ export function TicketDetailPanel({
               {isResolvingProductDecision ? 'Freigabe wird gespeichert...' : 'Produktentscheidung freigeben'}
             </button>
             {productDecisionError && <p className="ticket-detail-approval-error" role="alert">{productDecisionError}</p>}
+          </section>
+        )}
+
+        {hasPendingTechnicalAnalysisApproval && (
+          <section className="ticket-detail-approval" aria-label="Technical analysis approval">
+            <div>
+              <h3 className="ticket-detail-section-title">Technical analysis ready for approval</h3>
+              <p>
+                Approve this analysis to start Product Owner story discovery, or request concrete changes from the
+                Technical Lead.
+              </p>
+            </div>
+            <button
+              className="btn btn-primary"
+              type="button"
+              disabled={isApprovingTechnicalAnalysis || isRejectingTechnicalAnalysis}
+              onClick={() => void handleApproveTechnicalAnalysis()}
+            >
+              {isApprovingTechnicalAnalysis ? 'Approving analysis...' : 'Approve technical analysis'}
+            </button>
+            <label className="ticket-detail-approval-revision">
+              <span>Changes requested</span>
+              <textarea
+                value={analysisRevisionReason}
+                onChange={(event) => setAnalysisRevisionReason(event.target.value)}
+                placeholder="Describe what the Technical Lead should clarify or revise"
+                disabled={isApprovingTechnicalAnalysis || isRejectingTechnicalAnalysis}
+              />
+            </label>
+            <button
+              className="btn btn-secondary"
+              type="button"
+              disabled={
+                !analysisRevisionReason.trim() || isApprovingTechnicalAnalysis || isRejectingTechnicalAnalysis
+              }
+              onClick={() => void handleRejectTechnicalAnalysis()}
+            >
+              {isRejectingTechnicalAnalysis ? 'Requesting changes...' : 'Request changes'}
+            </button>
+            {technicalAnalysisError && (
+              <p className="ticket-detail-approval-error" role="alert">
+                {technicalAnalysisError}
+              </p>
+            )}
           </section>
         )}
 

@@ -20,7 +20,7 @@ interface ProjectOnboardingPanelProps {
   canStartSprint: boolean;
   scopeHoldBusyId: string | null;
   onStart: (input: { projectId: string; brief: string; constraints: string }) => Promise<void>;
-  onStartBacklogDiscovery: () => Promise<void>;
+  onStartBacklogDiscovery: () => Promise<boolean>;
   onActivate: () => Promise<void>;
   onStartSprint: () => Promise<void>;
   onApproveScopeHold: (issueId: string) => Promise<void>;
@@ -114,7 +114,7 @@ export function ProjectOnboardingPanel({
   }
 
   const action = onboarding.status === "analysis_ready"
-    ? { label: "Start story discovery", run: onStartBacklogDiscovery }
+    ? { label: "Approve technical analysis", run: onStartBacklogDiscovery }
     : onboarding.status === "backlog_in_progress"
       ? {
           label: onboarding.requiresSprint ? "Approve backlog for sprint planning" : "Approve backlog",
@@ -126,6 +126,7 @@ export function ProjectOnboardingPanel({
         ? { label: "Start next project request", run: () => setStartingNextProject(true) }
       : null;
   const analysisInProgress = onboarding.status === "analysis_in_progress";
+  const analysisReady = onboarding.status === "analysis_ready";
   const sprintPlanning = onboarding.status === "sprint_planning";
   const projectCompleted = onboarding.status === "completed";
   const canApproveScope =
@@ -146,7 +147,11 @@ export function ProjectOnboardingPanel({
             <button className="project-onboarding-kickoff" type="button" onClick={onOpenKickoff}>
               <span className="project-onboarding-kickoff-kind">Kickoff ticket</span>
               <strong>Kickoff: {onboarding.projectName}</strong>
-              <span>Open the Technical Lead analysis and workflow</span>
+              <span>
+                {analysisReady
+                  ? "Review the Technical Lead analysis and decide"
+                  : "Open the Technical Lead analysis and workflow"}
+              </span>
             </button>
           ) : (
             <div className="project-onboarding-kickoff">
@@ -253,7 +258,7 @@ function stageLabel(status: ProjectOnboarding["status"], hostControlled: boolean
     case "analysis_in_progress":
       return "Technical analysis in progress";
     case "analysis_ready":
-      return "Technical analysis ready for review";
+      return "Technical analysis ready for approval";
     case "backlog_in_progress":
       return "Product Owner is preparing the first backlog";
     case "sprint_planning":

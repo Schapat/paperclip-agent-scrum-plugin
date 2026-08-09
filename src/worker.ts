@@ -10,7 +10,13 @@
  * `src/core/triggers/ceremony-triggers.ts`.
  */
 
-import { definePlugin, runWorker, type Issue, type PluginContext } from "@paperclipai/plugin-sdk";
+import {
+  definePlugin,
+  runWorker,
+  type Issue,
+  type PluginContext,
+  type PluginEvent,
+} from "@paperclipai/plugin-sdk";
 
 import {
   MANAGED_AGENT_INSTRUCTIONS,
@@ -29,6 +35,7 @@ import {
   isTechnicalAnalysisComplete,
   parseProjectOnboardingInput,
   startProjectOnboarding,
+  TECHNICAL_ANALYSIS_CHANGES_REQUESTED_MARKER,
   transitionProjectOnboarding,
 } from "./core/project-onboarding";
 import { projectIssueDetailTask, syncProjectOnboardingIssue } from "./core/project-issue-sync";
@@ -124,16 +131,11 @@ const plugin = definePlugin({
     /** True once the team has been reconciled for `companyId`. */
     let teamReady = false;
 
-    /**
-     * In-flight initialisation, shared by concurrent callers.
-     *
-     * The host issues several `getData` requests at once when a page mounts.
-     * Without this, each one started its own reconcile: the parallel runs
-     * collided on the host's managed-resource inserts, and each overwrote
-     * `state.agents` with its own partial result — which is why the team showed
-     * up as two or four agents instead of six.
-     */
-    let readyPromise: Promise<void> | null = null;
+    /** Serializes access to the worker's single mutable company context. */
+    let companyInvocationTail: Promise<void> = Promise.resolve();
+
+    /** Shares idempotent board actions that arrive before the first invocation completes. */
+    const coalescedActions = new Map<string, Promise<unknown>>();
 
     /**
      * Loads this company's board from plugin state.
@@ -163,17 +165,80 @@ const plugin = definePlugin({
       if (scope && scope !== companyId) {
         companyId = scope;
         teamReady = false;
-        readyPromise = null;
         state = createEmptyState();
       }
       if (teamReady || !companyId) return;
 
-      // Concurrent callers wait on the same run instead of starting their own.
-      readyPromise ??= initialise().finally(() => {
-        readyPromise = null;
+      await initialise();
+    }
+
+    /**
+     * Runs a complete host invocation without another company changing the
+     * mutable board context while an awaited host call is in flight.
+     */
+    async function withCompanyInvocation<T>(
+      scope: unknown,
+      operation: () => Promise<T>
+    ): Promise<T> {
+      const previousInvocation = companyInvocationTail;
+      let releaseInvocation: (() => void) | undefined;
+      companyInvocationTail = new Promise<void>((resolve) => {
+        releaseInvocation = resolve;
       });
 
-      await readyPromise;
+      await previousInvocation;
+      try {
+        await ensureReady(typeof scope === "string" ? scope : undefined);
+        return await operation();
+      } finally {
+        releaseInvocation?.();
+      }
+    }
+
+    function registerCompanyData(
+      key: string,
+      handler: Parameters<PluginContext["data"]["register"]>[1]
+    ): void {
+      ctx.data.register(key, (params) =>
+        withCompanyInvocation(params.companyId, () => handler(params))
+      );
+    }
+
+    function registerCompanyEvent(
+      name: Parameters<PluginContext["events"]["on"]>[0],
+      handler: (event: PluginEvent) => Promise<void>
+    ): void {
+      ctx.events.on(name, (event) =>
+        withCompanyInvocation(event.companyId, () => handler(event))
+      );
+    }
+
+    function registerCompanyAction(
+      key: string,
+      handler: Parameters<PluginContext["actions"]["register"]>[1],
+      options: { coalesceByCompany?: boolean } = {}
+    ): void {
+      ctx.actions.register(key, (params, context) => {
+        const run = () => withCompanyInvocation(context.companyId, () => handler(params, context));
+        if (!options.coalesceByCompany) return run();
+
+        const companyKey = typeof context.companyId === "string" ? context.companyId : "unknown";
+        const actionKey = `${key}:${companyKey}`;
+        const existing = coalescedActions.get(actionKey);
+        if (existing) return existing;
+
+        const result = run();
+        coalescedActions.set(actionKey, result);
+        void result.then(
+          () => {
+            if (coalescedActions.get(actionKey) === result) coalescedActions.delete(actionKey);
+          },
+          () => {
+            if (coalescedActions.get(actionKey) === result) coalescedActions.delete(actionKey);
+          }
+        );
+        return result;
+      });
     }
 
     /**
@@ -1632,20 +1697,17 @@ const plugin = definePlugin({
     // Host events → board
     // -------------------------------------------------------------------------
 
-    ctx.events.on("issue.created", async (event) => {
-      await ensureReady(event.companyId);
+    registerCompanyEvent("issue.created", async (event) => {
       if (await holdUnscopedManagedIssue(event)) return;
       if (!(await syncOnboardingIssue(event))) await boardChanged();
     });
 
-    ctx.events.on("issue.updated", async (event) => {
-      await ensureReady(event.companyId);
+    registerCompanyEvent("issue.updated", async (event) => {
       if (await holdUnscopedManagedIssue(event)) return;
       if (!(await syncOnboardingIssue(event))) await boardChanged();
     });
 
-    ctx.events.on("issue.comment.created", async (event) => {
-      await ensureReady(event.companyId);
+    registerCompanyEvent("issue.comment.created", async (event) => {
       const issueId = issueIdFromEvent(event);
       if (issueId) {
         await syncOnboardingIssue({
@@ -1662,8 +1724,7 @@ const plugin = definePlugin({
     // Data the UI reads
     // -------------------------------------------------------------------------
 
-    ctx.data.register("board", async (params) => {
-      await ensureReady(params.companyId as string | undefined);
+    registerCompanyData("board", async (params) => {
       await refreshTechnicalAnalysisStatus();
       await syncOnboardingProjectIssues();
       const rootIssueId = state.projectOnboarding?.rootIssueId;
@@ -1686,15 +1747,14 @@ const plugin = definePlugin({
       };
     });
 
-    ctx.data.register("projects", async (params) => {
-      await ensureReady(params.companyId as string | undefined);
+    registerCompanyData("projects", async () => {
       if (!companyId) return [];
 
       const projects = await ctx.projects.list({ companyId });
       return projects.map((project) => ({ id: project.id, name: project.name }));
     });
 
-    ctx.data.register("log", async (params) => ({
+    registerCompanyData("log", async (params) => ({
       messages: state.messages,
       decisions: collectDecisions(state, Number(params.limit ?? 100)),
       learnings: state.learnings,
@@ -1706,8 +1766,7 @@ const plugin = definePlugin({
     // Actions the UI triggers
     // -------------------------------------------------------------------------
 
-    ctx.actions.register("createTask", async (params, context) => {
-      await ensureReady(context.companyId);
+    registerCompanyAction("createTask", async (params) => {
 
       const task = createScrumTask({
         title: String(params.title ?? "Untitled"),
@@ -1723,18 +1782,19 @@ const plugin = definePlugin({
       return { task };
     });
 
-    ctx.actions.register("requestProjectRefinement", async (_params, context) => {
-      await ensureReady(context.companyId);
-      return requestProjectRefinement();
-    });
+    registerCompanyAction(
+      "requestProjectRefinement",
+      async () => requestProjectRefinement(),
+      { coalesceByCompany: true }
+    );
 
-    ctx.actions.register("retryProjectRefinement", async (_params, context) => {
-      await ensureReady(context.companyId);
-      return requestProjectRefinement("manual", true);
-    });
+    registerCompanyAction(
+      "retryProjectRefinement",
+      async () => requestProjectRefinement("manual", true),
+      { coalesceByCompany: true }
+    );
 
-    ctx.actions.register("startProjectOnboarding", async (params, context) => {
-      await ensureReady(context.companyId);
+    registerCompanyAction("startProjectOnboarding", async (params) => {
       if (!companyId) return { started: false, error: "No company context." };
       if (!canStartProjectOnboarding()) {
         return {
@@ -1811,8 +1871,7 @@ const plugin = definePlugin({
       };
     });
 
-    ctx.actions.register("fetchTicketCommitChanges", async (params, context) => {
-      await ensureReady(context.companyId);
+    registerCompanyAction("fetchTicketCommitChanges", async (params) => {
       if (!companyId) return { valid: false, error: "No company context." };
 
       await syncOnboardingProjectIssues();
@@ -1835,8 +1894,7 @@ const plugin = definePlugin({
       return fetchGitHubCommitChanges(repository, commit.sha, { token });
     });
 
-    ctx.actions.register("startBacklogDiscovery", async (_params, context) => {
-      await ensureReady(context.companyId);
+    registerCompanyAction("startBacklogDiscovery", async () => {
       if (!companyId) return { started: false, error: "No company context." };
 
       await refreshTechnicalAnalysisStatus();
@@ -1869,12 +1927,75 @@ const plugin = definePlugin({
       state.projectOnboarding = next;
       await save();
 
+      let commentError: string | null = null;
+      try {
+        await ctx.issues.createComment(
+          onboarding.rootIssueId,
+          "## Technical analysis approved\n\nA human approved the Technical Lead analysis and started Product Owner story discovery.",
+          companyId
+        );
+      } catch (error) {
+        commentError = String(error);
+        ctx.logger.warn("Could not record technical analysis approval", {
+          issueId: onboarding.rootIssueId,
+          error: commentError,
+        });
+      }
+
       const wakeup = await requestIssueWakeup(onboarding.rootIssueId, "project_onboarding_backlog");
-      return { started: true, projectOnboarding: state.projectOnboarding, wakeup };
+      return { started: true, projectOnboarding: state.projectOnboarding, wakeup, commentError };
     });
 
-    ctx.actions.register("activateProjectOnboarding", async (_params, context) => {
-      await ensureReady(context.companyId);
+    registerCompanyAction("rejectTechnicalAnalysis", async (params) => {
+      if (!companyId) return { rejected: false, error: "No company context." };
+
+      const onboarding = state.projectOnboarding;
+      if (!onboarding || onboarding.status !== "analysis_ready" || !onboarding.rootIssueId) {
+        return {
+          rejected: false,
+          error: "Wait for a completed Technical Lead analysis before requesting changes.",
+        };
+      }
+
+      const reason = typeof params.reason === "string" ? params.reason.trim() : "";
+      if (!reason) {
+        return { rejected: false, error: "Describe the requested analysis changes." };
+      }
+
+      const technicalLead = state.agents.find((agent) => agent.role === "technical_lead");
+      if (!technicalLead) return { rejected: false, error: "The Technical Lead is not available." };
+
+      try {
+        await ctx.issues.createComment(
+          onboarding.rootIssueId,
+          [
+            "## Technical analysis changes requested",
+            "A human requested changes before Product Owner story discovery.",
+            reason,
+            TECHNICAL_ANALYSIS_CHANGES_REQUESTED_MARKER,
+          ].join("\n\n"),
+          companyId
+        );
+        await ctx.issues.update(
+          onboarding.rootIssueId,
+          { status: "todo", assigneeAgentId: technicalLead.id },
+          companyId
+        );
+      } catch (error) {
+        ctx.logger.warn("Could not return technical analysis for revision", {
+          issueId: onboarding.rootIssueId,
+          error: String(error),
+        });
+        return { rejected: false, error: String(error) };
+      }
+
+      state.projectOnboarding = transitionProjectOnboarding(onboarding, "analysis_in_progress");
+      await save();
+      const wakeup = await requestIssueWakeup(onboarding.rootIssueId, "project_onboarding_analysis_revision");
+      return { rejected: true, projectOnboarding: state.projectOnboarding, wakeup };
+    });
+
+    registerCompanyAction("activateProjectOnboarding", async () => {
       if (!companyId) return { activated: false, error: "No company context." };
 
       const onboarding = state.projectOnboarding;
@@ -1924,8 +2045,7 @@ const plugin = definePlugin({
       };
     });
 
-    ctx.actions.register("startProjectSprint", async (_params, context) => {
-      await ensureReady(context.companyId);
+    registerCompanyAction("startProjectSprint", async () => {
       if (!companyId) return { started: false, error: "No company context." };
 
       await syncOnboardingProjectIssues();
@@ -1974,8 +2094,7 @@ const plugin = definePlugin({
       };
     });
 
-    ctx.actions.register("resolveProductDecision", async (params, context) => {
-      await ensureReady(context.companyId);
+    registerCompanyAction("resolveProductDecision", async (params) => {
       if (!companyId) return { resolved: false, error: "No company context." };
 
       const taskId = typeof params.taskId === "string" ? params.taskId : "";
@@ -2015,8 +2134,7 @@ const plugin = definePlugin({
       }
     });
 
-    ctx.actions.register("approveScopeHold", async (params, context) => {
-      await ensureReady(context.companyId);
+    registerCompanyAction("approveScopeHold", async (params) => {
       if (!companyId) return { approved: false, error: "No company context." };
 
       const issueId = typeof params.issueId === "string" ? params.issueId : "";
@@ -2100,8 +2218,7 @@ const plugin = definePlugin({
       }
     });
 
-    ctx.actions.register("startScopeHoldFollowUp", async (params, context) => {
-      await ensureReady(context.companyId);
+    registerCompanyAction("startScopeHoldFollowUp", async (params) => {
       if (!companyId) return { started: false, error: "No company context." };
 
       const issueId = typeof params.issueId === "string" ? params.issueId : "";
@@ -2224,8 +2341,7 @@ const plugin = definePlugin({
       }
     });
 
-    ctx.actions.register("moveTask", async (params, context) => {
-      await ensureReady(context.companyId);
+    registerCompanyAction("moveTask", async (params) => {
 
       const task = state.tasks.find((t) => t.id === params.taskId);
       if (!task) return { moved: false, error: "Unknown ticket" };
@@ -2251,8 +2367,7 @@ const plugin = definePlugin({
       return { moved: true, task };
     });
 
-    ctx.actions.register("reviewTicket", async (params, context) => {
-      await ensureReady(context.companyId);
+    registerCompanyAction("reviewTicket", async (params) => {
 
       const task = state.tasks.find((entry) => entry.id === String(params.taskId));
       if (task && isProjectBackedTask(task)) {
@@ -2273,8 +2388,7 @@ const plugin = definePlugin({
       return { reviewed: true, passed: result.passed, unmetCriteria: result.unmetCriteria };
     });
 
-    ctx.actions.register("runCeremony", async (params, context) => {
-      await ensureReady(context.companyId);
+    registerCompanyAction("runCeremony", async (params) => {
 
       const ceremony = params.ceremony as CeremonyType;
       if (!CEREMONIES[ceremony]) return { started: false, error: `Unknown ceremony: ${ceremony}` };

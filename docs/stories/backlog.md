@@ -30,3 +30,5 @@
 | FE-008 | Feature | GitHub-Commitnachweise, Code-Diffs und Host-Repository-Verknüpfung für Projektaufträge | Erledigt | 2026-08-09 |
 | OP-002 | Betrieb | README, Release-Commit und lokale Plugin-Aktualisierung | Erledigt | 2026-08-09 |
 | DF-018 | Defekt | Projekt-Onboarding darf keine GitHub-Actions-Pipeline erzwingen | Erledigt | 2026-08-09 |
+| DF-019 | Defekt | Kickoff-Analyse im initialen Setup im Kanban oeffnen und entscheiden | Erledigt | 2026-08-09 |
+| DF-020 | Defekt | Board-Zustand bei parallelen Company-Invocations isolieren | Erledigt | 2026-08-09 |

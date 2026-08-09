@@ -3,7 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import manifest from '../manifest';
 import plugin from '../worker';
-import { TECHNICAL_ANALYSIS_COMPLETION_MARKER } from '../core/project-onboarding';
+import {
+  createInitialProjectOnboarding,
+  TECHNICAL_ANALYSIS_CHANGES_REQUESTED_MARKER,
+  TECHNICAL_ANALYSIS_COMPLETION_MARKER,
+} from '../core/project-onboarding';
 import {
   PRODUCT_DECISION_REQUIRED_MARKER,
   PRODUCT_DECISION_RESOLVED_MARKER,
@@ -14,6 +18,7 @@ import type { CeremonyRecord, ProjectOnboarding, ScrumAgent, ScrumTask } from '.
 
 const COMPANY_ID = 'company-bmw';
 const PROJECT_ID = 'project-bmw';
+const SECONDARY_COMPANY_ID = 'company-audi';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -140,6 +145,19 @@ function workspace(): PluginWorkspace {
   };
 }
 
+function onboardingFor(projectId: string, projectName: string, rootIssueId: string): ProjectOnboarding {
+  return {
+    ...createInitialProjectOnboarding('2026-08-09T12:00:00.000Z'),
+    status: 'analysis_in_progress',
+    projectId,
+    projectName,
+    rootIssueId,
+    requiresSprint: false,
+    brief: `Deliver ${projectName}.`,
+    startedAt: '2026-08-09T12:00:00.000Z',
+  };
+}
+
 describe('project onboarding worker actions', () => {
   let harness: ReturnType<typeof createTestHarness>;
 
@@ -186,6 +204,57 @@ describe('project onboarding worker actions', () => {
       assigneeAgentId: technicalLead?.id,
     });
     expect(rootIssue?.description).toContain('Inspect the repository');
+  });
+
+  it('keeps concurrent company board initialization isolated', async () => {
+    await harness.ctx.state.set(
+      { scopeKind: 'company', scopeId: COMPANY_ID, stateKey: 'board' },
+      { projectOnboarding: onboardingFor(PROJECT_ID, 'BMW Website', 'issue-bmw-kickoff') }
+    );
+    await harness.ctx.state.set(
+      { scopeKind: 'company', scopeId: SECONDARY_COMPANY_ID, stateKey: 'board' },
+      { projectOnboarding: onboardingFor('project-audi', 'Audi Website', 'issue-audi-kickoff') }
+    );
+
+    const originalStateGet = harness.ctx.state.get.bind(harness.ctx.state);
+    let holdSecondaryStateRead = true;
+    let signalSecondaryStateRead: (() => void) | undefined;
+    let releaseSecondaryStateRead: (() => void) | undefined;
+    const secondaryStateReadStarted = new Promise<void>((resolve) => {
+      signalSecondaryStateRead = resolve;
+    });
+    const secondaryStateReadReleased = new Promise<void>((resolve) => {
+      releaseSecondaryStateRead = resolve;
+    });
+    const stateGetSpy = vi.spyOn(harness.ctx.state, 'get').mockImplementation(async (scope) => {
+      if (holdSecondaryStateRead && scope.scopeId === SECONDARY_COMPANY_ID) {
+        holdSecondaryStateRead = false;
+        signalSecondaryStateRead?.();
+        await secondaryStateReadReleased;
+      }
+      return originalStateGet(scope);
+    });
+
+    try {
+      const secondaryBoard = harness.getData<BoardData>('board', { companyId: SECONDARY_COMPANY_ID });
+      await secondaryStateReadStarted;
+
+      const primaryBoard = harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+      await Promise.resolve();
+      await Promise.resolve();
+      releaseSecondaryStateRead?.();
+
+      const [secondary, primary] = await Promise.all([secondaryBoard, primaryBoard]);
+
+      expect(primary.projectOnboarding.projectName).toBe('BMW Website');
+      expect(secondary.projectOnboarding.projectName).toBe('Audi Website');
+      expect((await harness.getData<BoardData>('board', { companyId: COMPANY_ID })).projectOnboarding.projectName)
+        .toBe('BMW Website');
+      expect((await harness.getData<BoardData>('board', { companyId: SECONDARY_COMPANY_ID })).projectOnboarding.projectName)
+        .toBe('Audi Website');
+    } finally {
+      stateGetSpy.mockRestore();
+    }
   });
 
   it('trusts a Paperclip-linked GitHub workspace without requiring GitHub Actions', async () => {
@@ -270,6 +339,59 @@ describe('project onboarding worker actions', () => {
     );
   });
 
+  it('returns a rejected technical analysis to the Technical Lead for revision', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+
+    const rejected = await harness.performAction<{
+      rejected: boolean;
+      projectOnboarding: ProjectOnboarding;
+      wakeup: { queued: boolean };
+    }>(
+      'rejectTechnicalAnalysis',
+      { reason: 'Explain the data model and delivery risks before story discovery.' },
+      { companyId: COMPANY_ID }
+    );
+
+    expect(rejected).toMatchObject({
+      rejected: true,
+      projectOnboarding: { status: 'analysis_in_progress' },
+      wakeup: { queued: true },
+    });
+
+    const rootIssue = await harness.ctx.issues.get(kickoff.rootIssueId, COMPANY_ID);
+    const comments = await harness.ctx.issues.listComments(kickoff.rootIssueId, COMPANY_ID);
+    expect(rootIssue).toMatchObject({ status: 'todo' });
+    expect(comments).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          body: expect.stringContaining(TECHNICAL_ANALYSIS_CHANGES_REQUESTED_MARKER),
+        }),
+        expect.objectContaining({
+          body: expect.stringContaining('Explain the data model and delivery risks'),
+        }),
+      ])
+    );
+
+    const stillInProgress = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    expect(stillInProgress.projectOnboarding.status).toBe('analysis_in_progress');
+
+    const technicalLead = stillInProgress.agents.find((agent) => agent.role === 'technical_lead');
+    await harness.ctx.issues.createComment(
+      kickoff.rootIssueId,
+      `## Revised technical analysis\n\n${TECHNICAL_ANALYSIS_COMPLETION_MARKER}`,
+      COMPANY_ID,
+      { authorAgentId: technicalLead?.id }
+    );
+
+    const readyAgain = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    expect(readyAgain.projectOnboarding.status).toBe('analysis_ready');
+  });
+
   it('reconciles the Scrum-Master watchdog and on-demand runtime policies onto managed agents', async () => {
     await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
 
@@ -351,6 +473,11 @@ describe('project onboarding worker actions', () => {
     expect(discovery.wakeup.queued).toBe(true);
     expect(rootIssue).toMatchObject({ assigneeAgentId: productOwner?.id });
     expect(rootIssue?.description).toContain('child issues');
+    expect(await harness.ctx.issues.listComments(kickoff.rootIssueId, COMPANY_ID)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ body: expect.stringContaining('Technical analysis approved') }),
+      ])
+    );
     expect(active).toMatchObject({ activated: true, projectOnboarding: { status: 'active' } });
     expect(board.projectOnboarding.status).toBe('active');
   });

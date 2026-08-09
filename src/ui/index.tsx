@@ -125,6 +125,7 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
   const runCeremony = usePluginAction("runCeremony");
   const startProjectOnboarding = usePluginAction("startProjectOnboarding");
   const startBacklogDiscovery = usePluginAction("startBacklogDiscovery");
+  const rejectTechnicalAnalysis = usePluginAction("rejectTechnicalAnalysis");
   const activateProjectOnboarding = usePluginAction("activateProjectOnboarding");
   const startProjectSprint = usePluginAction("startProjectSprint");
   const requestProjectRefinement = usePluginAction("requestProjectRefinement");
@@ -205,7 +206,7 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
     [startProjectOnboarding, refreshOnboarding],
   );
 
-  const handleStartBacklogDiscovery = useCallback(async () => {
+  const handleStartBacklogDiscovery = useCallback(async (): Promise<boolean> => {
     setOnboardingBusy(true);
     try {
       const result = (await startBacklogDiscovery({})) as {
@@ -213,16 +214,48 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
         error?: string;
         wakeup?: { queued?: boolean; error?: string | null };
       };
-      if (!result?.started) setNotice(result?.error ?? "Story discovery could not start");
-      else if (result.wakeup?.queued === false) setNotice(result.wakeup.error ?? "Story discovery could not queue");
+      if (!result?.started) {
+        setNotice(result?.error ?? "Story discovery could not start");
+        return false;
+      }
+      if (result.wakeup?.queued === false) setNotice(result.wakeup.error ?? "Story discovery could not queue");
       else setNotice(null);
       refreshOnboarding();
+      return true;
     } catch (actionError) {
       setNotice(actionError instanceof Error ? actionError.message : "Story discovery could not start");
+      return false;
     } finally {
       setOnboardingBusy(false);
     }
   }, [startBacklogDiscovery, refreshOnboarding]);
+
+  const handleRejectTechnicalAnalysis = useCallback(async (reason: string): Promise<boolean> => {
+    setOnboardingBusy(true);
+    try {
+      const result = (await rejectTechnicalAnalysis({ reason })) as {
+        rejected?: boolean;
+        error?: string;
+        wakeup?: { queued?: boolean; error?: string | null };
+      };
+      if (!result?.rejected) {
+        setNotice(result?.error ?? "Technical analysis could not be returned for revision");
+        return false;
+      }
+      if (result.wakeup?.queued === false) {
+        setNotice(result.wakeup.error ?? "Technical analysis revision could not queue");
+      } else {
+        setNotice(null);
+      }
+      refreshOnboarding();
+      return true;
+    } catch (actionError) {
+      setNotice(actionError instanceof Error ? actionError.message : "Technical analysis could not be returned for revision");
+      return false;
+    } finally {
+      setOnboardingBusy(false);
+    }
+  }, [refreshOnboarding, rejectTechnicalAnalysis]);
 
   const handleActivateProjectOnboarding = useCallback(async () => {
     setOnboardingBusy(true);
@@ -520,6 +553,12 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
           allTasks={data.kickoffTask ? [...tasks, data.kickoffTask] : tasks}
           agents={data.agents}
           onResolveProductDecision={handleResolveProductDecision}
+          onApproveTechnicalAnalysis={
+            data.projectOnboarding.status === "analysis_ready" ? handleStartBacklogDiscovery : undefined
+          }
+          onRejectTechnicalAnalysis={
+            data.projectOnboarding.status === "analysis_ready" ? handleRejectTechnicalAnalysis : undefined
+          }
         />
       </main>
 

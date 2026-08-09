@@ -177,4 +177,41 @@ describe('project onboarding', () => {
       )
     ).toBe(true);
   });
+
+  it('requires a new Technical Lead completion after human-requested analysis changes', () => {
+    expect(
+      isTechnicalAnalysisComplete(
+        [
+          {
+            authorAgentId: 'technical-lead',
+            body: TECHNICAL_ANALYSIS_COMPLETION_MARKER,
+            createdAt: '2026-08-09T10:00:00.000Z',
+          },
+          {
+            authorAgentId: null,
+            body: '<!-- agent-scrum:technical-analysis-changes-requested -->',
+            createdAt: '2026-08-09T10:01:00.000Z',
+          },
+        ],
+        'technical-lead'
+      )
+    ).toBe(false);
+    expect(
+      isTechnicalAnalysisComplete(
+        [
+          {
+            authorAgentId: null,
+            body: '<!-- agent-scrum:technical-analysis-changes-requested -->',
+            createdAt: '2026-08-09T10:01:00.000Z',
+          },
+          {
+            authorAgentId: 'technical-lead',
+            body: TECHNICAL_ANALYSIS_COMPLETION_MARKER,
+            createdAt: '2026-08-09T10:02:00.000Z',
+          },
+        ],
+        'technical-lead'
+      )
+    ).toBe(true);
+  });
 });

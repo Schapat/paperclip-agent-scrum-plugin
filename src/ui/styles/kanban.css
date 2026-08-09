@@ -919,6 +919,19 @@
   justify-self: start;
 }
 
+.ticket-detail-approval-revision {
+  display: grid;
+  gap: var(--spacing-xs);
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.ticket-detail-approval-revision textarea {
+  min-height: 5rem;
+  resize: vertical;
+}
+
 .ticket-detail-approval-error {
   color: var(--color-error) !important;
 }

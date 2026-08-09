@@ -41,15 +41,20 @@ export interface NewProjectOnboardingContext {
 /** Marker, den der Technical Lead an seine fertiggestellte Analyse anhängt. */
 export const TECHNICAL_ANALYSIS_COMPLETION_MARKER = '<!-- agent-scrum:technical-analysis-complete -->';
 
+/** Marker, mit dem ein Human eine erneute Technical-Lead-Analyse anfordert. */
+export const TECHNICAL_ANALYSIS_CHANGES_REQUESTED_MARKER =
+  '<!-- agent-scrum:technical-analysis-changes-requested -->';
+
 export interface TechnicalAnalysisComment {
   body: string;
   authorAgentId: string | null;
+  createdAt?: Date | string;
 }
 
 const ALLOWED_TRANSITIONS: Record<ProjectOnboardingStatus, ProjectOnboardingStatus[]> = {
   not_started: ['analysis_in_progress'],
   analysis_in_progress: ['analysis_ready'],
-  analysis_ready: ['backlog_in_progress'],
+  analysis_ready: ['analysis_in_progress', 'backlog_in_progress'],
   backlog_in_progress: ['sprint_planning', 'active'],
   sprint_planning: ['active'],
   active: ['completed'],
@@ -175,10 +180,24 @@ export function isTechnicalAnalysisComplete(
 ): boolean {
   if (!technicalLeadId) return false;
 
-  return comments.some(
-    (comment) =>
-      comment.authorAgentId === technicalLeadId &&
-      comment.body.includes(TECHNICAL_ANALYSIS_COMPLETION_MARKER)
+  const markers = comments
+    .map((comment, index) => ({ comment, index, timestamp: Date.parse(String(comment.createdAt ?? "")) }))
+    .filter(({ comment }) =>
+      comment.body.includes(TECHNICAL_ANALYSIS_CHANGES_REQUESTED_MARKER) ||
+      (comment.authorAgentId === technicalLeadId &&
+        comment.body.includes(TECHNICAL_ANALYSIS_COMPLETION_MARKER))
+    );
+  if (markers.length === 0) return false;
+
+  const hasTimestamps = markers.every(({ timestamp }) => Number.isFinite(timestamp));
+  const latest = markers.reduce((current, candidate) => {
+    if (hasTimestamps) return candidate.timestamp >= current.timestamp ? candidate : current;
+    return candidate.index > current.index ? candidate : current;
+  });
+
+  return (
+    latest.comment.authorAgentId === technicalLeadId &&
+    latest.comment.body.includes(TECHNICAL_ANALYSIS_COMPLETION_MARKER)
   );
 }
 
