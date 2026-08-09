@@ -28,4 +28,4 @@
 | DF-016 | Defekt | Ticketdetail-Dialog zu schmal und Tab-Leiste instabil | Erledigt | 2026-08-09 |
 | DF-017 | Defekt | Scope-Holds abgeschlossener Aufträge als Folgeauftrag im Board freigeben | Erledigt | 2026-08-09 |
 | FE-008 | Feature | GitHub-Commitnachweise, Code-Diffs und Pipeline-Gate für Projektaufträge | Erledigt | 2026-08-09 |
-| OP-002 | Betrieb | README, Release-Commit und lokale Plugin-Aktualisierung | In Bearbeitung | 2026-08-09 |
+| OP-002 | Betrieb | README, Release-Commit und lokale Plugin-Aktualisierung | Erledigt | 2026-08-09 |

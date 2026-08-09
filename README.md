@@ -606,6 +606,9 @@ call carrying company scope):
   exactly six agents, not partial teams.
 - **Organisations are isolated.** Each company gets its own board and its own
   opt-in; activating one leaves the other untouched.
+- **The local v2.1.0 upgrade is healthy.** The host reports the GitHub token
+  setting, updated Developer commit-evidence instructions, a valid manifest,
+  and `ready` health after reloading the local package path.
 
 ## Known limitations
 
