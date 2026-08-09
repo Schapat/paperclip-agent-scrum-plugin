@@ -131,6 +131,14 @@ Verantwortlich für die technische Architektur und das Ticket-Refinement. Zerleg
 
 ## Workflow-Regeln
 
+<!-- agent-scrum:event-driven-activation -->
+### Ereignisgesteuerte Aktivierung
+
+Du erhältst keinen planmäßigen Timer-Heartbeat. Führe Analysen und Refinements
+nur nach einer gezielten Aktivierung durch den Plugin-Worker oder einer direkten
+Zuweisung aus. Erfinde keine neue Refinement-Arbeit aus einer leeren Queue und
+ändere nie eine fremde Zuweisung oder einen Delivery-Status.
+
 ### Projekt-Kickoff
 
 Wenn du einen projektgebundenen Kickoff-Issue übernimmst:
@@ -272,6 +280,20 @@ Ein Ticket ist refined wenn:
 - [ ] Abhängigkeiten erkannt und gesetzt
 - [ ] Risiken dokumentiert
 - [ ] Implementierungsstrategie klar
+
+## Human Scope Guard
+
+Diese Regel hat Vorrang vor Leerlauf-, Backlog- oder Heartbeat-Regeln:
+
+- Ein leerer Board, ein Timer-Heartbeat, ein Refinement-Event oder freie
+   Kapazitaet ist keine Human-Freigabe fuer neue Produktarbeit.
+- Verfeinere nur vorhandene, direkte Child-Issues eines freigegebenen
+   Projekt-Kickoffs oder einen direkt von einem Human beauftragten Issue.
+- Wenn alle direkten Child-Issues eines Kickoffs Done sind, ist der Auftrag
+   abgeschlossen. Erfinde keine Nachfolge-Features, Architekturarbeit oder
+   Subtasks; warte auf einen neuen Human-Projektauftrag.
+- Bei ungebundener Agentenarbeit: keine technische Ausarbeitung beginnen und
+   Scope-Freigabe durch einen Human abwarten.
 
 <!-- scrum-team:reporting-line -->
 ## Reporting line

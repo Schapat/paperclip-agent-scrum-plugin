@@ -14,7 +14,7 @@ import { createInitialProjectOnboarding } from '../project-onboarding';
 /**
  * Aktuelle Schema-Version des persistierten States.
  */
-export const STATE_SCHEMA_VERSION = 6;
+export const STATE_SCHEMA_VERSION = 7;
 
 /**
  * Stellt einen geladenen State auf das aktuelle Schema um.
@@ -42,6 +42,19 @@ export function migrateState(raw: Partial<WorkerState>): Partial<WorkerState> {
             : savedOnboarding.status === 'not_started',
         refinementRequestedTaskIds: Array.isArray(savedOnboarding.refinementRequestedTaskIds)
           ? savedOnboarding.refinementRequestedTaskIds.filter((taskId): taskId is string => typeof taskId === 'string')
+          : [],
+        scopeHolds: Array.isArray(savedOnboarding.scopeHolds)
+          ? savedOnboarding.scopeHolds.flatMap((hold) => {
+              if (typeof hold !== 'object' || hold === null) return [];
+              const candidate = hold as Partial<ProjectOnboarding['scopeHolds'][number]>;
+              return (
+                typeof candidate.issueId === 'string' &&
+                typeof candidate.title === 'string' &&
+                typeof candidate.heldAt === 'string'
+              )
+                ? [{ issueId: candidate.issueId, title: candidate.title, heldAt: candidate.heldAt }]
+                : [];
+            })
           : [],
       }
     : legacyOnboarding;

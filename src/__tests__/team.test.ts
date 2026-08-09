@@ -8,11 +8,14 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  SCRUM_MASTER_WATCHDOG_RUNTIME_CONFIG,
+  SCRUM_ON_DEMAND_RUNTIME_CONFIG,
   TEAM,
   describeReportingLine,
   detectReportingDrift,
   expectedSuperiorId,
   teamMember,
+  withScrumHeartbeatRuntimeConfig,
   type TeamAgentKey,
 } from "../team";
 
@@ -39,6 +42,67 @@ describe("team definition", () => {
     for (const member of TEAM) {
       expect(member.agentKey).toMatch(/^[a-z0-9][a-z0-9._:-]*$/);
     }
+  });
+
+  it("gives only the Scrum Master a slow watchdog heartbeat", () => {
+    const scrumMaster = teamMember("scrum-master");
+
+    expect(SCRUM_MASTER_WATCHDOG_RUNTIME_CONFIG).toEqual({
+      heartbeat: {
+        enabled: true,
+        intervalSec: 1800,
+        wakeOnDemand: true,
+        maxConcurrentRuns: 1,
+        skipTimerWhenNoActionableWork: false,
+      },
+    });
+    expect(scrumMaster?.runtimeConfig).toBe(SCRUM_MASTER_WATCHDOG_RUNTIME_CONFIG);
+
+    expect(SCRUM_ON_DEMAND_RUNTIME_CONFIG).toEqual({
+      heartbeat: {
+        enabled: false,
+        intervalSec: 1800,
+        wakeOnDemand: true,
+        maxConcurrentRuns: 1,
+        skipTimerWhenNoActionableWork: true,
+      },
+    });
+    for (const member of TEAM.filter((member) => member.agentKey !== "scrum-master")) {
+      expect(member.runtimeConfig).toBe(SCRUM_ON_DEMAND_RUNTIME_CONFIG);
+    }
+  });
+
+  it("preserves unrelated runtime settings while enforcing the heartbeat policy", () => {
+    expect(
+      withScrumHeartbeatRuntimeConfig("scrum-master", {
+        modelProfiles: { cheap: { enabled: true } },
+        heartbeat: { maxConcurrentRuns: 20, cooldownSec: 30 },
+      })
+    ).toEqual({
+      modelProfiles: { cheap: { enabled: true } },
+      heartbeat: {
+        enabled: true,
+        intervalSec: 1800,
+        wakeOnDemand: true,
+        maxConcurrentRuns: 1,
+        skipTimerWhenNoActionableWork: false,
+        cooldownSec: 30,
+      },
+    });
+    expect(
+      withScrumHeartbeatRuntimeConfig("developer-1", {
+        heartbeat: { enabled: true, intervalSec: 300, cooldownSec: 30 },
+      })
+    ).toEqual({
+      heartbeat: {
+        enabled: false,
+        intervalSec: 1800,
+        wakeOnDemand: true,
+        maxConcurrentRuns: 1,
+        skipTimerWhenNoActionableWork: true,
+        cooldownSec: 30,
+      },
+    });
   });
 
   it("has developers report to the Technical Lead", () => {

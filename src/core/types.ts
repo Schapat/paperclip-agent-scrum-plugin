@@ -423,7 +423,15 @@ export type ProjectOnboardingStatus =
   | 'analysis_ready'
   | 'backlog_in_progress'
   | 'sprint_planning'
-  | 'active';
+  | 'active'
+  | 'completed';
+
+/** Agent-created work held because it is outside the human-approved project scope. */
+export interface ProjectScopeHold {
+  issueId: string;
+  title: string;
+  heldAt: string;
+}
 
 /**
  * Der kontrollierte Einstieg eines Teams in ein vorhandenes Paperclip-Projekt.
@@ -441,6 +449,8 @@ export interface ProjectOnboarding {
   requiresSprint: boolean;
   /** Child-Issues, fuer die der Technical Lead bereits ein Refinement angefordert bekam. */
   refinementRequestedTaskIds: string[];
+  /** Ungebundene Agentenarbeit, die auf menschliche Scope-Freigabe wartet. */
+  scopeHolds: ProjectScopeHold[];
   brief: string | null;
   constraints: string | null;
   startedAt: string | null;

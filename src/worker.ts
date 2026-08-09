@@ -12,6 +12,10 @@
 
 import { definePlugin, runWorker, type Issue, type PluginContext } from "@paperclipai/plugin-sdk";
 
+import {
+  MANAGED_AGENT_INSTRUCTIONS,
+  heartbeatAwareInstructions,
+} from "./agent-instructions";
 import type { CeremonyType, ScrumTask, TaskStatus, WorkerState } from "./core/types";
 import { createDefaultSettings } from "./core/types";
 import { createCeremonyRecord, createId, createScrumTask } from "./core/factories";
@@ -51,6 +55,7 @@ import {
   describeReportingLine,
   detectReportingDrift,
   expectedSuperiorId,
+  withScrumHeartbeatRuntimeConfig,
   type ReportingDrift,
 } from "./team";
 
@@ -182,6 +187,7 @@ const plugin = definePlugin({
 
       await reconcileTeam();
       await syncOnboardingProjectIssues();
+      await holdExistingUnscopedManagedIssues();
       await requestProjectRefinement("automatic");
       await requestProjectPlanning();
       teamReady = true;
@@ -325,6 +331,113 @@ const plugin = definePlugin({
     function hasProjectBackedTasks(): boolean {
       const rootIssueId = state.projectOnboarding?.rootIssueId;
       return Boolean(rootIssueId && state.tasks.some((task) => task.parentId === rootIssueId));
+    }
+
+    /** Closes a human-requested project once every direct delivery story is done. */
+    function completeProjectOnboardingIfDelivered(): boolean {
+      const onboarding = state.projectOnboarding;
+      if (!onboarding?.rootIssueId || onboarding.status !== "active") return false;
+
+      const projectTasks = state.tasks.filter((task) => task.parentId === onboarding.rootIssueId);
+      if (projectTasks.length === 0 || projectTasks.some((task) => task.column !== "done")) return false;
+
+      state.projectOnboarding = transitionProjectOnboarding(onboarding, "completed");
+      return true;
+    }
+
+    /** Holds managed-agent work that was created outside the human-approved project boundary. */
+    async function holdUnscopedManagedIssue(event: {
+      companyId: string;
+      entityId?: string;
+      actorId?: string;
+    }): Promise<boolean> {
+      if (!companyId || !event.entityId || !event.actorId) return false;
+
+      const onboarding = state.projectOnboarding;
+      const createdByManagedAgent = state.agents.some((agent) => agent.id === event.actorId);
+      if (!onboarding?.rootIssueId || !onboarding.projectId || !createdByManagedAgent) return false;
+
+      try {
+        const issue = await ctx.issues.get(event.entityId, companyId);
+        if (
+          !issue ||
+          issue.id === onboarding.rootIssueId ||
+          isProjectOnboardingChildIssue(issue) ||
+          issue.status === "done" ||
+          issue.status === "cancelled"
+        ) {
+          return false;
+        }
+
+        const existingHold = (onboarding.scopeHolds ?? []).some((hold) => hold.issueId === issue.id);
+        if (issue.status !== "blocked" || issue.assigneeAgentId !== null) {
+          await ctx.issues.update(
+            issue.id,
+            { status: "blocked", assigneeAgentId: null },
+            companyId
+          );
+        }
+        if (!existingHold) {
+          await ctx.issues.createComment(
+            issue.id,
+            "## Human scope approval required\n\nAgent Scrum held this agent-created work because it is outside the active project request. Do not plan, assign, or implement it until a human explicitly approves a new project scope.",
+            companyId
+          );
+          state.projectOnboarding = {
+            ...onboarding,
+            scopeHolds: [
+              ...(onboarding.scopeHolds ?? []),
+              { issueId: issue.id, title: issue.title, heldAt: new Date().toISOString() },
+            ],
+            updatedAt: new Date().toISOString(),
+          };
+          await save();
+        }
+        ctx.logger.warn("Held agent-created work outside project scope", {
+          issueId: issue.id,
+          title: issue.title,
+          actorId: event.actorId,
+        });
+        return true;
+      } catch (error) {
+        ctx.logger.warn("Could not hold agent-created work outside project scope", {
+          issueId: event.entityId,
+          error: String(error),
+        });
+        return false;
+      }
+    }
+
+    /** Reconciles pre-existing agent-created scope drift after a worker restart or upgrade. */
+    async function holdExistingUnscopedManagedIssues(): Promise<void> {
+      if (!companyId || !state.projectOnboarding?.projectId || !state.projectOnboarding.rootIssueId) return;
+
+      let offset = 0;
+      const limit = 100;
+      try {
+        while (true) {
+          const issues = await ctx.issues.list({ companyId, limit, offset });
+          for (const issue of issues) {
+            const creatorId = (issue as Issue & { createdByAgentId?: unknown }).createdByAgentId;
+            if (
+              issue.id === state.projectOnboarding.rootIssueId ||
+              isProjectOnboardingChildIssue(issue) ||
+              issue.status === "done" ||
+              issue.status === "cancelled" ||
+              typeof creatorId !== "string"
+            ) {
+              continue;
+            }
+            await holdUnscopedManagedIssue({ companyId, entityId: issue.id, actorId: creatorId });
+          }
+          if (issues.length < limit) return;
+          offset += issues.length;
+        }
+      } catch (error) {
+        ctx.logger.warn("Could not reconcile agent-created work outside project scope", {
+          error: String(error),
+        });
+      }
     }
 
     function isProjectBackedTask(task: ScrumTask): boolean {
@@ -480,6 +593,71 @@ const plugin = definePlugin({
       }
     }
 
+    /** Keeps QA as the reviewer by handing rejected project work back to a developer. */
+    async function routeProjectReworkToDeveloper(issue: Issue): Promise<Issue> {
+      if (!companyId || !isProjectOnboardingChildIssue(issue) || issue.status !== "in_progress") {
+        return issue;
+      }
+
+      const qa = state.agents.find((agent) => agent.role === "qa_engineer");
+      if (!qa || issue.assigneeAgentId !== qa.id) return issue;
+
+      const developer = developerForProjectRework(issue.id);
+      if (!developer) {
+        ctx.logger.warn("Could not route QA rework because no developer is available", {
+          issueId: issue.id,
+        });
+        return issue;
+      }
+
+      try {
+        const reassigned = await ctx.issues.update(
+          issue.id,
+          { assigneeAgentId: developer.id },
+          companyId
+        );
+        try {
+          await ctx.issues.createComment(
+            reassigned.id,
+            `## QA rework routed\n\nQA returned this ticket to Development. Assigned to ${developer.name} to implement the documented review findings before returning it to QA.`,
+            companyId
+          );
+        } catch (error) {
+          ctx.logger.warn("Could not record QA rework routing", {
+            issueId: reassigned.id,
+            error: String(error),
+          });
+        }
+        const wakeup = await requestIssueWakeup(reassigned.id, "project_rework_development");
+        ctx.logger.info("Project QA rework routed", {
+          issueId: reassigned.id,
+          developerId: developer.id,
+          queued: wakeup.queued,
+        });
+        return reassigned;
+      } catch (error) {
+        ctx.logger.warn("Could not route QA rework to a developer", {
+          issueId: issue.id,
+          error: String(error),
+        });
+        return issue;
+      }
+    }
+
+    function developerForProjectRework(issueId: string): WorkerState["agents"][number] | null {
+      const activeColumns = new Set(["todo", "in_progress", "in_review"]);
+      return state.agents
+        .filter((agent) => agent.role === "developer")
+        .map((agent, index) => ({
+          agent,
+          index,
+          activeTasks: state.tasks.filter(
+            (task) => task.id !== issueId && task.assignedAgentId === agent.id && activeColumns.has(task.column)
+          ).length,
+        }))
+        .sort((left, right) => left.activeTasks - right.activeTasks || left.index - right.index)[0]?.agent ?? null;
+    }
+
     /** Re-evaluates open reviews after a comment or when the board is refreshed. */
     async function routeOpenProjectReviews(): Promise<void> {
       const onboarding = state.projectOnboarding;
@@ -605,6 +783,7 @@ const plugin = definePlugin({
       return state.tasks.filter(
         (task) =>
           task.parentId === rootIssueId &&
+          task.column !== "done" &&
           !task.refined
       );
     }
@@ -634,6 +813,14 @@ const plugin = definePlugin({
 
       const requestStateChanged = reconcileProjectRefinementRequests();
       const onboarding = state.projectOnboarding;
+      if (onboarding?.status === "completed") {
+        if (requestStateChanged) await save();
+        return {
+          requested: false,
+          error: "Project delivery is complete. Wait for a new human-approved project request.",
+          taskIds: [] as string[],
+        };
+      }
       if (onboarding?.status !== "active" && onboarding?.status !== "sprint_planning") {
         if (requestStateChanged) await save();
         return {
@@ -862,7 +1049,8 @@ const plugin = definePlugin({
           });
           for (const issue of issues) {
             const completionGatedIssue = await routeProjectCompletionToQa(issue, null);
-            const routedIssue = await routeProjectReview(completionGatedIssue);
+            const reworkRoutedIssue = await routeProjectReworkToDeveloper(completionGatedIssue);
+            const routedIssue = await routeProjectReview(reworkRoutedIssue);
             const result = syncProjectOnboardingIssue(
               state.tasks,
               onboarding,
@@ -881,14 +1069,15 @@ const plugin = definePlugin({
         return false;
       }
 
+      const projectCompleted = completeProjectOnboardingIfDelivered();
       const refinementRequestsChanged = reconcileProjectRefinementRequests();
       const agentActivityChanged = syncProjectAgentActivity();
-      if (changed || refinementRequestsChanged || agentActivityChanged) {
+      if (changed || projectCompleted || refinementRequestsChanged || agentActivityChanged) {
         if (changed) state.metrics = recalculateMetrics(state);
         await save();
       }
       await releaseResolvedProjectBlockers();
-      return changed;
+      return changed || projectCompleted;
     }
 
     /**
@@ -967,6 +1156,7 @@ const plugin = definePlugin({
       if (team.length === 0) return;
 
       state.agents = team;
+      await upgradeManagedAgentHeartbeats(resolved);
       ctx.logger.info("Scrum team ready", {
         agents: team.length,
         roles: team.map((a) => a.role).join(", "),
@@ -1065,6 +1255,108 @@ const plugin = definePlugin({
       return changed === drift.length;
     }
 
+    /** Applies the central event-routing and Scrum-Master watchdog runtime policy. */
+    async function upgradeManagedAgentHeartbeats(
+      resolved: Map<string, { agentId: string; reportsTo: string | null }>
+    ): Promise<void> {
+      if (!companyId) return;
+
+      const config = await readConfig();
+      const baseUrl = String(config.apiBaseUrl ?? "").trim().replace(/\/+$/, "");
+      if (!baseUrl) return;
+
+      const token = String(config.apiToken ?? "").trim();
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (token) headers.authorization = `Bearer ${token}`;
+
+      let heartbeatUpdates = 0;
+      let instructionUpdates = 0;
+      for (const member of TEAM) {
+        const target = resolved.get(member.agentKey);
+        if (!target) continue;
+
+        try {
+          const currentResponse = await fetch(`${baseUrl}/api/agents/${target.agentId}`, { headers });
+          if (!currentResponse.ok) {
+            ctx.logger.warn("Could not read managed agent configuration", {
+              agent: member.displayName,
+              status: currentResponse.status,
+            });
+            continue;
+          }
+          const current = await currentResponse.json() as { runtimeConfig?: unknown };
+          const runtimeConfig = withScrumHeartbeatRuntimeConfig(
+            member.agentKey,
+            asRecord(current.runtimeConfig)
+          );
+          if (JSON.stringify(runtimeConfig) !== JSON.stringify(current.runtimeConfig ?? {})) {
+            const runtimeResponse = await fetch(`${baseUrl}/api/agents/${target.agentId}`, {
+              method: "PATCH",
+              headers,
+              body: JSON.stringify({ runtimeConfig }),
+            });
+            if (!runtimeResponse.ok) {
+              ctx.logger.warn("Could not apply managed agent runtime policy", {
+                agent: member.displayName,
+                status: runtimeResponse.status,
+              });
+            } else {
+              heartbeatUpdates += 1;
+            }
+          }
+
+          const instructionsUrl = `${baseUrl}/api/agents/${target.agentId}/instructions-bundle/file?path=AGENTS.md`;
+          const fileResponse = await fetch(instructionsUrl, { headers });
+          const existing = fileResponse.ok
+            ? readInstructionContent(await fileResponse.json())
+            : null;
+          const content = heartbeatAwareInstructions(member.agentKey, existing);
+          if (content !== existing) {
+            const instructionResponse = await fetch(`${baseUrl}/api/agents/${target.agentId}/instructions-bundle/file`, {
+              method: "PUT",
+              headers,
+              body: JSON.stringify({
+                path: "AGENTS.md",
+                content,
+                clearLegacyPromptTemplate: true,
+              }),
+            });
+            if (!instructionResponse.ok) {
+              ctx.logger.warn("Could not update managed agent heartbeat instructions", {
+                agent: member.displayName,
+                status: instructionResponse.status,
+              });
+            } else {
+              instructionUpdates += 1;
+            }
+          }
+        } catch (error) {
+          ctx.logger.warn("Could not upgrade managed agent runtime policy", {
+            agent: member.displayName,
+            error: String(error),
+          });
+        }
+      }
+
+      if (heartbeatUpdates > 0 || instructionUpdates > 0) {
+        ctx.logger.info("Managed agent runtime policy applied", {
+          heartbeatUpdates,
+          instructionUpdates,
+        });
+      }
+    }
+
+    function asRecord(value: unknown): Record<string, unknown> {
+      return typeof value === "object" && value !== null && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : {};
+    }
+
+    function readInstructionContent(value: unknown): string | null {
+      const record = asRecord(value);
+      return typeof record.content === "string" ? record.content : null;
+    }
+
     /** Reads the plugin config, tolerating a host that cannot supply it. */
     async function readConfig(): Promise<Record<string, unknown>> {
       if (!companyId) return {};
@@ -1082,9 +1374,10 @@ const plugin = definePlugin({
     const pendingInstructionUpdates: InstructionUpdate[] = [];
     const pendingWork: AgentWorkRequest[] = [];
 
-    function ceremonyContext(): CeremonyContext {
+    function ceremonyContext(allowAutomaticScopeExpansion: boolean): CeremonyContext {
       return {
         state,
+        allowAutomaticScopeExpansion,
         requestAgentWork: (request: AgentWorkRequest) => {
           // The plugin orchestrates; the *content* — user stories, acceptance
           // criteria, estimates — comes from the agents themselves.
@@ -1104,8 +1397,8 @@ const plugin = definePlugin({
       sprint_retrospective: runRetrospective,
     };
 
-    function runCeremony(ceremony: CeremonyType): unknown {
-      const record = CEREMONIES[ceremony]?.(ceremonyContext());
+    function runCeremony(ceremony: CeremonyType, allowAutomaticScopeExpansion: boolean): unknown {
+      const record = CEREMONIES[ceremony]?.(ceremonyContext(allowAutomaticScopeExpansion));
       if (!record) return null;
 
       state.metrics = recalculateMetrics(state);
@@ -1117,7 +1410,7 @@ const plugin = definePlugin({
       getState: () => state,
       run: (ceremony, reason) => {
         ctx.logger.info("Ceremony triggered", { ceremony, reason });
-        runCeremony(ceremony);
+        runCeremony(ceremony, false);
       },
     });
 
@@ -1208,7 +1501,8 @@ const plugin = definePlugin({
         if (!issue) return false;
 
         const completionGatedIssue = await routeProjectCompletionToQa(issue, event.actorId ?? null);
-        const routedIssue = await routeProjectReview(completionGatedIssue);
+        const reworkRoutedIssue = await routeProjectReworkToDeveloper(completionGatedIssue);
+        const routedIssue = await routeProjectReview(reworkRoutedIssue);
         const result = syncProjectOnboardingIssue(
           state.tasks,
           state.projectOnboarding,
@@ -1216,15 +1510,17 @@ const plugin = definePlugin({
           event.actorId ?? null,
           state.agents
         );
-        if (!result.changed) return result.handled;
+        const projectCompleted = completeProjectOnboardingIfDelivered();
+        if (!result.changed && !projectCompleted) return result.handled;
 
         reconcileProjectRefinementRequests();
         syncProjectAgentActivity();
         state.metrics = recalculateMetrics(state);
         await save();
         if (
-          state.projectOnboarding?.status === "active" ||
-          state.projectOnboarding?.status === "sprint_planning"
+          !projectCompleted &&
+          (state.projectOnboarding?.status === "active" ||
+            state.projectOnboarding?.status === "sprint_planning")
         ) {
           await requestProjectRefinement("automatic");
           if (state.projectOnboarding.status === "active") {
@@ -1252,11 +1548,13 @@ const plugin = definePlugin({
 
     ctx.events.on("issue.created", async (event) => {
       await ensureReady(event.companyId);
+      if (await holdUnscopedManagedIssue(event)) return;
       if (!(await syncOnboardingIssue(event))) await boardChanged();
     });
 
     ctx.events.on("issue.updated", async (event) => {
       await ensureReady(event.companyId);
+      if (await holdUnscopedManagedIssue(event)) return;
       if (!(await syncOnboardingIssue(event))) await boardChanged();
     });
 
@@ -1635,7 +1933,7 @@ const plugin = definePlugin({
         };
       }
 
-      const record = runCeremony(ceremony);
+      const record = runCeremony(ceremony, true);
       await dispatchWork();
       await save();
       return { started: true, record };

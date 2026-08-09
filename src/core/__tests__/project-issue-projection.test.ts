@@ -173,6 +173,35 @@ describe('project issue projection', () => {
     ]);
   });
 
+  it('marks numbered QA verification lines with a success emoji as fulfilled', () => {
+    const projection = projectIssueProjection({
+      issueId: 'issue-theme-toggle',
+      description: [
+        '## Akzeptanzkriterien',
+        '- [ ] Sun/Moon Icon-Button in Desktop-Header sichtbar',
+        '- [ ] Sun/Moon Icon-Button in Mobile-Navigation sichtbar',
+      ].join('\n'),
+      comments: [
+        {
+          id: 'comment-qa-emoji-verification',
+          authorAgentId: 'id-qa',
+          authorUserId: null,
+          authorType: 'agent',
+          createdAt: '2026-08-09T10:00:00.000Z',
+          body: [
+            '## QA Verifiziert',
+            '',
+            '**1. Sun/Moon Icon-Button in Desktop-Header sichtbar** ✅',
+            '**2. Sun/Moon Icon-Button in Mobile-Navigation sichtbar** ✅',
+          ].join('\n'),
+        },
+      ],
+      agents: [...agents, { id: 'id-qa', name: 'QA Engineer', role: 'qa_engineer' }],
+    });
+
+    expect(projection.refinement.acceptanceCriteria.every((criterion) => criterion.met)).toBe(true);
+  });
+
   it('uses a complete QA checklist order when the checklist shortens a criterion heading', () => {
     const projection = projectIssueProjection({
       issueId: 'issue-slider',

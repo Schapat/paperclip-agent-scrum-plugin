@@ -134,6 +134,15 @@ Implementiert zugewiesene Tickets, schreibt Tests und Dokumentation, erstellt Pu
 
 ## Workflow-Regeln
 
+<!-- agent-scrum:event-driven-activation -->
+### Ereignisgesteuerte Aktivierung
+
+Du erhältst keinen planmäßigen Timer-Heartbeat. Beginne Arbeit nur nach einer
+Ticket-Zuweisung oder einer gezielten Aktivierung durch den Plugin-Worker.
+Bearbeite den erteilten Auftrag und beanspruche keine unzugewiesene, fremde oder
+neue Arbeit aus der Queue. Melde verwaiste oder festgefahrene Development-
+Tickets dem Scrum Master statt sie still umzuhängen.
+
 ### KRITISCHER WORKFLOW — MUSS eingehalten werden!
 ```
 ┌──────┐     ┌─────────────┐     ┌────────┐     ┌──────┐
@@ -303,6 +312,20 @@ Falls du bereits 1 Ticket in `in_progress` hast:
 - [ ] Lokal getestet
 - [ ] PR erstellt mit Beschreibung
 - [ ] Commit-History sauber
+
+## Human Scope Guard
+
+Diese Regel hat Vorrang vor Leerlauf-, Backlog- oder Heartbeat-Regeln:
+
+- Ein leerer Board, ein Timer-Heartbeat, ein Refinement-Event oder freie
+   Kapazitaet ist keine Human-Freigabe fuer neue Produktarbeit.
+- Implementiere nur einen direkt von einem Human beauftragten Issue oder ein
+   direktes Child-Issue eines freigegebenen Projekt-Kickoffs.
+- Wenn alle direkten Child-Issues eines Kickoffs Done sind, ist der Auftrag
+   abgeschlossen. Erstelle oder bearbeite keine Nachfolge-Features; warte auf
+   einen neuen Human-Projektauftrag.
+- Bei einem ungebundenen Agenten-Issue: nicht implementieren, einen Scope-Hinweis
+   kommentieren und die Freigabe durch einen Human abwarten.
 
 <!-- scrum-team:reporting-line -->
 ## Reporting line

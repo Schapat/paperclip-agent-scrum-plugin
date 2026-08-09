@@ -5,7 +5,7 @@ board state, tickets move through a Kanban board, and the retrospective turns
 finished work into skills the team applies next sprint.
 
 ![Plugin API](https://img.shields.io/badge/plugin%20API-v1-blue.svg)
-![Tests](https://img.shields.io/badge/tests-344%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-358%20passing-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
 ---
@@ -19,11 +19,25 @@ The plugin does not write code or user stories. It runs the *process*: it
 decides what happens next, assigns work by skill, enforces the quality gate,
 and asks the agents to do the parts that need judgement.
 
+## What it gives you
+
+| Need | Agent Scrum provides |
+| --- | --- |
+| Turn a request into controlled delivery | A human starts technical analysis for a Paperclip project; the resulting, project-bound backlog is approved, then refined with estimates and acceptance criteria. By default, a human explicitly starts Sprint Planning before delivery. Paperclip issues remain the delivery source of truth. |
+| Keep work flowing without ceremony theatre | Planning, refinement, blocker resolution, review, and retrospective react to board state. A slow Scrum Master watchdog recovers stranded work without becoming a second scheduler. |
+| Protect quality and approved scope | Acceptance criteria, QA review, a Developer rework hand-off, and a second QA pass protect the Done state. Only direct child issues of the approved kickoff are delivered; unapproved agent-created work is held for a human decision. |
+| See and steer the process | The Scrum Board shows the project request, Kanban flow, ticket detail, blocked work, and manually runnable ceremonies. Sprint Progress and Team Status widgets give a compact dashboard view, while the Agent log exposes decisions and learnings. |
+| Improve the next sprint | The retrospective turns recurring, evidence-backed delivery patterns into role-specific skills that accompany the next agent invocation. |
+| Activate safely per organisation | Six managed roles are created only after an explicit organisation-level opt-in. Boards and settings are isolated by company, so enabling one team does not populate another. |
+
+## Operating principles
+
 Two decisions shape everything else:
 
-**No schedules.** Every ceremony is triggered by board state. AI agents finish
-work faster than any cron expression can describe, so a standup "at 9am" would
-be meaningless to them.
+**No scheduled ceremonies.** Every ceremony is triggered by board state. AI
+agents finish work faster than any cron expression can describe, so a standup
+"at 9am" would be meaningless to them. The Scrum Master has only a slow
+watchdog timer that detects stranded work; it does not schedule ceremonies.
 
 **Every event must produce something.** A ceremony that only reports is dead
 weight. The daily standup was removed for exactly that reason — see
@@ -33,15 +47,16 @@ weight. The daily standup was removed for exactly that reason — see
 
 ## Contents
 
-1. [Install](#install)
-2. [Start project work](#start-project-work)
-3. [Ceremonies](#ceremonies) — what each one produces
-4. [Triggers](#triggers) — what starts them
-5. [Ticket lifecycle](#ticket-lifecycle)
-6. [Learning loop](#learning-loop) — how the team improves
-7. [Architecture](#architecture) — incl. [Agent hierarchy](#agent-hierarchy)
-8. [Development](#development)
-9. [Verified](#verified) and [Known limitations](#known-limitations)
+1. [What it gives you](#what-it-gives-you)
+2. [Install](#install)
+3. [Start project work](#start-project-work)
+4. [Ceremonies](#ceremonies) — what each one produces
+5. [Triggers](#triggers) — what starts them
+6. [Ticket lifecycle](#ticket-lifecycle)
+7. [Learning loop](#learning-loop) — how the team improves
+8. [Architecture](#architecture) — incl. [Agent hierarchy](#agent-hierarchy)
+9. [Development](#development)
+10. [Verified](#verified) and [Known limitations](#known-limitations)
 
 ---
 
@@ -80,7 +95,7 @@ paperclipai plugin install /absolute/path/to/paperclip-agent-scrum-plugin
 Expected output:
 
 ```
-✓ Installed schapat.agent-scrum v2.0.8 (ready)
+✓ Installed schapat.agent-scrum v2.0.12 (ready)
 ```
 
 ### 4. Activate the team for your organisation
@@ -119,8 +134,8 @@ settings or with `paperclipai plugin config:set`.
 | `developerCount` | `2` | Sets the planning capacity assumption for local Scrum calculations. |
 | `wipLimitDevelopment` | `4` | Sets the Development work-in-progress limit. |
 | `wipLimitReview` | `3` | Sets the Review work-in-progress limit. |
-| `apiBaseUrl` | `http://127.0.0.1:3100` | Lets the plugin maintain reporting lines through Paperclip's REST API. |
-| `apiToken` | empty | Optional token for reporting-line setup on protected instances. |
+| `apiBaseUrl` | `http://127.0.0.1:3100` | Lets the plugin maintain reporting lines, the runtime policy, and managed instructions through Paperclip's REST API. |
+| `apiToken` | empty | Optional token for managed-agent maintenance on protected instances. |
 
 For a direct-delivery organisation, explicitly disable the new sprint gate
 before starting its project request:
@@ -155,6 +170,28 @@ paperclipai plugin logs schapat.agent-scrum
 
 While developing, keep `pnpm dev` running — Paperclip watches `dist/` and
 reloads the worker after each rebuild.
+
+### Event routing and watchdog
+
+The plugin worker is the primary coordinator: it reacts to Kanban and project
+events, evaluates deterministic ceremony rules, then wakes the role that owns
+the next piece of work. The delivery roles do not poll their queues.
+
+- The Scrum Master is the sole timer-driven watchdog. It runs every **30
+  minutes**, checks only stranded approved work, blockers, and WIP violations,
+  then documents, wakes, or escalates the responsible role.
+- Product Owner, Technical Lead, QA, and both Developers have no timer. They
+  remain available through `wakeOnDemand` and run only after an assignment or a
+  targeted plugin event.
+- Every role permits at most one concurrent run. The worker remains the source
+  of truth for operational ceremony triggers; the watchdog is a recovery path,
+  not a second scheduler.
+
+The declaration configures newly created agents. On every reconciliation the
+plugin merges this runtime policy into existing agents without resetting their
+adapters, models, budgets, or unrelated runtime settings. It materializes the
+managed `AGENTS.md` when missing, or append-only adds the event-routing rule to
+an existing customized bundle; it does not delete custom instructions.
 
 ## Start project work
 
@@ -222,9 +259,35 @@ QA review. QA records `<!-- agent-scrum:qa-review-approved -->` before closing
 the reviewed issue. The board also mirrors active Developer and QA assignments,
 and only releases a blocked issue after every Paperclip blocker is done.
 
+When QA finds a defect, it records the failed criteria, returns the issue to
+Development, and assigns a Developer. As a host-side safeguard, Agent Scrum
+detects a project issue in Development still assigned to QA, assigns the least
+loaded Developer, records the hand-off, and wakes that Developer. The repair
+must return to Review before QA can close it.
+
 Blocked tickets remain visible in the Backlog column under a separate
 **Blocked** section. They retain their Paperclip `blocked` status; the shared
 column is a compact overview, not a workflow transition.
+
+### Project scope control
+
+The direct child issues of an approved kickoff are the complete delivery scope.
+When every direct child issue is Done, the request becomes **Project complete**;
+the plugin does not start successor refinement, planning, or delivery work.
+The panel keeps the completion and any held work visible, then offers **Start
+next project request** as the only explicit human path to a new scope.
+
+An empty board, idle capacity, a timer heartbeat, or a refinement suggestion is
+not a request for new product scope. Automatic local refinement can report a
+missing backlog, but it cannot ask the Product Owner to create new stories. A
+human-initiated refinement remains available for intentionally starting such
+work.
+
+If a managed Scrum agent creates an open issue outside an active project, Agent
+Scrum sets it to `blocked`, clears its assignee, and records **Human scope
+approval required**. The held issue remains auditable in Paperclip and appears
+as a scope warning in the Project work panel; it never becomes project delivery
+until a human explicitly starts or approves the scope.
 
 The first version supports one active project request per organisation. Create
 or finish that request before starting another one.
@@ -481,7 +544,7 @@ whom*; the agents decide *what it says*.
 pnpm setup:sdk --paperclip /path/to/paperclip   # once
 pnpm install
 pnpm dev                                        # watch build
-pnpm test                                       # 344 tests
+pnpm test                                       # 358 tests
 pnpm typecheck
 ```
 
@@ -515,9 +578,9 @@ call carrying company scope):
 Stated plainly, because the alternative is a README that lies:
 
 - **Skills are delivered per invocation, not written into instructions.** The
-  host has no API to rewrite a managed agent's instructions — managed agents
-  are reconciled from the manifest. Active skills therefore travel with each
-  wake-up prompt rather than living permanently in `AGENTS.md`.
+  plugin maintains only its own event-routing rule in the managed bundle;
+  active skills still travel with each wake-up prompt rather than becoming
+  persistent `AGENTS.md` content.
 - **Local and project-backed boards have different sources of truth.** Ad-hoc
   local tickets still live in plugin state. Direct child issues of a project
   kickoff are projected from Paperclip; their status, assignment, comments,

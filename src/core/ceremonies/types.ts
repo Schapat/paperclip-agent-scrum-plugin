@@ -34,6 +34,8 @@ export interface AgentWorkRequest {
 export interface CeremonyContext {
   /** Wird von den Zeremonien mutiert */
   state: WorkerState;
+  /** Darf diese Zeremonie ohne eine zusätzliche Human-Aktion neue Arbeit erzeugen? */
+  allowAutomaticScopeExpansion?: boolean;
   /** Fordert inhaltliche Arbeit von einem KI-Agent an */
   requestAgentWork?: (request: AgentWorkRequest) => void;
   /**

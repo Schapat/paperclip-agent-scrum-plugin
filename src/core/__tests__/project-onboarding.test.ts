@@ -71,6 +71,7 @@ describe('project onboarding', () => {
     );
     const planning = transitionProjectOnboarding(backlog, 'sprint_planning', '2026-08-08T12:04:00.000Z');
     const active = transitionProjectOnboarding(planning, 'active', '2026-08-08T12:05:00.000Z');
+    const completed = transitionProjectOnboarding(active, 'completed', '2026-08-08T12:06:00.000Z');
 
     expect(initial.status).toBe('not_started');
     expect(canRunAutomaticDelivery(analysis)).toBe(false);
@@ -78,6 +79,8 @@ describe('project onboarding', () => {
     expect(canRunAutomaticDelivery(backlog)).toBe(false);
     expect(canRunAutomaticDelivery(planning)).toBe(false);
     expect(canRunAutomaticDelivery(active)).toBe(true);
+    expect(canRunAutomaticDelivery(completed)).toBe(false);
+    expect(completed.status).toBe('completed');
     expect(() => transitionProjectOnboarding(initial, 'active')).toThrow(
       'Cannot transition project onboarding from not_started to active.'
     );
@@ -140,6 +143,18 @@ describe('project onboarding', () => {
     expect(canStartNewProjectOnboarding(legacy, { taskCount: 0, hasCurrentSprint: false })).toBe(true);
     expect(canStartNewProjectOnboarding(legacy, { taskCount: 1, hasCurrentSprint: false })).toBe(false);
     expect(canStartNewProjectOnboarding(legacy, { taskCount: 0, hasCurrentSprint: true })).toBe(false);
+  });
+
+  it('allows a human to start a new project after a completed request', () => {
+    const completed = {
+      ...createInitialProjectOnboarding('2026-08-08T12:00:00.000Z'),
+      status: 'completed' as const,
+      projectId: 'project-finished',
+      rootIssueId: 'issue-finished',
+    };
+
+    expect(canStartNewProjectOnboarding(completed, { taskCount: 6, hasCurrentSprint: false })).toBe(true);
+    expect(canStartNewProjectOnboarding(completed, { taskCount: 6, hasCurrentSprint: true })).toBe(false);
   });
 
   it('requires the Technical Lead completion marker before analysis is considered complete', () => {

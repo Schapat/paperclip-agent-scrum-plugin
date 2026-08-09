@@ -17,3 +17,9 @@
 | FE-003 | Feature | Geblockte Tickets als Abschnitt in der Backlog-Spalte anzeigen | Erledigt | 2026-08-09 |
 | DF-010 | Defekt | Projektboard zeigt Agenten, Akzeptanzkriterien, Zeremonien und Sprintkontext unvollständig | Erledigt | 2026-08-09 |
 | FE-004 | Feature | Verpflichtendes Sprint Planning für neue Projekt-Onboardings | Erledigt | 2026-08-09 |
+| FE-005 | Feature | Managed Agents mit aktivem Heartbeat und rollenbezogener Kanban-Queue | Erledigt | 2026-08-09 |
+| DF-011 | Defekt | QA-Rework an Developer übergeben und erneut durch QA prüfen | Erledigt | 2026-08-09 |
+| DF-012 | Defekt | Ticketdetails zeigen Akzeptanzkriterien doppelt und ohne QA-Verifikation | Erledigt | 2026-08-09 |
+| DF-013 | Defekt | Abgeschlossene Projektaufträge dürfen kein ungebundenes Refinement und keine neue Lieferung auslösen | Erledigt | 2026-08-09 |
+| FE-006 | Feature | Zentralen Event-Worker durch einen Scrum-Master-Watchdog absichern | Erledigt | 2026-08-09 |
+| DF-014 | Defekt | README stellt Plugin-Nutzen und Bedienoberflaechen nicht frueh genug dar | Erledigt | 2026-08-09 |

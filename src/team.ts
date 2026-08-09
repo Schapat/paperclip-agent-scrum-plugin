@@ -36,6 +36,8 @@ export interface TeamMember {
   title: string;
   icon: string;
   capabilities: string;
+  /** Host runtime configuration reconciled with the managed agent. */
+  runtimeConfig: Record<string, unknown>;
   /**
    * Who this agent reports to.
    *
@@ -43,6 +45,62 @@ export interface TeamMember {
    * so it can only name the intent, not wire it up.
    */
   reportsTo: TeamAgentKey | null;
+}
+
+/**
+ * The Scrum Master is the sole timer-driven watchdog. Event handling in the
+ * plugin worker remains the primary coordinator; this timer only catches work
+ * that was stranded by a missed event or failed wake-up.
+ */
+export const SCRUM_MASTER_WATCHDOG_RUNTIME_CONFIG: Record<string, unknown> = {
+  heartbeat: {
+    enabled: true,
+    intervalSec: 1800,
+    wakeOnDemand: true,
+    maxConcurrentRuns: 1,
+    // The watchdog must inspect the board even without an assigned ticket.
+    skipTimerWhenNoActionableWork: false,
+  },
+};
+
+/** All delivery roles are invoked only by assignment or by the event-driven worker. */
+export const SCRUM_ON_DEMAND_RUNTIME_CONFIG: Record<string, unknown> = {
+  heartbeat: {
+    enabled: false,
+    intervalSec: 1800,
+    wakeOnDemand: true,
+    maxConcurrentRuns: 1,
+    skipTimerWhenNoActionableWork: true,
+  },
+};
+
+/** Returns the runtime policy for one managed Scrum role. */
+export function scrumRuntimeConfig(agentKey: TeamAgentKey): Record<string, unknown> {
+  return agentKey === "scrum-master"
+    ? SCRUM_MASTER_WATCHDOG_RUNTIME_CONFIG
+    : SCRUM_ON_DEMAND_RUNTIME_CONFIG;
+}
+
+/** Preserves unrelated runtime settings while enforcing the Scrum runtime policy. */
+export function withScrumHeartbeatRuntimeConfig(
+  agentKey: TeamAgentKey,
+  runtimeConfig: Record<string, unknown> | null | undefined
+): Record<string, unknown> {
+  const current = runtimeConfig ?? {};
+  const currentHeartbeat = isRecord(current.heartbeat) ? current.heartbeat : {};
+  const heartbeat = scrumRuntimeConfig(agentKey).heartbeat as Record<string, unknown>;
+
+  return {
+    ...current,
+    heartbeat: {
+      ...currentHeartbeat,
+      ...heartbeat,
+    },
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -62,6 +120,7 @@ export const TEAM: TeamMember[] = [
     icon: "clipboard-list",
     capabilities:
       "Product vision, backlog management, user story creation, prioritisation, business value assessment, ticket assignment",
+    runtimeConfig: scrumRuntimeConfig("product-owner"),
     reportsTo: null,
   },
   {
@@ -72,6 +131,7 @@ export const TEAM: TeamMember[] = [
     icon: "users",
     capabilities:
       "Scrum facilitation, impediment removal, flow optimisation, retrospectives, process improvement",
+    runtimeConfig: scrumRuntimeConfig("scrum-master"),
     reportsTo: null,
   },
   {
@@ -82,6 +142,7 @@ export const TEAM: TeamMember[] = [
     icon: "code",
     capabilities:
       "Software architecture, ticket refinement, story point estimation, subtask creation, implementation strategy",
+    runtimeConfig: scrumRuntimeConfig("technical-lead"),
     reportsTo: null,
   },
   {
@@ -92,6 +153,7 @@ export const TEAM: TeamMember[] = [
     icon: "bug",
     capabilities:
       "Quality assurance, acceptance criteria verification, test execution, code review, regression testing",
+    runtimeConfig: scrumRuntimeConfig("qa-engineer"),
     reportsTo: null,
   },
   {
@@ -101,6 +163,7 @@ export const TEAM: TeamMember[] = [
     title: "Developer",
     icon: "terminal",
     capabilities: "Feature development, bug fixing, unit tests, documentation, git",
+    runtimeConfig: scrumRuntimeConfig("developer-1"),
     reportsTo: "technical-lead",
   },
   {
@@ -110,6 +173,7 @@ export const TEAM: TeamMember[] = [
     title: "Developer",
     icon: "terminal",
     capabilities: "Feature development, bug fixing, unit tests, documentation, git",
+    runtimeConfig: scrumRuntimeConfig("developer-2"),
     reportsTo: "technical-lead",
   },
 ];

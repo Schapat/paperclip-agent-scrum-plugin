@@ -13,10 +13,11 @@
 
 import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 
+import { MANAGED_AGENT_INSTRUCTIONS } from "./agent-instructions";
 import { TEAM } from "./team";
 
 const PLUGIN_ID = "schapat.agent-scrum";
-const PLUGIN_VERSION = "2.0.8";
+const PLUGIN_VERSION = "2.0.12";
 
 const manifest: PaperclipPluginManifestV1 = {
   id: PLUGIN_ID,
@@ -83,7 +84,13 @@ const manifest: PaperclipPluginManifestV1 = {
     title: member.title,
     icon: member.icon,
     capabilities: member.capabilities,
-    instructions: { entryFile: "AGENTS.md", assetPath: `agents/${member.agentKey}` },
+    runtimeConfig: member.runtimeConfig,
+    status: "idle",
+    instructions: {
+      entryFile: "AGENTS.md",
+      content: MANAGED_AGENT_INSTRUCTIONS[member.agentKey],
+      assetPath: `agents/${member.agentKey}`,
+    },
   })),
 
   // ---------------------------------------------------------------------------
@@ -111,15 +118,15 @@ const manifest: PaperclipPluginManifestV1 = {
         default: "http://127.0.0.1:3100",
         title: "Paperclip API base URL",
         description:
-          "Used only to set the agent reporting line, which the plugin API cannot do. Leave the token empty to skip this.",
+          "Used to maintain reporting lines, heartbeat configuration, and managed instructions for existing Scrum agents.",
       },
       apiToken: {
         type: "string",
         default: "",
         format: "password",
-        title: "API token for hierarchy setup",
+        title: "API token for managed agent maintenance",
         description:
-          "A token with 'agent_config:update' permission. Only used to set each agent's superior after the team is created. Leave empty to wire the org chart up by hand.",
+          "A token with agent configuration permission on protected instances. Local trusted instances may leave this empty.",
       },
       enableAutoPlanning: {
         type: "boolean",

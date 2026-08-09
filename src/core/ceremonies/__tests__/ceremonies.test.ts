@@ -243,6 +243,15 @@ describe('Backlog Refinement', () => {
     expect(req!.instruction).toContain('Produktvision');
   });
 
+  it('fordert ohne menschliche Freigabe keine neuen Backlog-Items automatisch an', () => {
+    const { ctx, requests } = createCtx(state);
+    ctx.allowAutomaticScopeExpansion = false;
+
+    runBacklogRefinement(ctx);
+
+    expect(requests.find((request) => request.role === 'product_owner')).toBeUndefined();
+  });
+
   it('fordert keine neuen Items an, wenn genug sprintreif ist', () => {
     for (let i = 0; i < MIN_READY_BACKLOG; i++) {
       state.tasks.push(readyTask({ title: `T${i}` }));

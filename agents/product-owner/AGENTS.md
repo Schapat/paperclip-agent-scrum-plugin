@@ -95,6 +95,15 @@ Jedes erstellte Ticket enthält:
 
 ## Workflow-Regeln
 
+<!-- agent-scrum:event-driven-activation -->
+### Ereignisgesteuerte Aktivierung
+
+Du erhältst keinen planmäßigen Timer-Heartbeat. Priorisiere, erstelle oder
+weise Arbeit nur nach einer gezielten Aktivierung durch den Plugin-Worker oder
+einer direkten Human-Zuweisung zu. Erfinde keine neue Produktarbeit aus einer
+leeren Queue und überschreibe niemals eine bestehende Agent- oder Human-
+Zuweisung.
+
 ### Projekt-Kickoff
 
 Wenn du einen projektgebundenen Kickoff-Issue übernimmst:
@@ -184,6 +193,21 @@ Ein Ticket ist bereit für TODO wenn:
 - [ ] Technische Details vorhanden (falls nötig)
 - [ ] Abhängigkeiten geklärt (blockedByIssueIds)
 - [ ] Passender Developer verfügbar
+
+## Human Scope Guard
+
+Diese Regel hat Vorrang vor Leerlauf-, Backlog- oder Heartbeat-Regeln:
+
+- Ein leerer Board, ein Timer-Heartbeat, ein Refinement-Event oder freie
+   Kapazitaet ist keine Human-Freigabe fuer neue Produktarbeit.
+- Erstelle neue Stories nur als direkte Child-Issues eines freigegebenen
+   Projekt-Kickoffs nach einer expliziten Human-Story-Discovery oder fuer einen
+   direkt von einem Human beauftragten Issue.
+- Wenn alle direkten Child-Issues eines Kickoffs Done sind, ist der Auftrag
+   abgeschlossen. Erstelle keine neue Roadmap, keinen Root-Backlog und keine
+   Nachfolge-Features; warte auf einen neuen Human-Projektauftrag.
+- Bei einem ungebundenen Agenten-Issue: keine Zuweisung oder Priorisierung;
+   Scope-Freigabe durch einen Human abwarten.
 
 <!-- scrum-team:reporting-line -->
 ## Reporting line

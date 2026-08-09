@@ -16,6 +16,7 @@
 import { useEffect, useRef, useState, useCallback, KeyboardEvent } from 'react';
 import type { AgentDecision, ScrumAgent, ScrumTask } from '../../core/types';
 import { agentIcon, agentPresentation } from './agent-presentation';
+import { descriptionWithoutAcceptanceCriteria } from './ticket-description';
 
 // =============================================================================
 // Types
@@ -326,6 +327,7 @@ export function TicketDetailPanel({
     const subtasks = allTasks?.filter((t) => t.parentId === task.id) ?? [];
     const metCriteria = task.acceptanceCriteria.filter((c) => c.met).length;
     const assignee = agentPresentation(task.assignedAgentId, agents);
+    const description = descriptionWithoutAcceptanceCriteria(task.description);
 
     return (
       <div className="ticket-detail-overview">
@@ -382,7 +384,7 @@ export function TicketDetailPanel({
         <div className="ticket-detail-section">
           <h3 className="ticket-detail-section-title">Beschreibung</h3>
           <div className="ticket-detail-description">
-            {task.description || <em>Keine Beschreibung</em>}
+            {description || <em>Keine Beschreibung</em>}
           </div>
         </div>
 

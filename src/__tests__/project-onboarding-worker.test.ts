@@ -136,6 +136,36 @@ describe('project onboarding worker actions', () => {
     expect(rootIssue?.description).toContain('Inspect the repository');
   });
 
+  it('reconciles the Scrum-Master watchdog and on-demand runtime policies onto managed agents', async () => {
+    await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+
+    const developer = await harness.ctx.agents.managed.get('developer-1', COMPANY_ID);
+    const scrumMaster = await harness.ctx.agents.managed.get('scrum-master', COMPANY_ID);
+
+    expect(developer.agent).toMatchObject({
+      runtimeConfig: {
+        heartbeat: {
+          enabled: false,
+          intervalSec: 1800,
+          wakeOnDemand: true,
+          maxConcurrentRuns: 1,
+          skipTimerWhenNoActionableWork: true,
+        },
+      },
+    });
+    expect(scrumMaster.agent).toMatchObject({
+      runtimeConfig: {
+        heartbeat: {
+          enabled: true,
+          intervalSec: 1800,
+          wakeOnDemand: true,
+          maxConcurrentRuns: 1,
+          skipTimerWhenNoActionableWork: false,
+        },
+      },
+    });
+  });
+
   it('does not permit planning or refinement before backlog approval', async () => {
     await harness.performAction(
       'startProjectOnboarding',
@@ -677,6 +707,50 @@ describe('project onboarding worker actions', () => {
     });
   });
 
+  it('hands QA-returned project work to a developer for the repair', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const qa = board.agents.find((agent) => agent.role === 'qa_engineer');
+    const developer = board.agents.find((agent) => agent.role === 'developer');
+    const child = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Repair the image slider after QA findings',
+      status: 'in_review',
+      assigneeAgentId: qa?.id,
+    });
+    await harness.emit(
+      'issue.created',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
+    );
+
+    await harness.ctx.issues.update(child.id, { status: 'in_progress' }, COMPANY_ID);
+    await harness.emit(
+      'issue.updated',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue', actorId: qa?.id }
+    );
+
+    expect(await harness.ctx.issues.get(child.id, COMPANY_ID)).toMatchObject({
+      status: 'in_progress',
+      assigneeAgentId: developer?.id,
+    });
+    expect(await harness.ctx.issues.listComments(child.id, COMPANY_ID)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ body: expect.stringContaining('QA rework routed') }),
+      ])
+    );
+  });
+
   it('returns a direct developer completion to QA review before it can remain done', async () => {
     const kickoff = await harness.performAction<{ rootIssueId: string }>(
       'startProjectOnboarding',
@@ -720,6 +794,82 @@ describe('project onboarding worker actions', () => {
     });
   });
 
+  it('completes a delivered project instead of asking for further refinement', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+    await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const qa = board.agents.find((agent) => agent.role === 'qa_engineer');
+    const child = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Delivered image slider',
+      status: 'done',
+      assigneeAgentId: qa?.id,
+    });
+    await harness.ctx.issues.createComment(
+      child.id,
+      `QA approved\n${QA_REVIEW_APPROVED_MARKER}`,
+      COMPANY_ID,
+      { authorAgentId: qa?.id }
+    );
+    await harness.emit(
+      'issue.created',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue', actorId: qa?.id }
+    );
+
+    const completed = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    expect(completed.projectOnboarding.status).toBe('completed');
+    expect(
+      await harness.performAction<{ requested: boolean }>('requestProjectRefinement', {}, { companyId: COMPANY_ID })
+    ).toMatchObject({ requested: false });
+  });
+
+  it('holds agent-created work outside an active project for human scope approval', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+    await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const productOwner = board.agents.find((agent) => agent.role === 'product_owner');
+    const developer = board.agents.find((agent) => agent.role === 'developer');
+    const unscoped = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      title: 'Invented product feature',
+      status: 'todo',
+      assigneeAgentId: developer?.id,
+    });
+    await harness.emit(
+      'issue.created',
+      { issueId: unscoped.id },
+      { companyId: COMPANY_ID, entityId: unscoped.id, entityType: 'issue', actorId: productOwner?.id }
+    );
+
+    expect(await harness.ctx.issues.get(unscoped.id, COMPANY_ID)).toMatchObject({
+      status: 'blocked',
+      assigneeAgentId: null,
+    });
+    expect(await harness.ctx.issues.listComments(unscoped.id, COMPANY_ID)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ body: expect.stringContaining('Human scope approval required') }),
+      ])
+    );
+  });
+
   it('keeps a QA-marked completion done when project issues are hydrated', async () => {
     const kickoff = await harness.performAction<{ rootIssueId: string }>(
       'startProjectOnboarding',
@@ -752,6 +902,7 @@ describe('project onboarding worker actions', () => {
 
     expect(await harness.ctx.issues.get(child.id, COMPANY_ID)).toMatchObject({ status: 'done' });
     expect(after.tasks.find((task) => task.id === child.id)).toMatchObject({ column: 'done' });
+    expect(after.projectOnboarding.status).toBe('completed');
   });
 
   it('keeps a QA-owned completion done when the host event does not expose an actor', async () => {

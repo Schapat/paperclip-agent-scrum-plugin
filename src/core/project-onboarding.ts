@@ -52,7 +52,8 @@ const ALLOWED_TRANSITIONS: Record<ProjectOnboardingStatus, ProjectOnboardingStat
   analysis_ready: ['backlog_in_progress'],
   backlog_in_progress: ['sprint_planning', 'active'],
   sprint_planning: ['active'],
-  active: [],
+  active: ['completed'],
+  completed: [],
 };
 
 /** Erstellt den leeren Startzustand fur eine neue Organisation. */
@@ -64,6 +65,7 @@ export function createInitialProjectOnboarding(now = new Date().toISOString()): 
     rootIssueId: null,
     requiresSprint: true,
     refinementRequestedTaskIds: [],
+    scopeHolds: [],
     brief: null,
     constraints: null,
     startedAt: null,
@@ -109,6 +111,7 @@ export function startProjectOnboarding({
     rootIssueId,
     requiresSprint,
     refinementRequestedTaskIds: [],
+    scopeHolds: [],
     brief: input.brief,
     constraints: input.constraints,
     startedAt: now,
@@ -191,6 +194,7 @@ export function canStartNewProjectOnboarding(
   { taskCount, hasCurrentSprint }: NewProjectOnboardingContext
 ): boolean {
   if (!onboarding || onboarding.status === 'not_started') return true;
+  if (onboarding.status === 'completed') return !hasCurrentSprint;
 
   return (
     onboarding.status === 'active' &&

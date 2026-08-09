@@ -98,23 +98,28 @@ export function runBacklogRefinement(ctx: CeremonyContext): CeremonyRecord {
   // --- Product Owner: neue Items aus der Produktvision ---------------------
   if (findings.needsNewItems) {
     const missing = MIN_READY_BACKLOG - findings.readyCount;
+    const mayExpandScope = ctx.allowAutomaticScopeExpansion !== false;
 
     messageIds.push(
       sendMessage(state, {
         from: scrumMaster,
         to: productOwner ? [productOwner] : null,
         subject: 'Backlog aufstocken',
-        body: `Nur ${findings.readyCount} sprintreife Tickets im Backlog (Minimum ${MIN_READY_BACKLOG}). Bitte neue User Stories aus der Produktvision ableiten.`,
+        body: mayExpandScope
+          ? `Nur ${findings.readyCount} sprintreife Tickets im Backlog (Minimum ${MIN_READY_BACKLOG}). Bitte neue User Stories aus der Produktvision ableiten.`
+          : `Nur ${findings.readyCount} sprintreife Tickets im Backlog (Minimum ${MIN_READY_BACKLOG}). Menschliche Scope-Freigabe erforderlich; keine neuen Stories wurden angefordert.`,
         ceremony: 'backlog_refinement',
       }).id
     );
 
-    ctx.requestAgentWork?.({
-      ceremony: 'backlog_refinement',
-      role: 'product_owner',
-      taskIds: [],
-      instruction: `Erstelle mindestens ${missing} neue Backlog-Items (Epics/User Stories) auf Basis der Produktvision, inklusive Business Value und grober Akzeptanzkriterien.`,
-    });
+    if (mayExpandScope) {
+      ctx.requestAgentWork?.({
+        ceremony: 'backlog_refinement',
+        role: 'product_owner',
+        taskIds: [],
+        instruction: `Erstelle mindestens ${missing} neue Backlog-Items (Epics/User Stories) auf Basis der Produktvision, inklusive Business Value und grober Akzeptanzkriterien.`,
+      });
+    }
   }
 
   // --- Technical Lead: Tickets analysieren --------------------------------
@@ -205,7 +210,13 @@ export function runBacklogRefinement(ctx: CeremonyContext): CeremonyRecord {
     `Backlog Refinement: ${findings.readyCount} sprintreif, ` +
     `${needsWork.length} zur Ausarbeitung, ` +
     `${findings.tooLarge.length} zur Zerlegung` +
-    (findings.needsNewItems ? ', neue Items beim Product Owner angefordert' : '') +
+    '.';
+    (findings.needsNewItems
+      ? ctx.allowAutomaticScopeExpansion === false
+        ? ', Scope-Freigabe durch Human ausstehend'
+        : ', neue Items beim Product Owner angefordert'
+      : '') +
+    '.';
     '.';
 
   const record = createCeremonyRecord('backlog_refinement', state.currentSprint?.id ?? null, summary, {

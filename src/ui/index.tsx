@@ -356,6 +356,8 @@ export function ScrumBoardPage({ context }: PluginWidgetProps) {
             <span className="sprint-name">{data.currentSprint.name}</span>
           ) : data.projectOnboarding.status === "sprint_planning" ? (
             <span className="sprint-name">Sprint planning</span>
+          ) : data.projectOnboarding.status === "completed" ? (
+            <span className="sprint-name">Project complete</span>
           ) : (hostControlled && deliveryEnabled) ? (
             <span className="sprint-name">Paperclip project delivery</span>
           ) : (

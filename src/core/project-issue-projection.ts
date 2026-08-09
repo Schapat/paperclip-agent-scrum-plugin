@@ -326,8 +326,18 @@ function isQaEngineer(
 function checklistEntries(body: string): Array<{ text: string; met: boolean }> {
   return body.split('\n').flatMap((line) => {
     const match = line.match(/^\s*[-*]\s+\[([ xX])\]\s+(.+)$/);
-    if (!match || !match[2].trim()) return [];
-    return [{ text: match[2].trim(), met: match[1].toLowerCase() === 'x' }];
+    if (match?.[2].trim()) {
+      return [{ text: match[2].trim(), met: match[1].toLowerCase() === 'x' }];
+    }
+
+    const numberedEmojiMatch = line.match(
+      /^\s*(?:\*\*)?(?:(?:ac|criterion|kriterium)\s*)?\d+\s*[.:)\-]\s*(.+?)(?:\*\*)?\s*(✅|❌)\s*$/iu
+    );
+    if (!numberedEmojiMatch?.[1].trim()) return [];
+    return [{
+      text: numberedEmojiMatch[1].replace(/\*\*/g, '').trim(),
+      met: numberedEmojiMatch[2] === '✅',
+    }];
   });
 }
 

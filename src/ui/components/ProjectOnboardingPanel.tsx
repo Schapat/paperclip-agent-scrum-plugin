@@ -42,18 +42,21 @@ export function ProjectOnboardingPanel({
   const [projectId, setProjectId] = useState("");
   const [brief, setBrief] = useState("");
   const [constraints, setConstraints] = useState("");
+  const [startingNextProject, setStartingNextProject] = useState(false);
 
   function submitStart(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     void onStart({ projectId, brief, constraints });
   }
 
-  if (canStart) {
+  if (canStart && (onboarding.status !== "completed" || startingNextProject)) {
     return (
       <section className="project-onboarding" aria-labelledby="project-onboarding-title">
         <div className="project-onboarding-heading">
           <p className="project-onboarding-eyebrow">Project work</p>
-          <h2 id="project-onboarding-title">Start a project request</h2>
+          <h2 id="project-onboarding-title">
+            {onboarding.status === "completed" ? "Start next project request" : "Start a project request"}
+          </h2>
         </div>
 
         <form className="project-onboarding-form" onSubmit={submitStart}>
@@ -113,9 +116,12 @@ export function ProjectOnboardingPanel({
         }
       : onboarding.status === "sprint_planning" && canStartSprint
         ? { label: "Start first sprint", run: onStartSprint }
+      : onboarding.status === "completed" && canStart
+        ? { label: "Start next project request", run: () => setStartingNextProject(true) }
       : null;
   const analysisInProgress = onboarding.status === "analysis_in_progress";
   const sprintPlanning = onboarding.status === "sprint_planning";
+  const projectCompleted = onboarding.status === "completed";
 
   return (
     <section className="project-onboarding project-onboarding-status" aria-labelledby="project-onboarding-title">
@@ -149,9 +155,24 @@ export function ProjectOnboardingPanel({
             {progress.measure === "story_points"
               ? `${progress.completedPoints} / ${progress.estimatedPoints} story points (${progress.percent}%)`
               : `${progress.doneTasks} / ${progress.totalTasks} tasks complete (${progress.percent}%)`}
-            {progress.unrefinedTasks > 0 &&
+            {!projectCompleted && progress.unrefinedTasks > 0 &&
               ` · ${progress.unrefinedTasks} awaiting refinement`}
           </p>
+        )}
+
+        {projectCompleted && (
+          <p className="project-onboarding-lock" role="status">
+            Project request complete. No follow-up work will start until a human creates a new project request.
+          </p>
+        )}
+
+        {onboarding.scopeHolds.length > 0 && (
+          <div className="project-onboarding-lock" role="alert">
+            <strong>Human scope approval required</strong>
+            <span>
+              {onboarding.scopeHolds.length} agent-created item{onboarding.scopeHolds.length === 1 ? " was" : "s were"} held outside this project: {onboarding.scopeHolds.map((hold) => hold.title).join(", ")}.
+            </span>
+          </div>
         )}
 
         {latestEventSummary && (
@@ -161,7 +182,7 @@ export function ProjectOnboardingPanel({
           </p>
         )}
 
-        {hostControlled && progress.unrefinedTasks > 0 && (
+        {hostControlled && !projectCompleted && progress.unrefinedTasks > 0 && (
           <p className="project-onboarding-lock">
             Sprint planning waits for Technical Lead refinement with estimates and acceptance criteria.
           </p>
@@ -203,6 +224,8 @@ function stageLabel(status: ProjectOnboarding["status"], hostControlled: boolean
       return "Sprint planning waits for human approval";
     case "active":
       return hostControlled ? "Paperclip delivery active" : "Delivery enabled";
+    case "completed":
+      return "Project request complete — awaiting human direction";
     default:
       return "Project request not started";
   }
