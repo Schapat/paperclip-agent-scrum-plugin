@@ -22,24 +22,9 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function successfulGitHubFetch() {
+function githubCommitFetch() {
   return vi.fn(async (input: string | URL | Request) => {
     const url = String(input);
-    if (url.endsWith('/repos/example/bmw-website')) return jsonResponse({});
-    if (url.endsWith('/repos/example/bmw-website/actions/workflows?per_page=1')) {
-      return jsonResponse({ total_count: 1 });
-    }
-    if (url.endsWith('/repos/example/bmw-website/actions/runs?per_page=1')) {
-      return jsonResponse({
-        workflow_runs: [{
-          name: 'CI',
-          status: 'completed',
-          conclusion: 'success',
-          html_url: 'https://github.com/example/bmw-website/actions/runs/1',
-          updated_at: '2026-08-09T12:00:00.000Z',
-        }],
-      });
-    }
     if (url.endsWith('/repos/example/bmw-website/commits/a1b2c3d4e5f6')) {
       return jsonResponse({
         sha: 'a1b2c3d4e5f6',
@@ -159,7 +144,7 @@ describe('project onboarding worker actions', () => {
   let harness: ReturnType<typeof createTestHarness>;
 
   beforeEach(async () => {
-    vi.stubGlobal('fetch', successfulGitHubFetch());
+    vi.stubGlobal('fetch', githubCommitFetch());
     harness = createTestHarness({ manifest, config: { enableTeam: true, requireProjectSprint: false } });
     harness.seed({ projects: [project()], projectWorkspaces: [workspace()] });
     await plugin.definition.setup(harness.ctx);
@@ -203,8 +188,11 @@ describe('project onboarding worker actions', () => {
     expect(rootIssue?.description).toContain('Inspect the repository');
   });
 
-  it('does not create a kickoff when the linked GitHub repository cannot be validated', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({}, 404)));
+  it('trusts a Paperclip-linked GitHub workspace without requiring GitHub Actions', async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new Error('Onboarding must not call GitHub directly.');
+    });
+    vi.stubGlobal('fetch', fetchMock);
 
     const result = await harness.performAction<{ started: boolean; error?: string }>(
       'startProjectOnboarding',
@@ -212,11 +200,8 @@ describe('project onboarding worker actions', () => {
       { companyId: COMPANY_ID }
     );
 
-    expect(result).toEqual({
-      started: false,
-      error: 'The GitHub repository is not reachable. Configure a GitHub token for private repositories.',
-    });
-    expect(await harness.ctx.issues.list({ companyId: COMPANY_ID })).toEqual([]);
+    expect(result).toMatchObject({ started: true });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('loads GitHub file changes for a developer-recorded project commit', async () => {

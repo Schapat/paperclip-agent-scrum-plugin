@@ -36,7 +36,6 @@ import { projectIssueProjection, projectProgress } from "./core/project-issue-pr
 import {
   fetchGitHubCommitChanges,
   parseGitHubRepositoryUrl,
-  validateGitHubRepository,
 } from "./core/github-repository";
 import {
   PRODUCT_DECISION_REQUIRED_MARKER,
@@ -1454,11 +1453,6 @@ const plugin = definePlugin({
       }
     }
 
-    function isGitHubRemote(repoUrl: unknown): repoUrl is string {
-      if (typeof repoUrl !== "string") return false;
-      return /^(?:https?:\/\/github\.com(?:\/|$)|git@github\.com:)/i.test(repoUrl.trim());
-    }
-
     // -------------------------------------------------------------------------
     // Ceremonies
     // -------------------------------------------------------------------------
@@ -1766,21 +1760,6 @@ const plugin = definePlugin({
           error:
             "The selected project needs a primary workspace. Add its repository or local folder in Paperclip first.",
         };
-      }
-
-      if (isGitHubRemote(workspace.repoUrl)) {
-        const config = await readConfig();
-        const token = String(config.githubToken ?? "").trim();
-        const validation = await validateGitHubRepository(workspace.repoUrl, { token });
-        if (!validation.valid) {
-          return { started: false, error: validation.error };
-        }
-        ctx.logger.info("GitHub repository validated for project onboarding", {
-          projectId: project.id,
-          repository: validation.repository.webUrl,
-          pipeline: validation.pipeline.name,
-          pipelineUrl: validation.pipeline.url,
-        });
       }
 
       const technicalLead = state.agents.find((agent) => agent.role === "technical_lead");

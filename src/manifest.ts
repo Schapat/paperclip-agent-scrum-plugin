@@ -17,7 +17,7 @@ import { MANAGED_AGENT_INSTRUCTIONS } from "./agent-instructions";
 import { TEAM } from "./team";
 
 const PLUGIN_ID = "schapat.agent-scrum";
-const PLUGIN_VERSION = "2.1.0";
+const PLUGIN_VERSION = "2.1.1";
 
 const manifest: PaperclipPluginManifestV1 = {
   id: PLUGIN_ID,
@@ -132,9 +132,9 @@ const manifest: PaperclipPluginManifestV1 = {
         type: "string",
         default: "",
         format: "password",
-        title: "GitHub token for repository validation",
+        title: "GitHub token for private commit details",
         description:
-          "Optional token for private GitHub repositories. Project onboarding verifies repository access and the latest successful GitHub Actions run.",
+          "Optional token for private GitHub repositories. Used only to load file-level changes for a recorded ticket commit.",
       },
       enableAutoPlanning: {
         type: "boolean",

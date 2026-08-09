@@ -5,7 +5,7 @@ board state, tickets move through a Kanban board, and the retrospective turns
 finished work into skills the team applies next sprint.
 
 ![Plugin API](https://img.shields.io/badge/plugin%20API-v1-blue.svg)
-![Tests](https://img.shields.io/badge/tests-372%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-370%20passing-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
 ---
@@ -95,7 +95,7 @@ paperclipai plugin install /absolute/path/to/paperclip-agent-scrum-plugin
 Expected output:
 
 ```
-✓ Installed schapat.agent-scrum v2.1.0 (ready)
+✓ Installed schapat.agent-scrum v2.1.1 (ready)
 ```
 
 ### Update an existing local installation
@@ -149,7 +149,7 @@ settings or with `paperclipai plugin config:set`.
 | `wipLimitReview` | `3` | Sets the Review work-in-progress limit. |
 | `apiBaseUrl` | `http://127.0.0.1:3100` | Lets the plugin maintain reporting lines, the runtime policy, and managed instructions through Paperclip's REST API. |
 | `apiToken` | empty | Optional token for managed-agent maintenance on protected instances. |
-| `githubToken` | empty | Optional token for private GitHub repositories. Onboarding uses it to validate repository access and the latest successful GitHub Actions run. |
+| `githubToken` | empty | Optional token for private GitHub repositories. Used only when the Code tab loads file changes for a recorded commit. |
 
 For a direct-delivery organisation, explicitly disable the new sprint gate
 before starting its project request:
@@ -215,10 +215,10 @@ established website.
 
 1. In Paperclip, make sure the project has a **primary workspace**. Its
   repository or local-folder link is the codebase the agents analyze and use
-  for delivery. For a GitHub remote, onboarding verifies repository access,
-  at least one GitHub Actions workflow, and the latest successful workflow run
-  before it creates the kickoff issue. Set `githubToken` for a private
-  repository.
+  for delivery. Paperclip owns this connection; onboarding trusts the primary
+  workspace and does not require an external GitHub or CI check. Set
+  `githubToken` only when the Code tab must read a recorded commit from a
+  private GitHub repository.
 2. Open **Scrum Board** and choose the Paperclip project under **Start a project
   request**.
 3. Enter the requested outcome and any non-negotiable constraints. For example:
@@ -578,7 +578,7 @@ whom*; the agents decide *what it says*.
 pnpm setup:sdk --paperclip /path/to/paperclip   # once
 pnpm install
 pnpm dev                                        # watch build
-pnpm test                                       # 372 tests
+pnpm test                                       # 370 tests
 pnpm typecheck
 ```
 
@@ -606,7 +606,7 @@ call carrying company scope):
   exactly six agents, not partial teams.
 - **Organisations are isolated.** Each company gets its own board and its own
   opt-in; activating one leaves the other untouched.
-- **The local v2.1.0 upgrade is healthy.** The host reports the GitHub token
+- **The local v2.1.1 upgrade is healthy.** The host reports the GitHub token
   setting, updated Developer commit-evidence instructions, a valid manifest,
   and `ready` health after reloading the local package path.
 
@@ -631,10 +631,11 @@ Stated plainly, because the alternative is a README that lies:
   over `PATCH /api/agents/:id`. On an instance requiring authentication, set
   `apiToken` in the plugin settings; without a reachable API the plugin falls
   back to reporting the drift.
-- **GitHub delivery evidence targets github.com and GitHub Actions.** Other
-  forges are not validated at onboarding. GitHub can omit a file patch for very
-  large or binary changes; the Code tab still lists the file and its change
-  statistics in that case.
+- **GitHub delivery evidence targets github.com.** Other forges still work for
+  Paperclip project onboarding, but their recorded commits do not receive the
+  GitHub-specific Code tab. GitHub can omit a file patch for very large or
+  binary changes; the Code tab still lists the file and its change statistics in
+  that case.
 - **No performance measurements.** Nothing here has been profiled under load.
 
 ---
