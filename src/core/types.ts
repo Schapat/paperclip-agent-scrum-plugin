@@ -404,6 +404,11 @@ export interface AgentSkill {
   reinforcementCount: number;
   createdAt: string;
   activatedAt: string | null;
+  /** Native Paperclip-Skill, der diesen lokalen Retrospektiv-Skill abbildet. */
+  paperclipSkillId?: string;
+  paperclipSkillKey?: string;
+  /** Agents, denen der Worker den aktiven Skill bereits einmal zugeordnet hat. */
+  paperclipAssignedAgentIds?: string[];
 }
 
 /**

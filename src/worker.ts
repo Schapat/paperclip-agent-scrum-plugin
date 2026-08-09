@@ -69,7 +69,13 @@ import {
   type CeremonyContext,
 } from "./core/ceremonies";
 import { byBusinessValue, isReady } from "./core/ceremonies/types";
-import { collectInstructionUpdates, type InstructionUpdate } from "./core/learning";
+import {
+  assignSkillsToAgent,
+  collectInstructionUpdates,
+  ensureLibrarySkills,
+  type InstructionUpdate,
+  type SkillSyncClient,
+} from "./core/learning";
 import {
   TEAM,
   describeReportingLine,
@@ -430,13 +436,68 @@ const plugin = definePlugin({
       return Boolean(rootIssueId && state.tasks.some((task) => task.parentId === rootIssueId));
     }
 
+    /** Runs the required sprint-close ceremonies before closing a delivered project request. */
+    function closeDeliveredProjectSprint(projectTasks: ScrumTask[]): void {
+      const sprint = state.currentSprint;
+      if (!sprint) return;
+
+      const projectTaskIds = new Set(projectTasks.map((task) => task.id));
+      const sprintContainsProjectWork =
+        sprint.taskIds.some((taskId) => projectTaskIds.has(taskId)) ||
+        projectTasks.some((task) => task.sprintId === sprint.id);
+      if (!sprintContainsProjectWork) return;
+
+      const queuedWorkCount = pendingWork.length;
+      const queuedInstructionCount = pendingInstructionUpdates.length;
+      try {
+        const hasReview = state.ceremonies.some(
+          (ceremony) => ceremony.type === "sprint_review" && ceremony.sprintId === sprint.id
+        );
+        if (sprint.status === "active" && !hasReview) {
+          runCeremony("sprint_review", false);
+        }
+
+        const currentSprint = state.currentSprint;
+        if (!currentSprint || currentSprint.id !== sprint.id || currentSprint.status !== "completed") return;
+
+        const hasRetrospective = state.ceremonies.some(
+          (ceremony) => ceremony.type === "sprint_retrospective" && ceremony.sprintId === sprint.id
+        );
+        if (!hasRetrospective) {
+          runCeremony("sprint_retrospective", false);
+        }
+
+        if (
+          state.ceremonies.some(
+            (ceremony) => ceremony.type === "sprint_retrospective" && ceremony.sprintId === sprint.id
+          )
+        ) {
+          state.currentSprint = null;
+        }
+      } finally {
+        // Review findings remain visible in state, but cannot autonomously create new scope.
+        pendingWork.splice(queuedWorkCount);
+        pendingInstructionUpdates.splice(queuedInstructionCount);
+      }
+    }
+
     /** Closes a human-requested project once every direct delivery story is done. */
     function completeProjectOnboardingIfDelivered(): boolean {
       const onboarding = state.projectOnboarding;
-      if (!onboarding?.rootIssueId || onboarding.status !== "active") return false;
+      if (
+        !onboarding?.rootIssueId ||
+        (onboarding.status !== "active" && onboarding.status !== "completed")
+      ) {
+        return false;
+      }
 
       const projectTasks = state.tasks.filter((task) => task.parentId === onboarding.rootIssueId);
       if (projectTasks.length === 0 || projectTasks.some((task) => task.column !== "done")) return false;
+
+      const previousSprintId = state.currentSprint?.id ?? null;
+      closeDeliveredProjectSprint(projectTasks);
+      const sprintClosed = previousSprintId !== null && state.currentSprint === null;
+      if (onboarding.status === "completed") return sprintClosed;
 
       state.projectOnboarding = transitionProjectOnboarding(onboarding, "completed");
       return true;
@@ -822,6 +883,53 @@ const plugin = definePlugin({
         return review;
       } catch (error) {
         ctx.logger.warn("Could not route direct project completion to QA", {
+          issueId: issue.id,
+          error: String(error),
+        });
+        return issue;
+      }
+    }
+
+    /** Restores a final QA approval that an older criteria projection left outside Done. */
+    async function completeFinalQaProjectReview(issue: Issue): Promise<Issue> {
+      if (
+        !companyId ||
+        !isProjectOnboardingChildIssue(issue) ||
+        (issue.status !== "in_review" && issue.status !== "in_progress")
+      ) {
+        return issue;
+      }
+
+      const qa = state.agents.find((agent) => agent.role === "qa_engineer");
+      if (!qa) return issue;
+
+      try {
+        const comments = await ctx.issues.listComments(issue.id, companyId);
+        if (!hasQaReviewApproval(comments, qa.id)) return issue;
+
+        const projection = projectIssueProjection({
+          issueId: issue.id,
+          description: issue.description ?? "",
+          comments,
+          agents: state.agents,
+        });
+        const hasCommitEvidence = projection.commits.length > 0;
+        const criteriaVerified = projection.refinement.acceptanceCriteria.every((criterion) => criterion.met);
+        if (!hasCommitEvidence || !criteriaVerified) return issue;
+
+        const completed = await ctx.issues.update(
+          issue.id,
+          { status: "done", assigneeAgentId: qa.id },
+          companyId
+        );
+        ctx.logger.info("Recovered final QA-approved project review", {
+          issueId: completed.id,
+          qaId: qa.id,
+          criteriaCount: projection.refinement.acceptanceCriteria.length,
+        });
+        return completed;
+      } catch (error) {
+        ctx.logger.warn("Could not recover final QA-approved project review", {
           issueId: issue.id,
           error: String(error),
         });
@@ -1306,7 +1414,8 @@ const plugin = definePlugin({
         (
           onboarding.status !== "backlog_in_progress" &&
           onboarding.status !== "sprint_planning" &&
-          onboarding.status !== "active"
+          onboarding.status !== "active" &&
+          onboarding.status !== "completed"
         )
       ) {
         return false;
@@ -1326,7 +1435,8 @@ const plugin = definePlugin({
           });
           for (const issue of issues) {
             const completionGatedIssue = await routeProjectCompletionToQa(issue, null);
-            const reworkRoutedIssue = await routeProjectReworkToDeveloper(completionGatedIssue);
+            const qaCompletedIssue = await completeFinalQaProjectReview(completionGatedIssue);
+            const reworkRoutedIssue = await routeProjectReworkToDeveloper(qaCompletedIssue);
             const routedIssue = await routeProjectReview(reworkRoutedIssue);
             const result = syncProjectOnboardingIssue(
               state.tasks,
@@ -1353,6 +1463,7 @@ const plugin = definePlugin({
         if (changed) state.metrics = recalculateMetrics(state);
         await save();
       }
+      if (projectCompleted) await syncRetrospectiveSkills();
       await releaseResolvedProjectBlockers();
       return changed || projectCompleted;
     }
@@ -1464,6 +1575,7 @@ const plugin = definePlugin({
 
       state.agents = team;
       await upgradeManagedAgentHeartbeats(resolved);
+      await syncRetrospectiveSkills();
       ctx.logger.info("Scrum team ready", {
         agents: team.length,
         roles: team.map((a) => a.role).join(", "),
@@ -1484,6 +1596,153 @@ const plugin = definePlugin({
           hint: "Set 'API token for hierarchy setup' in the plugin settings to have this applied automatically.",
         });
       }
+    }
+
+    /**
+     * Veröffentlicht lokale Retrospektiv-Skills in der Paperclip-Bibliothek und
+     * versieht passende Rollen einmalig mit den aktiven Skills. Die gemerkten
+     * Agent-IDs verhindern, dass ein späteres manuelles Abwählen im nativen UI
+     * bei jedem Board-Refresh wieder rückgängig gemacht wird.
+     */
+    async function syncRetrospectiveSkills(): Promise<void> {
+      if (!companyId || state.skills.length === 0 || state.agents.length === 0) return;
+
+      const config = await readConfig();
+      const baseUrl = String(config.apiBaseUrl ?? "").trim().replace(/\/+$/, "");
+      if (!baseUrl) return;
+
+      const token = String(config.apiToken ?? "").trim();
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (token) headers.authorization = `Bearer ${token}`;
+
+      const client: SkillSyncClient = {
+        async listCompanySkills(targetCompanyId) {
+          const response = await fetch(`${baseUrl}/api/companies/${targetCompanyId}/skills`, { headers });
+          if (!response.ok) throw new Error(`Could not list Company Skills (${response.status})`);
+
+          const payload = await response.json();
+          return Array.isArray(payload)
+            ? payload.flatMap((value) => {
+                const skill = asRecord(value);
+                return (
+                  typeof skill.id === "string" &&
+                  typeof skill.key === "string" &&
+                  typeof skill.slug === "string" &&
+                  typeof skill.name === "string"
+                )
+                  ? [{ id: skill.id, key: skill.key, slug: skill.slug, name: skill.name }]
+                  : [];
+              })
+            : [];
+        },
+        async createCompanySkill(targetCompanyId, params) {
+          const response = await fetch(`${baseUrl}/api/companies/${targetCompanyId}/skills`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify(params),
+          });
+          if (!response.ok) throw new Error(`Could not create Company Skill (${response.status})`);
+
+          const skill = asRecord(await response.json());
+          if (
+            typeof skill.id !== "string" ||
+            typeof skill.key !== "string" ||
+            typeof skill.slug !== "string" ||
+            typeof skill.name !== "string"
+          ) {
+            throw new Error("Paperclip returned an invalid Company Skill");
+          }
+          return { id: skill.id, key: skill.key, slug: skill.slug, name: skill.name };
+        },
+        async listAgentSkills(agentId) {
+          const response = await fetch(`${baseUrl}/api/agents/${agentId}/skills`, { headers });
+          if (!response.ok) throw new Error(`Could not list Agent Skills (${response.status})`);
+
+          const snapshot = asRecord(await response.json());
+          return {
+            desiredSkills: Array.isArray(snapshot.desiredSkills)
+              ? snapshot.desiredSkills.filter((key): key is string => typeof key === "string")
+              : undefined,
+            entries: Array.isArray(snapshot.entries)
+              ? snapshot.entries.flatMap((value) => {
+                  const entry = asRecord(value);
+                  return typeof entry.key === "string" && typeof entry.desired === "boolean"
+                    ? [{ key: entry.key, desired: entry.desired }]
+                    : [];
+                })
+              : undefined,
+          };
+        },
+        async syncAgentSkills(agentId, desiredSkills) {
+          const response = await fetch(`${baseUrl}/api/agents/${agentId}/skills/sync`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({ desiredSkills }),
+          });
+          if (!response.ok) throw new Error(`Could not sync Agent Skills (${response.status})`);
+          return response.json();
+        },
+      };
+
+      let library;
+      try {
+        library = await ensureLibrarySkills(client, companyId, state.skills);
+      } catch (error) {
+        ctx.logger.warn("Could not publish learned skills to Paperclip", { error: String(error) });
+        return;
+      }
+
+      let changed = false;
+      for (const skill of state.skills) {
+        const paperclipSkillKey = library.keys.get(skill.id);
+        const paperclipSkillId = library.skillIds.get(skill.id);
+        if (!paperclipSkillKey || !paperclipSkillId) continue;
+        if (skill.paperclipSkillKey !== paperclipSkillKey || skill.paperclipSkillId !== paperclipSkillId) {
+          skill.paperclipSkillKey = paperclipSkillKey;
+          skill.paperclipSkillId = paperclipSkillId;
+          changed = true;
+        }
+      }
+
+      let assignments = 0;
+      for (const agent of state.agents) {
+        const pendingSkills = state.skills.filter((skill) =>
+          skill.active &&
+          skill.roles.includes(agent.role) &&
+          !(Array.isArray(skill.paperclipAssignedAgentIds) && skill.paperclipAssignedAgentIds.includes(agent.id)) &&
+          library.keys.has(skill.id)
+        );
+        if (pendingSkills.length === 0) continue;
+
+        try {
+          await assignSkillsToAgent(
+            client,
+            agent.id,
+            pendingSkills.map((skill) => library.keys.get(skill.id)!)
+          );
+          for (const skill of pendingSkills) {
+            skill.paperclipAssignedAgentIds = [
+              ...new Set([...(skill.paperclipAssignedAgentIds ?? []), agent.id]),
+            ];
+          }
+          changed = true;
+          assignments += 1;
+        } catch (error) {
+          ctx.logger.warn("Could not assign learned skills to managed agent", {
+            agentId: agent.id,
+            error: String(error),
+          });
+        }
+      }
+
+      if (library.created.length > 0 || assignments > 0) {
+        ctx.logger.info("Learned skills synchronized with Paperclip", {
+          created: library.created.length,
+          reused: library.reused.length,
+          assignments,
+        });
+      }
+      if (changed) await save();
     }
 
     /**
@@ -1737,6 +1996,7 @@ const plugin = definePlugin({
       }
 
       triggers.evaluate();
+      await syncRetrospectiveSkills();
       await dispatchWork();
       await save();
     }
@@ -1808,7 +2068,8 @@ const plugin = definePlugin({
         if (!issue) return false;
 
         const completionGatedIssue = await routeProjectCompletionToQa(issue, event.actorId ?? null);
-        const reworkRoutedIssue = await routeProjectReworkToDeveloper(completionGatedIssue);
+        const qaCompletedIssue = await completeFinalQaProjectReview(completionGatedIssue);
+        const reworkRoutedIssue = await routeProjectReworkToDeveloper(qaCompletedIssue);
         const routedIssue = await routeProjectReview(reworkRoutedIssue);
         const result = syncProjectOnboardingIssue(
           state.tasks,
@@ -2376,6 +2637,50 @@ const plugin = definePlugin({
       }
     });
 
+    registerCompanyAction("dismissScopeHold", async (params) => {
+      if (!companyId) return { dismissed: false, error: "No company context." };
+
+      const issueId = typeof params.issueId === "string" ? params.issueId : "";
+      const onboarding = state.projectOnboarding;
+      const hold = onboarding?.scopeHolds.find((candidate) => candidate.issueId === issueId);
+      if (!issueId || !onboarding?.projectId || !hold) {
+        return { dismissed: false, error: "This ticket has no pending held scope item." };
+      }
+
+      try {
+        const issue = await ctx.issues.get(issueId, companyId);
+        if (!issue || issue.projectId !== onboarding.projectId) {
+          return {
+            dismissed: false,
+            error: "Only held tickets from this Paperclip project can be dismissed.",
+          };
+        }
+
+        if (issue.status !== "cancelled") {
+          await ctx.issues.update(issueId, { status: "cancelled", assigneeAgentId: null }, companyId);
+        }
+        await ctx.issues.createComment(
+          issueId,
+          "## Human scope dismissed\n\nA human dismissed this held item. No follow-up project request or delivery work will start from it.",
+          companyId
+        );
+        state.projectOnboarding = {
+          ...onboarding,
+          scopeHolds: onboarding.scopeHolds.filter((candidate) => candidate.issueId !== issueId),
+          updatedAt: new Date().toISOString(),
+        };
+        await save();
+        ctx.logger.info("Human scope hold dismissed", { issueId });
+        return { dismissed: true, error: null };
+      } catch (error) {
+        ctx.logger.warn("Could not dismiss held project scope", {
+          issueId,
+          error: String(error),
+        });
+        return { dismissed: false, error: String(error) };
+      }
+    });
+
     registerCompanyAction("startScopeHoldFollowUp", async (params) => {
       if (!companyId) return { started: false, error: "No company context." };
 
@@ -2568,6 +2873,7 @@ const plugin = definePlugin({
       }
 
       const record = runCeremony(ceremony, true);
+    await syncRetrospectiveSkills();
       await dispatchWork();
       await save();
       return { started: true, record };

@@ -17,29 +17,28 @@
 import type { AgentSkill } from '../types';
 
 /**
- * Erzeugt einen URL-tauglichen Slug aus einem Skill-Namen.
+ * Erzeugt einen URL-tauglichen, plugin-eigenen Slug aus der Skill-ID.
  *
- * Der Slug ist der Schlüssel, über den ein Skill dem Agent zugewiesen wird —
- * er muss über Sprints hinweg stabil bleiben, damit derselbe Skill nicht
- * mehrfach in der Bibliothek landet.
+ * Der Slug ist Bestandteil des nativen Paperclip-Keys. Eine ID-basierte
+ * Namensraum-Präfixierung verhindert, dass der Worker einen gleichnamigen,
+ * manuell angelegten Company Skill versehentlich wiederverwendet.
  */
 export function toSkillSlug(skill: AgentSkill): string {
-  const base = skill.name
+  const normalizedId = skill.id
     .toLowerCase()
-    // Umlaute zuerst ausschreiben: nach einer NFD-Zerlegung wäre "ä" bereits
-    // "a" + Kombinationszeichen, und aus "Fehlerfälle" würde "fehlerfalle"
     .replace(/ä/g, 'ae')
     .replace(/ö/g, 'oe')
     .replace(/ü/g, 'ue')
     .replace(/ß/g, 'ss')
-    // Übrige Diakritika (é, à, …) auf den Grundbuchstaben reduzieren
     .normalize('NFD')
     .replace(/[̀-ͯ]/g, '')
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
-    .slice(0, 60);
+    .slice(0, 80);
 
-  return base ? `scrum-${base}` : `scrum-skill-${skill.id.slice(0, 8)}`;
+  return normalizedId
+    ? `agent-scrum-learning-${normalizedId}`
+    : 'agent-scrum-learning-unknown';
 }
 
 /**
@@ -67,7 +66,7 @@ export function toSkillMarkdown(skill: AgentSkill): string {
  * Minimalschnittstelle des Clients — hält dieses Modul unabhängig testbar.
  */
 export interface SkillSyncClient {
-  listCompanySkills(companyId: string): Promise<Array<{ id: string; slug: string; name: string }>>;
+  listCompanySkills(companyId: string): Promise<Array<{ id: string; key: string; slug: string; name: string }>>;
   createCompanySkill(
     companyId: string,
     params: {
@@ -77,8 +76,9 @@ export interface SkillSyncClient {
       markdown?: string;
       categories?: string[];
     }
-  ): Promise<{ id: string; slug: string; name: string }>;
+  ): Promise<{ id: string; key: string; slug: string; name: string }>;
   listAgentSkills(agentId: string): Promise<{
+    desiredSkills?: string[];
     entries?: Array<{ key: string; desired: boolean }>;
   }>;
   syncAgentSkills(agentId: string, desiredSkills: string[]): Promise<unknown>;
@@ -103,11 +103,19 @@ export async function ensureLibrarySkills(
   client: SkillSyncClient,
   companyId: string,
   skills: AgentSkill[]
-): Promise<{ slugs: Map<string, string>; created: string[]; reused: string[] }> {
+): Promise<{
+  slugs: Map<string, string>;
+  keys: Map<string, string>;
+  skillIds: Map<string, string>;
+  created: string[];
+  reused: string[];
+}> {
   const existing = await client.listCompanySkills(companyId);
   const bySlug = new Map(existing.map((s) => [s.slug, s]));
 
   const slugs = new Map<string, string>();
+  const keys = new Map<string, string>();
+  const skillIds = new Map<string, string>();
   const created: string[] = [];
   const reused: string[] = [];
 
@@ -116,21 +124,26 @@ export async function ensureLibrarySkills(
     slugs.set(skill.id, slug);
 
     if (bySlug.has(slug)) {
+      const existingSkill = bySlug.get(slug)!;
+      keys.set(skill.id, existingSkill.key);
+      skillIds.set(skill.id, existingSkill.id);
       reused.push(slug);
       continue;
     }
 
-    await client.createCompanySkill(companyId, {
+    const createdSkill = await client.createCompanySkill(companyId, {
       name: skill.name,
       slug,
       description: skill.description,
       markdown: toSkillMarkdown(skill),
       categories: [skill.category],
     });
+    keys.set(skill.id, createdSkill.key);
+    skillIds.set(skill.id, createdSkill.id);
     created.push(slug);
   }
 
-  return { slugs, created, reused };
+  return { slugs, keys, skillIds, created, reused };
 }
 
 /**
@@ -147,7 +160,9 @@ export async function assignSkillsToAgent(
   slugs: string[]
 ): Promise<boolean> {
   const snapshot = await client.listAgentSkills(agentId);
-  const current = (snapshot.entries ?? []).filter((e) => e.desired).map((e) => e.key);
+  const current = snapshot.desiredSkills
+    ? snapshot.desiredSkills.filter((key): key is string => typeof key === 'string' && key.length > 0)
+    : (snapshot.entries ?? []).filter((entry) => entry.desired).map((entry) => entry.key);
 
   const desired = [...new Set([...current, ...slugs])];
 

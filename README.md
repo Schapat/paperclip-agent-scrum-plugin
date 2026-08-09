@@ -5,7 +5,7 @@ board state, tickets move through a Kanban board, and the retrospective turns
 finished work into skills the team applies next sprint.
 
 ![Plugin API](https://img.shields.io/badge/plugin%20API-v1-blue.svg)
-![Tests](https://img.shields.io/badge/tests-370%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-400%20passing-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
 ---
@@ -26,7 +26,7 @@ and asks the agents to do the parts that need judgement.
 | Turn a request into controlled delivery | A human starts technical analysis for a Paperclip project; the resulting, project-bound backlog is approved, then refined with estimates and acceptance criteria. By default, a human explicitly starts Sprint Planning before delivery. Paperclip issues remain the delivery source of truth. |
 | Keep work flowing without ceremony theatre | Planning, refinement, blocker resolution, review, and retrospective react to board state. A slow Scrum Master watchdog recovers stranded work without becoming a second scheduler. |
 | Protect quality and approved scope | Acceptance criteria, QA review, a Developer rework hand-off, a second QA pass, and GitHub commit evidence protect the Done state. Only direct child issues of the approved kickoff are delivered; unapproved agent-created work is held for a human decision. |
-| See and steer the process | The Scrum Board shows the project request, Kanban flow, ticket detail, GitHub code changes, blocked work, and manually runnable ceremonies. Sprint Progress and Team Status widgets give a compact dashboard view, while the Agent log exposes decisions and learnings. |
+| See and steer the process | The Scrum Board shows the project request, Kanban flow, ticket detail, GitHub code changes, blocked work, and manually runnable ceremonies. Its project header separates the current work outside the board from the latest board event, names the responsible role and next human approval, and links directly to the Paperclip kickoff ticket. Sprint Progress and Team Status widgets give a compact dashboard view, while the Agent log exposes decisions and learnings. |
 | Improve the next sprint | The retrospective turns recurring, evidence-backed delivery patterns into role-specific skills that accompany the next agent invocation. |
 | Activate safely per organisation | Six managed roles are created only after an explicit organisation-level opt-in. Boards and settings are isolated by company, so enabling one team does not populate another. |
 
@@ -184,6 +184,32 @@ the approved acceptance criteria. QA remains the required quality gate. New
 requirements outside the ticket or sprint scope stay outside delivery and are
 escalated through the existing scope guard.
 
+### QA completion
+
+For a project ticket, the final QA approval marker is the authoritative record
+that its refined acceptance criteria were verified. This keeps a completed
+ticket in Done even when the QA checklist summarizes the same checks with
+different wording. Only a later QA changes-requested verdict invalidates that
+approval; a system routing comment does not. A new QA sign-off remains necessary
+after actual further development.
+
+### Held scope
+
+Work held outside an approved project scope can be promoted to a follow-up
+request or dismissed. Dismissing it cancels only the held Paperclip issue and
+removes it from the board; it does not reopen the completed project or create
+new delivery work.
+
+### Next feature
+
+When the final sprint ticket reaches Done, Agent Scrum records the Sprint Review
+and Retrospective, archives the sprint, and unlocks **Plan next feature** in the
+board. Use it for a request such as a de/EN translation toggle. The new request
+starts a fresh Technical Lead analysis, Product Owner backlog, human backlog
+approval, refinement, and sprint. Developers then establish the next shared
+`feature/{feature-id}-{short-description}` branch according to the existing
+feature-branch delivery rule.
+
 ### 5. Open the board
 
 Open **Scrum Board** in the **Work** section of the Paperclip sidebar.
@@ -257,10 +283,12 @@ established website.
   issue: relevant files and patterns, tests, risks, and a proposed approach.
 5. The Technical Lead closes the analysis comment with
   `<!-- agent-scrum:technical-analysis-complete -->`. Until then, story
-  discovery stays locked in the board. Review the completed analysis, then
-  select **Start story discovery**. The Product
-  Owner reads the analysis and creates a small initial backlog as child issues
-  of the kickoff issue, retaining the project and workspace context.
+  discovery stays locked in the board. The project header then identifies the
+  Technical Lead analysis as ready for approval. Open the kickoff ticket,
+  review the completed analysis, and select **Approve technical analysis**.
+  The Product Owner reads the analysis and creates a small initial backlog as
+  child issues of the kickoff issue, retaining the project and workspace
+  context.
 6. Review the proposed backlog and select **Approve backlog for sprint planning**.
   By default, the plugin records the approval, holds delivery at Sprint Planning,
   and asks the Technical Lead to refine every unready child issue. A refinement
@@ -285,6 +313,15 @@ not a backlog story; it is the shared analysis and decision record for the
 project request. Child-issue comments and structured decisions are projected
 into the ticket details, while the project widget reports task progress until
 all stories have estimates and story-point progress afterwards.
+
+### Follow work outside the board
+
+The project header continuously distinguishes the current external workflow
+from the latest board event. It reports when the Technical Lead is analysing or
+refining, when the Product Owner is writing the initial backlog, and when a
+human approval is required. **Open in board** opens the relevant decision view;
+the adjacent link opens the same kickoff ticket directly in Paperclip. When no
+project work is running, the header explicitly reports that empty state.
 
 ### Review routing
 
@@ -484,8 +521,14 @@ Two rules keep this honest:
   reason twice is a pattern. Softer signals start inactive and activate only
   when the pattern repeats — otherwise the skill list fills with noise.
 
-Active skills are visible under **Agent log → Learnings** and are attached to
-the prompt whenever the plugin wakes an agent for that role.
+Every learned skill is also published under **Company → Skills** in Paperclip.
+Inactive skills remain visible there, but the plugin does not assign them
+automatically. Once a skill becomes active, it is added once to the matching
+roles under **Agent → Skills**, preserving every existing native assignment.
+After that initial assignment, the native Agent Skills UI is authoritative for
+manual enablement and disablement; the plugin does not re-enable a skill that a
+user has removed. Active skills also remain attached to the prompt whenever the
+plugin wakes an agent for that role.
 
 ---
 
@@ -638,10 +681,10 @@ call carrying company scope):
 
 Stated plainly, because the alternative is a README that lies:
 
-- **Skills are delivered per invocation, not written into instructions.** The
-  plugin maintains only its own event-routing rule in the managed bundle;
-  active skills still travel with each wake-up prompt rather than becoming
-  persistent `AGENTS.md` content.
+- **Skills use two delivery paths.** Retrospective skills are published as
+  native Paperclip Company Skills and active ones are assigned once to matching
+  agents. They also travel with the next wake-up prompt, so agents retain the
+  guidance even on adapters that cannot materialise native skills.
 - **Local and project-backed boards have different sources of truth.** Ad-hoc
   local tickets still live in plugin state. Direct child issues of a project
   kickoff are projected from Paperclip; their status, assignment, comments,

@@ -73,6 +73,13 @@ const CEREMONIES: Array<{ type: CeremonyType; label: string }> = [
   { type: "sprint_retrospective", label: "Retrospective" },
 ];
 
+function paperclipIssueHref(identifier: string | null | undefined): string | null {
+  if (!identifier || typeof window === "undefined") return null;
+
+  const companyPrefix = window.location.pathname.split("/").filter(Boolean)[0];
+  return companyPrefix ? `/${companyPrefix}/issues/${encodeURIComponent(identifier)}` : null;
+}
+
 function AgentScrumRoot({ children }: { children: ReactNode }) {
   return (
     <div className="agent-scrum-root">
@@ -134,6 +141,7 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
   const resolveProductDecision = usePluginAction("resolveProductDecision");
   const approveScopeHold = usePluginAction("approveScopeHold");
   const startScopeHoldFollowUp = usePluginAction("startScopeHoldFollowUp");
+  const dismissScopeHold = usePluginAction("dismissScopeHold");
 
   const [logOpen, setLogOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -358,6 +366,20 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
     }
   }, [refreshOnboarding, startScopeHoldFollowUp]);
 
+  const handleDismissScopeHold = useCallback(async (issueId: string) => {
+    setScopeHoldBusyId(issueId);
+    try {
+      const result = (await dismissScopeHold({ issueId })) as { dismissed?: boolean; error?: string };
+      if (!result?.dismissed) setNotice(result?.error ?? "Held scope could not be dismissed");
+      else setNotice(null);
+      refreshOnboarding();
+    } catch (actionError) {
+      setNotice(actionError instanceof Error ? actionError.message : "Held scope could not be dismissed");
+    } finally {
+      setScopeHoldBusyId(null);
+    }
+  }, [dismissScopeHold, refreshOnboarding]);
+
   const handleReview = useCallback(async () => {
     for (const task of inReview) {
       await reviewTicket({ taskId: task.id });
@@ -470,6 +492,7 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
         hostControlled={hostControlled}
         canStart={data.canStartProjectOnboarding}
         onOpenKickoff={data.kickoffTask ? () => setKickoffDetailOpen(true) : undefined}
+        kickoffHref={paperclipIssueHref(data.kickoffTask?.identifier)}
         progress={data.projectProgress}
         latestEventSummary={lastCeremony?.summary ?? null}
         canStartSprint={data.canStartProjectSprint}
@@ -479,6 +502,7 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
         onStartSprint={handleStartProjectSprint}
         onApproveScopeHold={handleApproveScopeHold}
         onStartScopeHoldFollowUp={handleStartScopeHoldFollowUp}
+        onDismissScopeHold={handleDismissScopeHold}
       />
 
       <div className="ceremony-bar">

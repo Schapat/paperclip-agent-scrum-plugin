@@ -12,10 +12,11 @@ import {
   PRODUCT_DECISION_REQUIRED_MARKER,
   PRODUCT_DECISION_RESOLVED_MARKER,
   QA_REVIEW_APPROVED_MARKER,
+  QA_REWORK_ROUTED_MARKER,
 } from '../core/review-routing';
 import { COMMIT_MARKER, DECISION_MARKER, REFINEMENT_MARKER } from '../core/project-issue-projection';
 import { createAcceptanceCriterion, createScrumTask } from '../core/factories';
-import type { CeremonyRecord, ProjectOnboarding, ScrumAgent, ScrumTask } from '../core/types';
+import type { CeremonyRecord, ProjectOnboarding, ScrumAgent, ScrumTask, WorkerState } from '../core/types';
 
 const COMPANY_ID = 'company-bmw';
 const PROJECT_ID = 'project-bmw';
@@ -59,6 +60,7 @@ interface BoardData {
   ceremonies: CeremonyRecord[];
   projectOnboarding: ProjectOnboarding;
   currentSprint: { id: string; status: string; taskIds: string[] } | null;
+  canStartProjectOnboarding: boolean;
   canStartProjectSprint: boolean;
 }
 
@@ -555,6 +557,99 @@ describe('project onboarding worker actions', () => {
     });
   });
 
+  it('publishes active retrospective skills to Paperclip and assigns them to matching agents', async () => {
+    const skillHarness = createTestHarness({
+      manifest,
+      config: { enableTeam: true, apiBaseUrl: 'http://paperclip.test' },
+    });
+    skillHarness.seed({ projects: [project()], projectWorkspaces: [workspace()] });
+    const localSkill = {
+      id: 'learning-skill-1',
+      name: 'Verify acceptance criteria before review',
+      description: 'Check every acceptance criterion before moving work to review.',
+      category: 'quality' as const,
+      roles: ['developer'],
+      active: true,
+      learningIds: ['learning-1'],
+      reinforcementCount: 1,
+      createdAt: '2026-08-09T12:00:00.000Z',
+      activatedAt: '2026-08-09T12:00:00.000Z',
+    };
+    await skillHarness.ctx.state.set(
+      { scopeKind: 'company', scopeId: COMPANY_ID, stateKey: 'board' },
+      { skills: [localSkill] }
+    );
+
+    const nativeSkillKey = `company/${COMPANY_ID}/agent-scrum-learning-${localSkill.id}`;
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      if (url === `http://paperclip.test/api/companies/${COMPANY_ID}/skills` && method === 'GET') {
+        return jsonResponse([]);
+      }
+      if (url === `http://paperclip.test/api/companies/${COMPANY_ID}/skills` && method === 'POST') {
+        return jsonResponse({
+          id: 'native-skill-1',
+          key: nativeSkillKey,
+          slug: `agent-scrum-learning-${localSkill.id}`,
+          name: 'Verify acceptance criteria before review',
+        }, 201);
+      }
+      if (/^http:\/\/paperclip\.test\/api\/agents\/[^/]+\/skills$/.test(url) && method === 'GET') {
+        return jsonResponse({
+          desiredSkills: ['paperclipai/paperclip/paperclip'],
+          entries: [],
+          warnings: [],
+        });
+      }
+      if (/^http:\/\/paperclip\.test\/api\/agents\/[^/]+\/skills\/sync$/.test(url) && method === 'POST') {
+        return jsonResponse({ desiredSkills: [nativeSkillKey], entries: [], warnings: [] });
+      }
+      if (/^http:\/\/paperclip\.test\/api\/agents\/[^/]+\/instructions-bundle\/file/.test(url)) {
+        return method === 'GET' ? jsonResponse({ content: null }) : jsonResponse({});
+      }
+      if (/^http:\/\/paperclip\.test\/api\/agents\/[^/]+$/.test(url)) {
+        return method === 'GET' ? jsonResponse({ runtimeConfig: {} }) : jsonResponse({});
+      }
+      throw new Error(`Unexpected native skill sync request: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await plugin.definition.setup(skillHarness.ctx);
+    await skillHarness.getData<BoardData>('board', { companyId: COMPANY_ID });
+
+    const nativeCreate = fetchMock.mock.calls.find(([input, init]) =>
+      String(input) === `http://paperclip.test/api/companies/${COMPANY_ID}/skills` && init?.method === 'POST'
+    );
+    expect(nativeCreate).toBeDefined();
+    expect(JSON.parse(String(nativeCreate?.[1]?.body))).toMatchObject({
+      name: 'Verify acceptance criteria before review',
+      slug: `agent-scrum-learning-${localSkill.id}`,
+    });
+
+    const assignments = fetchMock.mock.calls.filter(([input, init]) =>
+      /^http:\/\/paperclip\.test\/api\/agents\/[^/]+\/skills\/sync$/.test(String(input)) &&
+      init?.method === 'POST'
+    );
+    expect(assignments).toHaveLength(2);
+    for (const [, init] of assignments) {
+      expect(JSON.parse(String(init?.body))).toEqual({
+        desiredSkills: ['paperclipai/paperclip/paperclip', nativeSkillKey],
+      });
+    }
+
+    const persisted = (await skillHarness.ctx.state.get({
+      scopeKind: 'company',
+      scopeId: COMPANY_ID,
+      stateKey: 'board',
+    })) as WorkerState;
+    expect(persisted.skills[0]).toMatchObject({
+      paperclipSkillKey: nativeSkillKey,
+      paperclipSkillId: 'native-skill-1',
+    });
+    expect(new Set(persisted.skills[0].paperclipAssignedAgentIds)).toHaveLength(2);
+  });
+
   it('does not permit planning or refinement before backlog approval', async () => {
     await harness.performAction(
       'startProjectOnboarding',
@@ -680,6 +775,103 @@ describe('project onboarding worker actions', () => {
     expect(await sprintHarness.ctx.issues.get(child.id, COMPANY_ID)).toMatchObject({
       status: 'todo',
       assigneeAgentId: developer?.id,
+    });
+  });
+
+  it('closes the project sprint with review and retrospective before unlocking the next feature request', async () => {
+    const sprintHarness = createTestHarness({ manifest, config: { enableTeam: true } });
+    sprintHarness.seed({ projects: [project()], projectWorkspaces: [workspace()] });
+    await plugin.definition.setup(sprintHarness.ctx);
+
+    const kickoff = await sprintHarness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(sprintHarness, kickoff.rootIssueId);
+    await sprintHarness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+    const child = await sprintHarness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Add accessible image slider',
+      status: 'backlog',
+    });
+    await sprintHarness.emit(
+      'issue.created',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
+    );
+    await sprintHarness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+    let board = await sprintHarness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const technicalLead = board.agents.find((agent) => agent.role === 'technical_lead');
+    const qa = board.agents.find((agent) => agent.role === 'qa_engineer');
+    const developer = board.agents.find((agent) => agent.role === 'developer');
+    const refinement = await sprintHarness.ctx.issues.createComment(
+      child.id,
+      `<!-- ${REFINEMENT_MARKER} {"storyPoints":3,"acceptanceCriteria":["Keyboard navigation works"],"technicalNotes":"Reuse the media primitives."} -->`,
+      COMPANY_ID,
+      { authorAgentId: technicalLead?.id }
+    );
+    await sprintHarness.emit(
+      'issue.comment.created',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: refinement.id, entityType: 'issue_comment' }
+    );
+    await sprintHarness.performAction('startProjectSprint', {}, { companyId: COMPANY_ID });
+    await recordDeveloperCommit(sprintHarness, child.id, developer?.id);
+    await sprintHarness.ctx.issues.createComment(
+      child.id,
+      `QA approved\n${QA_REVIEW_APPROVED_MARKER}`,
+      COMPANY_ID,
+      { authorAgentId: qa?.id }
+    );
+    await sprintHarness.ctx.issues.update(
+      child.id,
+      { status: 'done', assigneeAgentId: qa?.id },
+      COMPANY_ID
+    );
+
+    const scope = { scopeKind: 'company' as const, scopeId: COMPANY_ID, stateKey: 'board' as const };
+    const persisted = (await sprintHarness.ctx.state.get(scope)) as WorkerState;
+    if (!persisted?.projectOnboarding) throw new Error('Expected persisted project onboarding.');
+    await sprintHarness.ctx.state.set(scope, {
+      ...persisted,
+      projectOnboarding: { ...persisted.projectOnboarding, status: 'completed' },
+      tasks: persisted.tasks.map((task) =>
+        task.id === child.id
+          ? { ...task, column: 'done', assignedAgentId: qa?.id ?? null, completedAt: new Date().toISOString() }
+          : task
+      ),
+    });
+    await plugin.definition.setup(sprintHarness.ctx);
+
+    board = await sprintHarness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    expect(board.projectOnboarding.status).toBe('completed');
+    expect(board.currentSprint).toBeNull();
+    expect(board.ceremonies.map((ceremony) => ceremony.type)).toEqual(
+      expect.arrayContaining(['sprint_review', 'sprint_retrospective'])
+    );
+    expect(board.canStartProjectOnboarding).toBe(true);
+
+    const nextFeature = await sprintHarness.performAction<{ started: boolean; rootIssueId: string }>(
+      'startProjectOnboarding',
+      {
+        projectId: PROJECT_ID,
+        brief: 'Add a de/EN translation toggle.',
+        constraints: 'Use a dedicated feature branch and preserve the existing dark mode.',
+      },
+      { companyId: COMPANY_ID }
+    );
+    const nextBoard = await sprintHarness.getData<BoardData>('board', { companyId: COMPANY_ID });
+
+    expect(nextFeature).toMatchObject({ started: true });
+    expect(nextFeature.rootIssueId).not.toBe(kickoff.rootIssueId);
+    expect(nextBoard.projectOnboarding).toMatchObject({
+      status: 'analysis_in_progress',
+      rootIssueId: nextFeature.rootIssueId,
+      brief: 'Add a de/EN translation toggle.',
     });
   });
 
@@ -1390,16 +1582,164 @@ describe('project onboarding worker actions', () => {
     });
   });
 
-    it('returns a QA-marked completion with incomplete acceptance criteria to review', async () => {
-      const kickoff = await harness.performAction<{ rootIssueId: string }>(
-        'startProjectOnboarding',
-        { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
-        { companyId: COMPANY_ID }
-      );
-      await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
-      await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+  it('keeps a final QA-approved completion done when checklist wording differs from refinement criteria', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
 
-      const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const developer = board.agents.find((agent) => agent.role === 'developer');
+    const qa = board.agents.find((agent) => agent.role === 'qa_engineer');
+    const technicalLead = board.agents.find((agent) => agent.role === 'technical_lead');
+    const child = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Deliver a dark mode theme toggle',
+      status: 'done',
+      assigneeAgentId: qa?.id,
+    });
+    await harness.ctx.issues.createComment(
+      child.id,
+      `<!-- ${REFINEMENT_MARKER} {"storyPoints":3,"acceptanceCriteria":["Toggle is visible in desktop and mobile navigation","Theme changes without a reload","Theme choice persists locally"],"technicalNotes":"Use the existing header primitives."} -->`,
+      COMPANY_ID,
+      { authorAgentId: technicalLead?.id }
+    );
+    await recordDeveloperCommit(harness, child.id, developer?.id);
+    await harness.ctx.issues.createComment(
+      child.id,
+      [
+        '## Review Approved',
+        '- [x] Current mode icon is visible in both header layouts',
+        '- [x] Theme switch is immediate',
+        '- [x] Preference survives a browser restart',
+        QA_REVIEW_APPROVED_MARKER,
+      ].join('\n'),
+      COMPANY_ID,
+      { authorAgentId: qa?.id }
+    );
+
+    await plugin.definition.setup(harness.ctx);
+
+    expect(await harness.ctx.issues.get(child.id, COMPANY_ID)).toMatchObject({
+      status: 'done',
+      assigneeAgentId: qa?.id,
+    });
+    const after = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    expect(after.tasks.find((task) => task.id === child.id)).toMatchObject({
+      column: 'done',
+      acceptanceCriteria: [
+        expect.objectContaining({ met: true, verifiedBy: qa?.id }),
+        expect.objectContaining({ met: true, verifiedBy: qa?.id }),
+        expect.objectContaining({ met: true, verifiedBy: qa?.id }),
+      ],
+    });
+  });
+
+  it('recovers a final QA-approved review that was previously returned from done', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const developer = board.agents.find((agent) => agent.role === 'developer');
+    const qa = board.agents.find((agent) => agent.role === 'qa_engineer');
+    const technicalLead = board.agents.find((agent) => agent.role === 'technical_lead');
+    const child = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Recover a completed dark mode theme toggle',
+      status: 'in_review',
+      assigneeAgentId: qa?.id,
+    });
+    await harness.ctx.issues.createComment(
+      child.id,
+      `<!-- ${REFINEMENT_MARKER} {"storyPoints":3,"acceptanceCriteria":["Toggle is visible in desktop and mobile navigation","Theme changes without a reload","Theme choice persists locally"],"technicalNotes":"Use the existing header primitives."} -->`,
+      COMPANY_ID,
+      { authorAgentId: technicalLead?.id }
+    );
+    await recordDeveloperCommit(harness, child.id, developer?.id);
+    await harness.ctx.issues.createComment(
+      child.id,
+      [
+        '## Review Approved',
+        '- [x] Current mode icon is visible in both header layouts',
+        '- [x] Theme switch is immediate',
+        '- [x] Preference survives a browser restart',
+        QA_REVIEW_APPROVED_MARKER,
+      ].join('\n'),
+      COMPANY_ID,
+      { authorAgentId: qa?.id }
+    );
+    await plugin.definition.setup(harness.ctx);
+    const after = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+
+    expect(await harness.ctx.issues.get(child.id, COMPANY_ID)).toMatchObject({
+      status: 'done',
+      assigneeAgentId: qa?.id,
+    });
+    expect(after.tasks.find((task) => task.id === child.id)).toMatchObject({ column: 'done' });
+  });
+
+  it('recovers a final QA-approved ticket that was previously returned to development', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const developer = board.agents.find((agent) => agent.role === 'developer');
+    const qa = board.agents.find((agent) => agent.role === 'qa_engineer');
+    const child = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Recover a completed dark mode migration',
+      status: 'in_progress',
+      assigneeAgentId: developer?.id,
+    });
+    await recordDeveloperCommit(harness, child.id, developer?.id);
+    await harness.ctx.issues.createComment(
+      child.id,
+      `## Review Approved\n${QA_REVIEW_APPROVED_MARKER}`,
+      COMPANY_ID,
+      { authorAgentId: qa?.id }
+    );
+    await harness.ctx.issues.createComment(child.id, QA_REWORK_ROUTED_MARKER, COMPANY_ID);
+    await harness.emit(
+      'issue.created',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue', actorId: qa?.id }
+    );
+
+    expect(await harness.ctx.issues.get(child.id, COMPANY_ID)).toMatchObject({
+      status: 'done',
+      assigneeAgentId: qa?.id,
+    });
+  });
+
+  it('returns a completion with incomplete acceptance criteria to review without final QA approval', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
       const developer = board.agents.find((agent) => agent.role === 'developer');
       const qa = board.agents.find((agent) => agent.role === 'qa_engineer');
       const child = await harness.ctx.issues.create({
@@ -1421,7 +1761,6 @@ describe('project onboarding worker actions', () => {
         [
           '## QA approved',
           '- [x] Slider supports keyboard navigation',
-          QA_REVIEW_APPROVED_MARKER,
         ].join('\n'),
         COMPANY_ID,
         { authorAgentId: qa?.id }
@@ -1681,6 +2020,78 @@ describe('project onboarding worker actions', () => {
     expect(await harness.ctx.issues.get(heldIssue.id, COMPANY_ID)).toMatchObject({ status: 'blocked' });
   });
 
+  it('dismisses held scope after project completion without starting a follow-up', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+    await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const productOwner = board.agents.find((agent) => agent.role === 'product_owner');
+    const qa = board.agents.find((agent) => agent.role === 'qa_engineer');
+    const developer = board.agents.find((agent) => agent.role === 'developer');
+    const heldIssue = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      title: 'Resolve stale execution run',
+      status: 'todo',
+      assigneeAgentId: developer?.id,
+    });
+    await harness.emit(
+      'issue.created',
+      { issueId: heldIssue.id },
+      { companyId: COMPANY_ID, entityId: heldIssue.id, entityType: 'issue', actorId: productOwner?.id }
+    );
+
+    const completedChild = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Completed delivery',
+      status: 'done',
+      assigneeAgentId: qa?.id,
+    });
+    await recordDeveloperCommit(harness, completedChild.id, developer?.id);
+    await harness.ctx.issues.createComment(
+      completedChild.id,
+      `QA approved\n${QA_REVIEW_APPROVED_MARKER}`,
+      COMPANY_ID,
+      { authorAgentId: qa?.id }
+    );
+    await harness.emit(
+      'issue.created',
+      { issueId: completedChild.id },
+      { companyId: COMPANY_ID, entityId: completedChild.id, entityType: 'issue', actorId: qa?.id }
+    );
+
+    const dismissed = await harness.performAction<{ dismissed: boolean; error?: string }>(
+      'dismissScopeHold',
+      { issueId: heldIssue.id },
+      { companyId: COMPANY_ID }
+    );
+    const refreshedBoard = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+
+    expect(dismissed).toMatchObject({ dismissed: true });
+    expect(await harness.ctx.issues.get(heldIssue.id, COMPANY_ID)).toMatchObject({
+      status: 'cancelled',
+      assigneeAgentId: null,
+    });
+    expect(await harness.ctx.issues.listComments(heldIssue.id, COMPANY_ID)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ body: expect.stringContaining('Human scope dismissed') }),
+      ])
+    );
+    expect(refreshedBoard.projectOnboarding).toMatchObject({
+      status: 'completed',
+      rootIssueId: kickoff.rootIssueId,
+      scopeHolds: [],
+    });
+  });
+
   it('starts a follow-up project request from held scope after project completion', async () => {
     const kickoff = await harness.performAction<{ rootIssueId: string }>(
       'startProjectOnboarding',
@@ -1811,7 +2222,7 @@ describe('project onboarding worker actions', () => {
     expect(after.projectOnboarding.status).toBe('completed');
   });
 
-  it('returns a hydrated completion with incomplete QA acceptance criteria to review', async () => {
+  it('returns a hydrated completion with incomplete acceptance criteria to review without final QA approval', async () => {
     const kickoff = await harness.performAction<{ rootIssueId: string }>(
       'startProjectOnboarding',
       { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
@@ -1843,7 +2254,6 @@ describe('project onboarding worker actions', () => {
       [
         '## QA approved',
         '- [x] Slider supports keyboard navigation',
-        QA_REVIEW_APPROVED_MARKER,
       ].join('\n'),
       COMPANY_ID,
       { authorAgentId: qa?.id }

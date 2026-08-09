@@ -16,6 +16,7 @@ import type {
   TicketCommit,
   TicketRisk,
 } from './types';
+import { isQaReviewRejection, QA_REVIEW_APPROVED_MARKER } from './review-routing';
 
 export const REFINEMENT_MARKER = 'agent-scrum:refinement:v1';
 export const DECISION_MARKER = 'agent-scrum:decision:v1';
@@ -282,12 +283,13 @@ function toRefinement(
     : extractSection(description, ['Technischer Kontext', 'Technical Context', 'Technische Hinweise']);
   const risks = payload ? parseRisks(issueId, payload.risks, sourceAgentId) : [];
   const qaChecks = qaChecksForCriteria(acceptanceTexts, comments, agents);
+  const finalQaApproval = finalQaApprovalForCriteria(comments, agents);
   const refined = storyPoints > 0 && acceptanceTexts.length > 0;
 
   return {
     storyPoints,
     acceptanceCriteria: acceptanceTexts.map((text, index) => {
-      const qaCheck = qaChecks[index];
+      const qaCheck = finalQaApproval ?? qaChecks[index];
       return {
         id: `host-criterion:${issueId}:${index}`,
         text,
@@ -318,6 +320,31 @@ interface QaCheck {
   met: boolean;
   verifiedBy: string;
   verifiedAt: string;
+}
+
+function finalQaApprovalForCriteria(
+  comments: ProjectIssueCommentSnapshot[],
+  agents: Array<Pick<ScrumAgent, 'id' | 'name' | 'role'>>
+): QaCheck | null {
+  let approval: QaCheck | null = null;
+  const qaAgentIds = agents.filter((agent) => agent.role === 'qa_engineer').map((agent) => agent.id);
+
+  for (const comment of comments) {
+    if (qaAgentIds.some((qaAgentId) => isQaReviewRejection(comment, qaAgentId))) approval = null;
+    if (
+      isQaEngineer(comment, agents) &&
+      comment.authorAgentId &&
+      comment.body.includes(QA_REVIEW_APPROVED_MARKER)
+    ) {
+      approval = {
+        met: true,
+        verifiedBy: comment.authorAgentId,
+        verifiedAt: toIso(comment.createdAt),
+      };
+    }
+  }
+
+  return approval;
 }
 
 function qaChecksForCriteria(

@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 
 import type { ProjectOnboarding } from "../../core/types";
 import type { ProjectProgress } from "../../core/project-issue-projection";
+import { describeProjectWorkflow, type ProjectWorkflowActivity } from "./project-workflow";
 
 export interface ProjectOption {
   id: string;
@@ -15,6 +16,7 @@ interface ProjectOnboardingPanelProps {
   hostControlled: boolean;
   canStart: boolean;
   onOpenKickoff?: () => void;
+  kickoffHref?: string | null;
   progress: ProjectProgress;
   latestEventSummary: string | null;
   canStartSprint: boolean;
@@ -29,6 +31,7 @@ interface ProjectOnboardingPanelProps {
   onStartSprint: () => Promise<void>;
   onApproveScopeHold: (issueId: string) => Promise<void>;
   onStartScopeHoldFollowUp: (issueId: string) => Promise<void>;
+  onDismissScopeHold: (issueId: string) => Promise<void>;
 }
 
 export function ProjectOnboardingPanel({
@@ -38,6 +41,7 @@ export function ProjectOnboardingPanel({
   hostControlled,
   canStart,
   onOpenKickoff,
+  kickoffHref,
   progress,
   latestEventSummary,
   canStartSprint,
@@ -47,16 +51,27 @@ export function ProjectOnboardingPanel({
   onStartSprint,
   onApproveScopeHold,
   onStartScopeHoldFollowUp,
+  onDismissScopeHold,
 }: ProjectOnboardingPanelProps) {
   const [projectId, setProjectId] = useState("");
   const [brief, setBrief] = useState("");
   const [constraints, setConstraints] = useState("");
   const [skipSprintPlanning, setSkipSprintPlanning] = useState(false);
   const [startingNextProject, setStartingNextProject] = useState(false);
+  const planningNextFeature = onboarding.status === "completed";
+  const workflow = describeProjectWorkflow(onboarding, progress);
 
   function submitStart(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     void onStart({ projectId, brief, constraints, skipSprintPlanning });
+  }
+
+  function startNextFeature() {
+    setProjectId(onboarding.projectId ?? "");
+    setBrief("");
+    setConstraints("");
+    setSkipSprintPlanning(false);
+    setStartingNextProject(true);
   }
 
   if (canStart && (onboarding.status !== "completed" || startingNextProject)) {
@@ -65,9 +80,11 @@ export function ProjectOnboardingPanel({
         <div className="project-onboarding-heading">
           <p className="project-onboarding-eyebrow">Project work</p>
           <h2 id="project-onboarding-title">
-            {onboarding.status === "completed" ? "Start next project request" : "Start a project request"}
+            {planningNextFeature ? "Plan next feature" : "Start a project request"}
           </h2>
         </div>
+
+        <ProjectWorkflowTracker workflow={workflow} />
 
         <form className="project-onboarding-form" onSubmit={submitStart}>
           <label className="project-onboarding-field">
@@ -87,11 +104,11 @@ export function ProjectOnboardingPanel({
           </label>
 
           <label className="project-onboarding-field project-onboarding-field-wide">
-            <span>Work request</span>
+            <span>{planningNextFeature ? "Feature request" : "Work request"}</span>
             <textarea
               value={brief}
               onChange={(event) => setBrief(event.target.value)}
-              placeholder="Describe the requested outcome"
+              placeholder={planningNextFeature ? "e.g. Add a de/EN translation toggle" : "Describe the requested outcome"}
               disabled={busy}
               required
             />
@@ -122,7 +139,7 @@ export function ProjectOnboardingPanel({
 
           <div className="project-onboarding-actions project-onboarding-field-wide">
             <button className="btn btn-primary" type="submit" disabled={busy || projects.length === 0}>
-              {busy ? "Starting…" : "Start technical analysis"}
+              {busy ? "Starting…" : planningNextFeature ? "Start feature analysis" : "Start technical analysis"}
             </button>
           </div>
         </form>
@@ -138,7 +155,7 @@ export function ProjectOnboardingPanel({
       : onboarding.status === "sprint_planning" && canStartSprint
         ? { label: "Start first sprint", run: onStartSprint }
       : onboarding.status === "completed" && canStart
-        ? { label: "Start next project request", run: () => setStartingNextProject(true) }
+        ? { label: "Plan next feature", run: startNextFeature }
       : null;
   const analysisInProgress = onboarding.status === "analysis_in_progress";
   const analysisReady = onboarding.status === "analysis_ready";
@@ -176,6 +193,12 @@ export function ProjectOnboardingPanel({
           )
         )}
 
+        <ProjectWorkflowTracker
+          workflow={workflow}
+          onOpenKickoff={onOpenKickoff}
+          kickoffHref={kickoffHref}
+        />
+
         <p className={`project-onboarding-stage is-${onboarding.status}`}>
           {analysisInProgress && <span className="project-onboarding-spinner" aria-hidden="true" />}
           {stageLabel(onboarding.status, hostControlled)}
@@ -193,7 +216,7 @@ export function ProjectOnboardingPanel({
 
         {projectCompleted && (
           <p className="project-onboarding-lock" role="status">
-            Project request complete. No follow-up work will start until a human creates a new project request.
+            Sprint review and retrospective are complete. Plan the next feature to start a new analysis, backlog, and sprint.
           </p>
         )}
 
@@ -202,7 +225,7 @@ export function ProjectOnboardingPanel({
             <strong>{projectCompleted ? "Human follow-up approval required" : "Human scope approval required"}</strong>
             <span>
               {projectCompleted
-                ? `${onboarding.scopeHolds.length} held item${onboarding.scopeHolds.length === 1 ? " is" : "s are"} ready for a new follow-up request. Approval starts a new technical analysis instead of reopening this completed project.`
+                ? `${onboarding.scopeHolds.length} held item${onboarding.scopeHolds.length === 1 ? " is" : "s are"} ready for a new follow-up request. Approval starts a new technical analysis; dismissing an item discards it.`
                 : !canApproveScope
                   ? `${onboarding.scopeHolds.length} held item${onboarding.scopeHolds.length === 1 ? " is" : "s are"} waiting for the new technical analysis and backlog discovery before scope can be approved.`
                   : `${onboarding.scopeHolds.length} agent-created item${onboarding.scopeHolds.length === 1 ? " was" : "s were"} held outside this project. Approve an item to create a tracked project ticket for it.`}
@@ -211,20 +234,30 @@ export function ProjectOnboardingPanel({
               {onboarding.scopeHolds.map((hold) => (
                 <div key={hold.issueId} className="project-onboarding-scope-hold">
                   <span>{hold.title}</span>
-                  <button
-                    className="btn btn-secondary"
-                    type="button"
-                    disabled={busy || (!projectCompleted && !canApproveScope) || scopeHoldBusyId === hold.issueId}
-                    onClick={() => void (projectCompleted ? onStartScopeHoldFollowUp : onApproveScopeHold)(hold.issueId)}
-                  >
-                    {scopeHoldBusyId === hold.issueId
-                      ? "Approving..."
-                      : projectCompleted
-                        ? "Approve as follow-up"
-                        : canApproveScope
-                          ? "Approve scope"
-                          : "Await analysis"}
-                  </button>
+                  <div className="project-onboarding-scope-hold-actions">
+                    <button
+                      className="btn btn-secondary"
+                      type="button"
+                      disabled={busy || (!projectCompleted && !canApproveScope) || scopeHoldBusyId === hold.issueId}
+                      onClick={() => void (projectCompleted ? onStartScopeHoldFollowUp : onApproveScopeHold)(hold.issueId)}
+                    >
+                      {scopeHoldBusyId === hold.issueId
+                        ? "Working..."
+                        : projectCompleted
+                          ? "Approve as follow-up"
+                          : canApproveScope
+                            ? "Approve scope"
+                            : "Await analysis"}
+                    </button>
+                    <button
+                      className="btn btn-secondary"
+                      type="button"
+                      disabled={busy || scopeHoldBusyId === hold.issueId}
+                      onClick={() => void onDismissScopeHold(hold.issueId)}
+                    >
+                      {scopeHoldBusyId === hold.issueId ? "Working..." : "Dismiss hold"}
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -233,7 +266,7 @@ export function ProjectOnboardingPanel({
 
         {latestEventSummary && (
           <p className="project-onboarding-event" role="status">
-            <span>Latest workflow event</span>
+            <span>Latest board event</span>
             {latestEventSummary}
           </p>
         )}
@@ -275,6 +308,45 @@ export function ProjectOnboardingPanel({
   );
 }
 
+interface ProjectWorkflowTrackerProps {
+  workflow: ProjectWorkflowActivity;
+  onOpenKickoff?: () => void;
+  kickoffHref?: string | null;
+}
+
+function ProjectWorkflowTracker({ workflow, onOpenKickoff, kickoffHref }: ProjectWorkflowTrackerProps) {
+  return (
+    <div className={`project-onboarding-workflow is-${workflow.phase}`} aria-live="polite">
+      <div className="project-onboarding-workflow-summary">
+        <span className="project-onboarding-workflow-eyebrow">Outside the board now</span>
+        <strong>{workflow.title}</strong>
+        <span>{workflow.detail}</span>
+      </div>
+      <div className="project-onboarding-workflow-meta">
+        <span className="project-onboarding-workflow-actor">With {workflow.actor}</span>
+        {workflow.attentionRequired && (
+          <span className="project-onboarding-workflow-approval">Human approval required</span>
+        )}
+        <span>{workflow.nextStep}</span>
+      </div>
+      {(onOpenKickoff || kickoffHref) && (
+        <div className="project-onboarding-workflow-actions">
+          {onOpenKickoff && (
+            <button className="btn btn-secondary" type="button" onClick={onOpenKickoff}>
+              {workflow.attentionRequired ? "Review in board" : "Open in board"}
+            </button>
+          )}
+          {kickoffHref && (
+            <a className="project-onboarding-workflow-link" href={kickoffHref}>
+              {workflow.ticketLinkLabel}
+            </a>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function stageLabel(status: ProjectOnboarding["status"], hostControlled: boolean): string {
   switch (status) {
     case "analysis_in_progress":
@@ -288,7 +360,7 @@ function stageLabel(status: ProjectOnboarding["status"], hostControlled: boolean
     case "active":
       return hostControlled ? "Paperclip delivery active" : "Delivery enabled";
     case "completed":
-      return "Project request complete — awaiting human direction";
+      return "Project request complete — ready for the next feature";
     default:
       return "Project request not started";
   }

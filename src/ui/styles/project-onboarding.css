@@ -32,6 +32,10 @@
   gap: var(--spacing-sm) var(--spacing-md);
 }
 
+.project-onboarding > .project-onboarding-workflow + .project-onboarding-form {
+  grid-column: 1 / -1;
+}
+
 .project-onboarding-field {
   display: grid;
   gap: var(--spacing-xs);
@@ -169,6 +173,79 @@ button.project-onboarding-kickoff:focus-visible {
   font-size: 0.75rem;
 }
 
+.project-onboarding-workflow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 0.55fr) auto;
+  align-items: center;
+  gap: var(--spacing-sm) var(--spacing-md);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-primary);
+  background: var(--color-bg-secondary);
+}
+
+.project-onboarding-workflow.is-technical_analysis_approval,
+.project-onboarding-workflow.is-sprint_approval {
+  border-left-color: var(--color-warning);
+}
+
+.project-onboarding-workflow-summary,
+.project-onboarding-workflow-meta {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.project-onboarding-workflow-summary strong,
+.project-onboarding-workflow-actor {
+  color: var(--color-text);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.project-onboarding-workflow-eyebrow {
+  color: var(--color-text-muted);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.project-onboarding-workflow-approval {
+  color: var(--color-warning);
+  font-weight: 600;
+}
+
+.project-onboarding-workflow-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--spacing-xs);
+}
+
+.project-onboarding-workflow-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  color: var(--color-primary);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.project-onboarding-workflow-link:hover {
+  text-decoration: underline;
+}
+
+.project-onboarding-workflow-link:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
 .project-onboarding-stage {
   display: flex;
   align-items: center;
@@ -242,7 +319,13 @@ button.project-onboarding-kickoff:focus-visible {
   white-space: nowrap;
 }
 
-.project-onboarding-scope-hold .btn {
+.project-onboarding-scope-hold-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--spacing-xs);
+}
+
+.project-onboarding-scope-hold-actions .btn {
   flex: 0 0 auto;
 }
 
@@ -298,12 +381,30 @@ button.project-onboarding-kickoff:focus-visible {
     width: 100%;
   }
 
+  .project-onboarding-workflow {
+    grid-template-columns: 1fr;
+  }
+
+  .project-onboarding-workflow-actions {
+    justify-content: stretch;
+  }
+
+  .project-onboarding-workflow-actions .btn,
+  .project-onboarding-workflow-link {
+    flex: 1 1 0;
+    justify-content: center;
+  }
+
   .project-onboarding-scope-hold {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .project-onboarding-scope-hold .btn {
+  .project-onboarding-scope-hold-actions {
     width: 100%;
+  }
+
+  .project-onboarding-scope-hold-actions .btn {
+    flex: 1 1 0;
   }
 }

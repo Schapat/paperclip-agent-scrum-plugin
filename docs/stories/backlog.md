@@ -43,3 +43,12 @@
 | DF-027 | Defekt | Aktive Sprints ohne nachtraegliche Human-Approvals ausfuehren | Erledigt | 2026-08-09 |
 | OP-004 | Betrieb | README und Plugin-Aenderungen veroeffentlichen | Erledigt | 2026-08-09 |
 | DF-028 | Defekt | Lokale Plugin-Instanz aktualisiert Sprintautonomie nicht | Erledigt | 2026-08-09 |
+| DF-029 | Defekt | QA-Abschlussmarker beendet Projekt-Tickets trotz Kriterienwortlautabweichung nicht | Erledigt | 2026-08-09 |
+| DF-030 | Defekt | QA-Abschlussmarker wird bei absteigend geladenen Kommentaren entwertet | Erledigt | 2026-08-09 |
+| DF-031 | Defekt | System-Rework entwertet finalen QA-Abschluss ohne QA-Ablehnung | Erledigt | 2026-08-09 |
+| DF-032 | Defekt | Gehaltene Scope-Items ohne Folgeauftrag verwerfen | Erledigt | 2026-08-09 |
+| DF-033 | Defekt | Projektabschluss laesst Sprint Review und Retrospective aus | Erledigt | 2026-08-09 |
+| FE-010 | Feature | Naechstes Feature nach Sprintabschluss im Board planen | Erledigt | 2026-08-09 |
+| DF-034 | Defekt | Retrospektiv-Skills werden nicht als native Paperclip Skills veroeffentlicht | Erledigt | 2026-08-09 |
+| FE-011 | Feature | Externen Projektworkflow und Freigaben oberhalb des Scrum Boards anzeigen | Erledigt | 2026-08-09 |
+| OP-005 | Betrieb | README aktualisieren und aktuellen Plugin-Stand veroeffentlichen | Erledigt | 2026-08-09 |

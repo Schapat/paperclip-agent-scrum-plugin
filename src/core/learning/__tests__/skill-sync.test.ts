@@ -33,14 +33,19 @@ function skill(overrides: Partial<AgentSkill> = {}): AgentSkill {
 
 /** Client-Attrappe mit In-Memory-Bibliothek. */
 function createClient(
-  library: Array<{ id: string; slug: string; name: string }> = [],
+  library: Array<{ id: string; key: string; slug: string; name: string }> = [],
   agentEntries: Array<{ key: string; desired: boolean }> = []
 ) {
   const synced: string[][] = [];
   const client: SkillSyncClient = {
     listCompanySkills: vi.fn(async () => library),
-    createCompanySkill: vi.fn(async (_c, params) => {
-      const entry = { id: `id-${params.slug}`, slug: params.slug!, name: params.name };
+    createCompanySkill: vi.fn(async (companyId, params) => {
+      const entry = {
+        id: `id-${params.slug}`,
+        key: `company/${companyId}/${params.slug}`,
+        slug: params.slug!,
+        name: params.name,
+      };
       library.push(entry);
       return entry;
     }),
@@ -55,20 +60,19 @@ function createClient(
 
 describe('toSkillSlug', () => {
   it('erzeugt einen stabilen, URL-tauglichen Slug', () => {
-    expect(toSkillSlug(skill({ name: 'Fehlerfälle testen' }))).toBe('scrum-fehlerfaelle-testen');
+    expect(toSkillSlug(skill())).toBe('agent-scrum-learning-skill-1');
   });
 
-  it('liefert für denselben Namen denselben Slug', () => {
-    // Sonst entstünde bei jeder Retro ein neuer Bibliothekseintrag
-    expect(toSkillSlug(skill({ id: 'a' }))).toBe(toSkillSlug(skill({ id: 'b' })));
+  it('trennt gleichnamige lokale Skills voneinander', () => {
+    expect(toSkillSlug(skill({ id: 'skill-a' }))).not.toBe(toSkillSlug(skill({ id: 'skill-b' })));
   });
 
-  it('behandelt Umlaute und Sonderzeichen', () => {
-    expect(toSkillSlug(skill({ name: 'Größe & Maß: prüfen!' }))).toMatch(/^scrum-[a-z0-9-]+$/);
+  it('behandelt Sonderzeichen in einer Skill-ID', () => {
+    expect(toSkillSlug(skill({ id: 'Größe & Maß: prüfen!' }))).toBe('agent-scrum-learning-groesse-mass-pruefen');
   });
 
-  it('fällt bei unbrauchbarem Namen auf die ID zurück', () => {
-    expect(toSkillSlug(skill({ name: '!!!', id: 'abcdef12-x' }))).toBe('scrum-skill-abcdef12');
+  it('liefert einen reservierten Fallback für eine unbrauchbare ID', () => {
+    expect(toSkillSlug(skill({ id: '!!!' }))).toBe('agent-scrum-learning-unknown');
   });
 });
 
@@ -88,20 +92,25 @@ describe('ensureLibrarySkills', () => {
 
     const result = await ensureLibrarySkills(client, 'company-1', [skill()]);
 
-    expect(result.created).toEqual(['scrum-fehlerfaelle-testen']);
+    expect(result.created).toEqual(['agent-scrum-learning-skill-1']);
     expect(library).toHaveLength(1);
-    expect(result.slugs.get('skill-1')).toBe('scrum-fehlerfaelle-testen');
+    expect(result.slugs.get('skill-1')).toBe('agent-scrum-learning-skill-1');
   });
 
   it('verwendet einen vorhandenen Skill wieder', async () => {
     const { client } = createClient([
-      { id: 'x', slug: 'scrum-fehlerfaelle-testen', name: 'Alt' },
+      {
+        id: 'x',
+        key: 'company/company-1/agent-scrum-learning-skill-1',
+        slug: 'agent-scrum-learning-skill-1',
+        name: 'Alt',
+      },
     ]);
 
     const result = await ensureLibrarySkills(client, 'company-1', [skill()]);
 
     expect(result.created).toEqual([]);
-    expect(result.reused).toEqual(['scrum-fehlerfaelle-testen']);
+    expect(result.reused).toEqual(['agent-scrum-learning-skill-1']);
     expect(client.createCompanySkill).not.toHaveBeenCalled();
   });
 
