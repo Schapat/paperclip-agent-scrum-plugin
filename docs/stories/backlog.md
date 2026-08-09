@@ -36,3 +36,4 @@
 | DF-022 | Defekt | Pull Requests pro Feature statt pro Ticket erzeugen | Erledigt | 2026-08-09 |
 | DF-023 | Defekt | Lokale und Legacy-Done-Tickets ohne vollstaendig verifizierte Akzeptanzkriterien erneut zur QA geben | Erledigt | 2026-08-09 |
 | DF-024 | Defekt | Paperclip-Ticketkennungen statt UUID-Praefixe im Board anzeigen | Erledigt | 2026-08-09 |
+| OP-003 | Betrieb | Lokalen Git-Stand veroeffentlichen und Paperclip-Plugin aktualisieren | Erledigt | 2026-08-09 |
