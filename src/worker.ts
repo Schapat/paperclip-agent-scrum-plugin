@@ -113,6 +113,7 @@ function createEmptyState(): WorkerState {
 }
 
 const plugin = definePlugin({
+  multiCompanyConfig: true,
   async setup(ctx) {
     // -------------------------------------------------------------------------
     // Board state
@@ -137,6 +138,9 @@ const plugin = definePlugin({
 
     /** Serializes access to the worker's single mutable company context. */
     let companyInvocationTail: Promise<void> = Promise.resolve();
+
+    /** Includes the invocation currently running and any work queued behind it. */
+    let pendingCompanyInvocations = 0;
 
     /** Shares idempotent board actions that arrive before the first invocation completes. */
     const coalescedActions = new Map<string, Promise<unknown>>();
@@ -184,6 +188,7 @@ const plugin = definePlugin({
       scope: unknown,
       operation: () => Promise<T>
     ): Promise<T> {
+      pendingCompanyInvocations += 1;
       const previousInvocation = companyInvocationTail;
       let releaseInvocation: (() => void) | undefined;
       companyInvocationTail = new Promise<void>((resolve) => {
@@ -195,6 +200,7 @@ const plugin = definePlugin({
         await ensureReady(typeof scope === "string" ? scope : undefined);
         return await operation();
       } finally {
+        pendingCompanyInvocations -= 1;
         releaseInvocation?.();
       }
     }
@@ -212,9 +218,21 @@ const plugin = definePlugin({
       name: Parameters<PluginContext["events"]["on"]>[0],
       handler: (event: PluginEvent) => Promise<void>
     ): void {
-      ctx.events.on(name, (event) =>
-        withCompanyInvocation(event.companyId, () => handler(event))
-      );
+      ctx.events.on(name, (event) => {
+        const queueBusy = pendingCompanyInvocations > 0;
+        const invocation = withCompanyInvocation(event.companyId, () => handler(event));
+        if (!queueBusy) return invocation;
+
+        void invocation.catch((error) => {
+          ctx.logger.error("Could not process Scrum event", {
+            event: name,
+            eventId: event.eventId,
+            companyId: event.companyId,
+            error: String(error),
+          });
+        });
+        return Promise.resolve();
+      });
     }
 
     function registerCompanyAction(
@@ -636,8 +654,25 @@ const plugin = definePlugin({
 
       try {
         const comments = await ctx.issues.listComments(issue.id, companyId);
-        const route = reviewOwnerForProjectIssue(issue, comments);
+        let route = reviewOwnerForProjectIssue(issue, comments);
         if (!route) return issue;
+
+        if (
+          route.reason === "product_decision" &&
+          state.projectOnboarding?.status === "active" &&
+          state.currentSprint?.status === "active"
+        ) {
+          await ctx.issues.createComment(
+            issue.id,
+            [
+              "## Sprint scope already approved",
+              "This decision is covered by the human-approved active sprint. QA continues with the approved ticket scope; no additional human approval is required.",
+              PRODUCT_DECISION_RESOLVED_MARKER,
+            ].join("\n\n"),
+            companyId
+          );
+          route = { role: "qa_engineer", reason: "technical_review" };
+        }
 
         const reviewer = route.role === "qa_engineer" ? qa : productOwner;
         if (issue.assigneeAgentId === reviewer.id) return issue;
@@ -1929,6 +1964,7 @@ const plugin = definePlugin({
         projectId: params.projectId,
         brief: params.brief,
         constraints: params.constraints,
+        skipSprintPlanning: params.skipSprintPlanning,
       });
       if (!parsed.valid) return { started: false, error: parsed.error };
 
@@ -1952,7 +1988,7 @@ const plugin = definePlugin({
         };
       }
 
-      const requiresSprint = await projectSprintRequired();
+      const requiresSprint = (await projectSprintRequired()) && !parsed.value.skipSprintPlanning;
       const provisionalOnboarding = startProjectOnboarding({
         input: parsed.value,
         projectName: project.name,
@@ -2390,7 +2426,7 @@ const plugin = definePlugin({
         ].filter(Boolean).join("\n\n");
         const constraints = `Follow-up created from held ticket ${heldIssue.id}.`;
         const provisionalOnboarding = startProjectOnboarding({
-          input: { projectId: project.id, brief, constraints },
+          input: { projectId: project.id, brief, constraints, skipSprintPlanning: false },
           projectName: project.name,
           rootIssueId: "pending",
           requiresSprint,
@@ -2428,7 +2464,7 @@ const plugin = definePlugin({
         );
 
         const followUpOnboarding = startProjectOnboarding({
-          input: { projectId: project.id, brief, constraints },
+          input: { projectId: project.id, brief, constraints, skipSprintPlanning: false },
           projectName: project.name,
           rootIssueId: rootIssue.id,
           requiresSprint,

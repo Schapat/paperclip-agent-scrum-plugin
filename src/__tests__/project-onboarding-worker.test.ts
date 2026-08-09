@@ -258,6 +258,45 @@ describe('project onboarding worker actions', () => {
     }
   });
 
+  it('acknowledges host events while board initialization owns the company invocation', async () => {
+    let releaseConfigRead: (() => void) | undefined;
+    let signalConfigRead: (() => void) | undefined;
+    const configReadStarted = new Promise<void>((resolve) => {
+      signalConfigRead = resolve;
+    });
+    const configReadReleased = new Promise<void>((resolve) => {
+      releaseConfigRead = resolve;
+    });
+    const configGetSpy = vi.spyOn(harness.ctx.config, 'get').mockImplementation(async () => {
+      signalConfigRead?.();
+      await configReadReleased;
+      return { enableTeam: false };
+    });
+
+    const board = harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    await configReadStarted;
+
+    const hostEvent = harness.emit('issue.updated', {}, { companyId: COMPANY_ID });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+
+    try {
+      const acknowledged = await Promise.race([
+        hostEvent.then(() => true),
+        new Promise<false>((resolve) => {
+          timeout = setTimeout(() => resolve(false), 100);
+        }),
+      ]);
+
+      expect(acknowledged).toBe(true);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      releaseConfigRead?.();
+      await Promise.all([board, hostEvent]);
+      await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+      configGetSpy.mockRestore();
+    }
+  });
+
   it('reopens a persisted local done ticket with unverified acceptance criteria', async () => {
     const firstCriterion = createAcceptanceCriterion('Theme can be toggled');
     const secondCriterion = createAcceptanceCriterion('Theme preference persists');
@@ -642,6 +681,37 @@ describe('project onboarding worker actions', () => {
       status: 'todo',
       assigneeAgentId: developer?.id,
     });
+  });
+
+  it('allows a compact project request to skip only the separate sprint-planning gate', async () => {
+    const compactHarness = createTestHarness({ manifest, config: { enableTeam: true } });
+    compactHarness.seed({ projects: [project()], projectWorkspaces: [workspace()] });
+    await plugin.definition.setup(compactHarness.ctx);
+
+    const kickoff = await compactHarness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      {
+        projectId: PROJECT_ID,
+        brief: 'Correct a single button label.',
+        skipSprintPlanning: true,
+      },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(compactHarness, kickoff.rootIssueId);
+    await compactHarness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+
+    const approval = await compactHarness.performAction<{
+      activated: boolean;
+      awaitingSprint: boolean;
+      projectOnboarding: ProjectOnboarding;
+    }>('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+    expect(approval).toMatchObject({
+      activated: true,
+      awaitingSprint: false,
+      projectOnboarding: { status: 'active', requiresSprint: false },
+    });
+    expect((await compactHarness.getData<BoardData>('board', { companyId: COMPANY_ID })).currentSprint).toBeNull();
   });
 
   it('mirrors Product Owner child issues without firing a local ceremony', async () => {
@@ -1118,6 +1188,73 @@ describe('project onboarding worker actions', () => {
       status: 'in_review',
       assigneeAgentId: qa?.id,
     });
+  });
+
+  it('routes a pending product decision to QA after a human-approved sprint starts', async () => {
+    const sprintHarness = createTestHarness({ manifest, config: { enableTeam: true } });
+    sprintHarness.seed({ projects: [project()], projectWorkspaces: [workspace()] });
+    await plugin.definition.setup(sprintHarness.ctx);
+
+    const kickoff = await sprintHarness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(sprintHarness, kickoff.rootIssueId);
+    await sprintHarness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+
+    const productDecision = await sprintHarness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Choose image slider auto-play behaviour',
+      description: `Decision required\n${PRODUCT_DECISION_REQUIRED_MARKER}`,
+      status: 'backlog',
+    });
+    await sprintHarness.emit(
+      'issue.created',
+      { issueId: productDecision.id },
+      { companyId: COMPANY_ID, entityId: productDecision.id, entityType: 'issue' }
+    );
+    await sprintHarness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+    let board = await sprintHarness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const technicalLead = board.agents.find((agent) => agent.role === 'technical_lead');
+    const developer = board.agents.find((agent) => agent.role === 'developer');
+    const qa = board.agents.find((agent) => agent.role === 'qa_engineer');
+    const refinement = await sprintHarness.ctx.issues.createComment(
+      productDecision.id,
+      `<!-- ${REFINEMENT_MARKER} {"storyPoints":2,"acceptanceCriteria":["Auto-play respects the approved setting"],"technicalNotes":"Use the existing slider primitive."} -->`,
+      COMPANY_ID,
+      { authorAgentId: technicalLead?.id }
+    );
+    await sprintHarness.emit(
+      'issue.comment.created',
+      { issueId: productDecision.id },
+      { companyId: COMPANY_ID, entityId: refinement.id, entityType: 'issue_comment' }
+    );
+    await sprintHarness.performAction('startProjectSprint', {}, { companyId: COMPANY_ID });
+
+    await sprintHarness.ctx.issues.update(
+      productDecision.id,
+      { status: 'in_review', assigneeAgentId: developer?.id },
+      COMPANY_ID
+    );
+    await sprintHarness.emit(
+      'issue.updated',
+      { issueId: productDecision.id },
+      { companyId: COMPANY_ID, entityId: productDecision.id, entityType: 'issue' }
+    );
+
+    expect(await sprintHarness.ctx.issues.get(productDecision.id, COMPANY_ID)).toMatchObject({
+      status: 'in_review',
+      assigneeAgentId: qa?.id,
+    });
+    expect(await sprintHarness.ctx.issues.listComments(productDecision.id, COMPANY_ID)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ body: expect.stringContaining(PRODUCT_DECISION_RESOLVED_MARKER) }),
+      ])
+    );
   });
 
   it('resolves a product decision from the Scrum Board and returns it to QA', async () => {

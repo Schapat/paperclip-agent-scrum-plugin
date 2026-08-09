@@ -6,14 +6,16 @@ import {
   GITHUB_COMMIT_EVIDENCE_MARKER,
   HEARTBEAT_QUEUE_MARKER,
   MANAGED_AGENT_INSTRUCTIONS,
+  SPRINT_AUTONOMY_MARKER,
   heartbeatAwareInstructions,
 } from '../agent-instructions';
 
 describe('managed agent instruction upgrades', () => {
-  it('materializes the complete managed instructions when an agent has no bundle yet', () => {
-    expect(heartbeatAwareInstructions('qa-engineer', null)).toBe(
-      MANAGED_AGENT_INSTRUCTIONS['qa-engineer']
-    );
+  it('materializes managed instructions with all required upgrade rules when an agent has no bundle yet', () => {
+    const materialized = heartbeatAwareInstructions('qa-engineer', null);
+
+    expect(materialized).toContain(MANAGED_AGENT_INSTRUCTIONS['qa-engineer']);
+    expect(materialized).toContain(SPRINT_AUTONOMY_MARKER);
   });
 
   it('preserves custom instructions while appending the missing event-routing rule once', () => {
@@ -43,6 +45,14 @@ describe('managed agent instruction upgrades', () => {
 
     expect(upgraded).toContain('## Human Scope Guard');
     expect(heartbeatAwareInstructions('scrum-master', upgraded)).toBe(upgraded);
+  });
+
+  it('forbids host confirmations for direct issues in a human-approved active sprint', () => {
+    const upgraded = heartbeatAwareInstructions('developer-1', '# Existing developer guidance\n');
+
+    expect(upgraded).toContain('## Approved Sprint Autonomy');
+    expect(upgraded).toContain('Keine Paperclip-Confirmation');
+    expect(heartbeatAwareInstructions('developer-1', upgraded)).toBe(upgraded);
   });
 
   it('uses one feature branch and one feature pull request instead of ticket pull requests', () => {

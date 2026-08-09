@@ -19,8 +19,12 @@ interface ProjectOnboardingPanelProps {
   latestEventSummary: string | null;
   canStartSprint: boolean;
   scopeHoldBusyId: string | null;
-  onStart: (input: { projectId: string; brief: string; constraints: string }) => Promise<void>;
-  onStartBacklogDiscovery: () => Promise<boolean>;
+  onStart: (input: {
+    projectId: string;
+    brief: string;
+    constraints: string;
+    skipSprintPlanning: boolean;
+  }) => Promise<void>;
   onActivate: () => Promise<void>;
   onStartSprint: () => Promise<void>;
   onApproveScopeHold: (issueId: string) => Promise<void>;
@@ -39,7 +43,6 @@ export function ProjectOnboardingPanel({
   canStartSprint,
   scopeHoldBusyId,
   onStart,
-  onStartBacklogDiscovery,
   onActivate,
   onStartSprint,
   onApproveScopeHold,
@@ -48,11 +51,12 @@ export function ProjectOnboardingPanel({
   const [projectId, setProjectId] = useState("");
   const [brief, setBrief] = useState("");
   const [constraints, setConstraints] = useState("");
+  const [skipSprintPlanning, setSkipSprintPlanning] = useState(false);
   const [startingNextProject, setStartingNextProject] = useState(false);
 
   function submitStart(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    void onStart({ projectId, brief, constraints });
+    void onStart({ projectId, brief, constraints, skipSprintPlanning });
   }
 
   if (canStart && (onboarding.status !== "completed" || startingNextProject)) {
@@ -103,6 +107,19 @@ export function ProjectOnboardingPanel({
             />
           </label>
 
+          <label className="project-onboarding-compact project-onboarding-field-wide">
+            <input
+              type="checkbox"
+              checked={skipSprintPlanning}
+              onChange={(event) => setSkipSprintPlanning(event.target.checked)}
+              disabled={busy}
+            />
+            <span>
+              <strong>Small implementation</strong>
+              <small>Skip the separate sprint-planning step after backlog approval.</small>
+            </span>
+          </label>
+
           <div className="project-onboarding-actions project-onboarding-field-wide">
             <button className="btn btn-primary" type="submit" disabled={busy || projects.length === 0}>
               {busy ? "Starting…" : "Start technical analysis"}
@@ -113,9 +130,7 @@ export function ProjectOnboardingPanel({
     );
   }
 
-  const action = onboarding.status === "analysis_ready"
-    ? { label: "Approve technical analysis", run: onStartBacklogDiscovery }
-    : onboarding.status === "backlog_in_progress"
+  const action = onboarding.status === "backlog_in_progress"
       ? {
           label: onboarding.requiresSprint ? "Approve backlog for sprint planning" : "Approve backlog",
           run: onActivate,
@@ -238,6 +253,13 @@ export function ProjectOnboardingPanel({
         {analysisInProgress && (
           <p className="project-onboarding-lock" role="status">
             Stories stay locked until the Technical Lead completes the analysis.
+          </p>
+        )}
+
+        {analysisReady && (
+          <p className="project-onboarding-lock" role="status">
+            Review and approve the Technical Lead analysis in the kickoff ticket before Product Owner story discovery
+            can start.
           </p>
         )}
 

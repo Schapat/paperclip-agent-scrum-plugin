@@ -185,7 +185,12 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
   }, [refresh, projects, log]);
 
   const handleStartProjectOnboarding = useCallback(
-    async (input: { projectId: string; brief: string; constraints: string }) => {
+    async (input: {
+      projectId: string;
+      brief: string;
+      constraints: string;
+      skipSprintPlanning: boolean;
+    }) => {
       setOnboardingBusy(true);
       try {
         const result = (await startProjectOnboarding(input)) as {
@@ -470,7 +475,6 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
         canStartSprint={data.canStartProjectSprint}
         scopeHoldBusyId={scopeHoldBusyId}
         onStart={handleStartProjectOnboarding}
-        onStartBacklogDiscovery={handleStartBacklogDiscovery}
         onActivate={handleActivateProjectOnboarding}
         onStartSprint={handleStartProjectSprint}
         onApproveScopeHold={handleApproveScopeHold}

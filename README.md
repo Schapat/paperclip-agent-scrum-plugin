@@ -160,6 +160,24 @@ paperclipai plugin config:set schapat.agent-scrum \
   --payload-json '{"configJson":{"enableTeam":true,"requireProjectSprint":false}}'
 ```
 
+### Compact project requests
+
+For a small, isolated implementation, select **Small implementation** when
+starting the project request on the Scrum Board. It keeps the Technical Lead
+analysis, the kickoff-ticket approval, Product Owner discovery, backlog
+approval, and QA flow intact. Only the separate human Sprint Planning start is
+skipped for that one request; the organisation default remains unchanged for
+later requests.
+
+### Active sprint autonomy
+
+Starting a project sprint is the final human delivery approval for its direct
+child issues. During that active sprint, the managed team does not request
+host-level confirmations for implementation, testing, review, or choices inside
+the approved acceptance criteria. QA remains the required quality gate. New
+requirements outside the ticket or sprint scope stay outside delivery and are
+escalated through the existing scope guard.
+
 ### 5. Open the board
 
 Open **Scrum Board** in the **Work** section of the Paperclip sidebar.

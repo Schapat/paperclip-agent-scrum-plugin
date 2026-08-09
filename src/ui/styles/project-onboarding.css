@@ -68,8 +68,38 @@
   resize: vertical;
 }
 
+.project-onboarding-compact {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
+  color: var(--color-text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.4;
+}
+
+.project-onboarding-compact input {
+  width: 1rem;
+  height: 1rem;
+  margin: 0.1rem 0 0;
+  accent-color: var(--color-primary);
+}
+
+.project-onboarding-compact span {
+  display: grid;
+  gap: 2px;
+}
+
+.project-onboarding-compact strong {
+  color: var(--color-text);
+}
+
+.project-onboarding-compact small {
+  font-size: inherit;
+}
+
 .project-onboarding-field select:focus-visible,
 .project-onboarding-field textarea:focus-visible,
+.project-onboarding-compact input:focus-visible,
 .project-onboarding-actions .btn:focus-visible {
   outline: 2px solid var(--color-primary);
   outline-offset: 2px;
@@ -237,7 +267,8 @@ button.project-onboarding-kickoff:focus-visible {
 .ceremony-bar .btn-secondary:disabled,
 .project-onboarding .btn:disabled,
 .project-onboarding-field select:disabled,
-.project-onboarding-field textarea:disabled {
+.project-onboarding-field textarea:disabled,
+.project-onboarding-compact input:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }

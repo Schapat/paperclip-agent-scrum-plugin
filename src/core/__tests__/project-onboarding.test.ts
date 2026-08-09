@@ -34,6 +34,7 @@ describe('project onboarding', () => {
         projectId: ' project-bmw ',
         brief: ' Build an image slider ',
         constraints: ' Use the design system ',
+        skipSprintPlanning: true,
       })
     ).toEqual({
       valid: true,
@@ -41,6 +42,7 @@ describe('project onboarding', () => {
         projectId: 'project-bmw',
         brief: 'Build an image slider',
         constraints: 'Use the design system',
+        skipSprintPlanning: true,
       },
     });
   });

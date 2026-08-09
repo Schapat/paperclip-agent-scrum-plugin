@@ -22,12 +22,21 @@ export const HEARTBEAT_QUEUE_MARKER = '## Heartbeat Queue Scan';
 export const EVENT_ROUTING_MARKER = '<!-- agent-scrum:event-driven-activation -->';
 export const QA_REWORK_HANDOFF_MARKER = '## QA Rework Handoff';
 export const HUMAN_SCOPE_GUARD_MARKER = '## Human Scope Guard';
+export const SPRINT_AUTONOMY_MARKER = '## Approved Sprint Autonomy';
 export const GITHUB_COMMIT_EVIDENCE_MARKER = '## GitHub Commit Evidence';
 export const FEATURE_BRANCH_DELIVERY_MARKER = '## Feature Branch Delivery';
 
 const HUMAN_SCOPE_GUARD = `${HUMAN_SCOPE_GUARD_MARKER}
 
 Diese Regel hat Vorrang vor Leerlauf-, Backlog- oder Heartbeat-Regeln: Ein leerer Board, Timer-Heartbeat, Refinement-Event oder freie Kapazitaet ist keine Human-Freigabe fuer neue Produktarbeit. Erstelle, priorisiere, weise zu, verfeinere oder implementiere nur direkt von einem Human beauftragte Issues oder direkte Child-Issues eines freigegebenen Projekt-Kickoffs. Wenn alle direkten Child-Issues eines Kickoffs Done sind, ist der Auftrag abgeschlossen; starte keine Nachfolgearbeit und warte auf einen neuen Human-Projektauftrag. Bei ungebundener Agentenarbeit nicht fortfahren, sondern einen Scope-Hinweis hinterlassen und die Human-Freigabe abwarten.`;
+
+const SPRINT_AUTONOMY = `${SPRINT_AUTONOMY_MARKER}
+
+Die Human-Freigabe von Analyse, Backlog, Refinement und Sprint autorisiert die Lieferung aller direkten Child-Issues dieses Kickoffs im aktiven Sprint.
+
+- Keine Paperclip-Confirmation und kein Human Approval fuer Implementierung, Tests, QA, Review oder Entscheidungen innerhalb der Akzeptanzkriterien eines aktiven Sprint-Tickets anfordern.
+- Nutze die akzeptierten Akzeptanzkriterien, den Backlog und bestehende technische Konventionen als Entscheidungsvorgabe und liefere das Ticket durch den normalen QA-Prozess weiter.
+- Eine neue Anforderung ausserhalb des Ticket- oder Sprint-Scopes als Scope-Hinweis dokumentieren und an Product Owner oder Scrum Master eskalieren. Den laufenden, bereits freigegebenen Ticket-Workflow nicht mit einer Human-Confirmation blockieren.`;
 
 const QA_REWORK_HANDOFF = `${QA_REWORK_HANDOFF_MARKER}
 
@@ -96,12 +105,15 @@ export function heartbeatAwareInstructions(agentKey: TeamAgentKey, existing: str
   const withScopeGuard = withEventRouting.includes(HUMAN_SCOPE_GUARD_MARKER)
     ? withEventRouting
     : `${withEventRouting.trimEnd()}\n\n${HUMAN_SCOPE_GUARD}\n`;
+  const withSprintAutonomy = withScopeGuard.includes(SPRINT_AUTONOMY_MARKER)
+    ? withScopeGuard
+    : `${withScopeGuard.trimEnd()}\n\n${SPRINT_AUTONOMY}\n`;
 
   const withCommitEvidence =
     (agentKey === 'developer-1' || agentKey === 'developer-2') &&
-    !withScopeGuard.includes(GITHUB_COMMIT_EVIDENCE_MARKER)
-      ? `${withScopeGuard.trimEnd()}\n\n${GITHUB_COMMIT_EVIDENCE}\n`
-      : withScopeGuard;
+    !withSprintAutonomy.includes(GITHUB_COMMIT_EVIDENCE_MARKER)
+      ? `${withSprintAutonomy.trimEnd()}\n\n${GITHUB_COMMIT_EVIDENCE}\n`
+      : withSprintAutonomy;
 
   const withFeatureBranchDelivery =
     (agentKey === 'developer-1' || agentKey === 'developer-2' || agentKey === 'qa-engineer') &&

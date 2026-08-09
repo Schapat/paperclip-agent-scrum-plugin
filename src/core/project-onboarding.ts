@@ -11,6 +11,7 @@ export interface ProjectOnboardingInput {
   projectId: string;
   brief: string;
   constraints: string | null;
+  skipSprintPlanning: boolean;
 }
 
 export type ProjectOnboardingInputResult =
@@ -83,6 +84,7 @@ export function parseProjectOnboardingInput(input: {
   projectId?: unknown;
   brief?: unknown;
   constraints?: unknown;
+  skipSprintPlanning?: unknown;
 }): ProjectOnboardingInputResult {
   const projectId = trimmedString(input.projectId);
   if (!projectId) return { valid: false, error: 'Choose a Paperclip project first.' };
@@ -97,6 +99,7 @@ export function parseProjectOnboardingInput(input: {
       projectId,
       brief,
       constraints: constraints || null,
+      skipSprintPlanning: input.skipSprintPlanning === true,
     },
   };
 }
