@@ -5,7 +5,7 @@ board state, tickets move through a Kanban board, and the retrospective turns
 finished work into skills the team applies next sprint.
 
 ![Plugin API](https://img.shields.io/badge/plugin%20API-v1-blue.svg)
-![Tests](https://img.shields.io/badge/tests-358%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-372%20passing-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
 ---
@@ -25,8 +25,8 @@ and asks the agents to do the parts that need judgement.
 | --- | --- |
 | Turn a request into controlled delivery | A human starts technical analysis for a Paperclip project; the resulting, project-bound backlog is approved, then refined with estimates and acceptance criteria. By default, a human explicitly starts Sprint Planning before delivery. Paperclip issues remain the delivery source of truth. |
 | Keep work flowing without ceremony theatre | Planning, refinement, blocker resolution, review, and retrospective react to board state. A slow Scrum Master watchdog recovers stranded work without becoming a second scheduler. |
-| Protect quality and approved scope | Acceptance criteria, QA review, a Developer rework hand-off, and a second QA pass protect the Done state. Only direct child issues of the approved kickoff are delivered; unapproved agent-created work is held for a human decision. |
-| See and steer the process | The Scrum Board shows the project request, Kanban flow, ticket detail, blocked work, and manually runnable ceremonies. Sprint Progress and Team Status widgets give a compact dashboard view, while the Agent log exposes decisions and learnings. |
+| Protect quality and approved scope | Acceptance criteria, QA review, a Developer rework hand-off, a second QA pass, and GitHub commit evidence protect the Done state. Only direct child issues of the approved kickoff are delivered; unapproved agent-created work is held for a human decision. |
+| See and steer the process | The Scrum Board shows the project request, Kanban flow, ticket detail, GitHub code changes, blocked work, and manually runnable ceremonies. Sprint Progress and Team Status widgets give a compact dashboard view, while the Agent log exposes decisions and learnings. |
 | Improve the next sprint | The retrospective turns recurring, evidence-backed delivery patterns into role-specific skills that accompany the next agent invocation. |
 | Activate safely per organisation | Six managed roles are created only after an explicit organisation-level opt-in. Boards and settings are isolated by company, so enabling one team does not populate another. |
 
@@ -95,8 +95,21 @@ paperclipai plugin install /absolute/path/to/paperclip-agent-scrum-plugin
 Expected output:
 
 ```
-✓ Installed schapat.agent-scrum v2.0.12 (ready)
+✓ Installed schapat.agent-scrum v2.1.0 (ready)
 ```
+
+### Update an existing local installation
+
+Build the new bundle, then ask the local host to reload its installed plugin:
+
+```bash
+pnpm build
+paperclipai plugin upgrade schapat.agent-scrum
+```
+
+For a local-path installation, Paperclip retains the package binding and reloads
+the rebuilt `dist/` files. The upgrade preserves organisation-scoped plugin
+configuration and state.
 
 ### 4. Activate the team for your organisation
 
@@ -136,6 +149,7 @@ settings or with `paperclipai plugin config:set`.
 | `wipLimitReview` | `3` | Sets the Review work-in-progress limit. |
 | `apiBaseUrl` | `http://127.0.0.1:3100` | Lets the plugin maintain reporting lines, the runtime policy, and managed instructions through Paperclip's REST API. |
 | `apiToken` | empty | Optional token for managed-agent maintenance on protected instances. |
+| `githubToken` | empty | Optional token for private GitHub repositories. Onboarding uses it to validate repository access and the latest successful GitHub Actions run. |
 
 For a direct-delivery organisation, explicitly disable the new sprint gate
 before starting its project request:
@@ -201,7 +215,10 @@ established website.
 
 1. In Paperclip, make sure the project has a **primary workspace**. Its
   repository or local-folder link is the codebase the agents analyze and use
-  for delivery.
+  for delivery. For a GitHub remote, onboarding verifies repository access,
+  at least one GitHub Actions workflow, and the latest successful workflow run
+  before it creates the kickoff issue. Set `githubToken` for a private
+  repository.
 2. Open **Scrum Board** and choose the Paperclip project under **Start a project
   request**.
 3. Enter the requested outcome and any non-negotiable constraints. For example:
@@ -258,6 +275,21 @@ For project-backed work, a direct Developer transition to Done is returned to
 QA review. QA records `<!-- agent-scrum:qa-review-approved -->` before closing
 the reviewed issue. The board also mirrors active Developer and QA assignments,
 and only releases a blocked issue after every Paperclip blocker is done.
+
+### GitHub delivery evidence
+
+For a project whose primary workspace is linked to GitHub, every delivered
+ticket needs a Developer-recorded commit marker before it can remain Done:
+
+```html
+<!-- agent-scrum:commit:v1 {"sha":"<full-sha>","url":"https://github.com/<owner>/<repo>/commit/<full-sha>","message":"<commit message>"} -->
+```
+
+The marker is accepted only from a managed Developer. A direct or QA-approved
+completion without it returns to Development and wakes a Developer with the
+required format in the ticket comments. The ticket detail dialog's **Code** tab
+loads the recorded commit from the project's repository, then shows affected
+files, additions, deletions, and expandable GitHub patches.
 
 When QA finds a defect, it records the failed criteria, returns the issue to
 Development, and assigns a Developer. As a host-side safeguard, Agent Scrum
@@ -376,7 +408,7 @@ stateDiagram-v2
     Backlog --> Backlog: Refinement adds criteria,<br/>estimate, dependencies
     Backlog --> TODO: Planning (refined + estimated + has criteria)
     TODO --> Development: assigned by skill
-    Development --> Review: developer reports done
+    Development --> Review: developer records GitHub commit evidence
     Review --> Done: all acceptance criteria met
     Review --> Development: rejected, failing criteria named
     Development --> Blocked: dependency unresolved
@@ -385,8 +417,10 @@ stateDiagram-v2
 ```
 
 A ticket can only reach Done through Review — `in_progress → done` is not a
-legal transition. Rejection is not a dead end: QA names the criteria that
-failed, and that feedback lands in the ticket's comment history.
+legal transition. Project-backed GitHub tickets also need Developer-recorded
+commit evidence before QA can leave them Done. Rejection is not a dead end: QA
+names the criteria that failed, and that feedback lands in the ticket's comment
+history.
 
 ---
 
@@ -544,7 +578,7 @@ whom*; the agents decide *what it says*.
 pnpm setup:sdk --paperclip /path/to/paperclip   # once
 pnpm install
 pnpm dev                                        # watch build
-pnpm test                                       # 358 tests
+pnpm test                                       # 372 tests
 pnpm typecheck
 ```
 
@@ -594,6 +628,10 @@ Stated plainly, because the alternative is a README that lies:
   over `PATCH /api/agents/:id`. On an instance requiring authentication, set
   `apiToken` in the plugin settings; without a reachable API the plugin falls
   back to reporting the drift.
+- **GitHub delivery evidence targets github.com and GitHub Actions.** Other
+  forges are not validated at onboarding. GitHub can omit a file patch for very
+  large or binary changes; the Code tab still lists the file and its change
+  statistics in that case.
 - **No performance measurements.** Nothing here has been profiled under load.
 
 ---

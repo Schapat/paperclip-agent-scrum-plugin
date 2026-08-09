@@ -68,6 +68,16 @@ export interface TicketComment {
   messageId?: string | null;
 }
 
+/** A developer-recorded Git commit that provides delivery evidence for a ticket. */
+export interface TicketCommit {
+  id: string;
+  sha: string;
+  url: string | null;
+  message: string | null;
+  recordedBy: string | null;
+  recordedAt: string;
+}
+
 /**
  * Protokollierte Agentenentscheidung (Spec §5: "Agentenentscheidungen nachvollziehen").
  *
@@ -168,6 +178,8 @@ export interface ScrumTask {
   // Nachvollziehbarkeit (Spec §5, §6)
   /** Kommentare inkl. Agentenkommunikation */
   comments: TicketComment[];
+  /** Verifizierbare Commit-Nachweise aus Developer-Kommentaren */
+  commits: TicketCommit[];
   /** Protokollierte Agentenentscheidungen mit Begründung */
   decisions: AgentDecision[];
 

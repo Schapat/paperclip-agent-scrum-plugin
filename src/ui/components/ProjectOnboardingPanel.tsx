@@ -14,14 +14,17 @@ interface ProjectOnboardingPanelProps {
   busy: boolean;
   hostControlled: boolean;
   canStart: boolean;
-  kickoffHref: string | null;
+  onOpenKickoff?: () => void;
   progress: ProjectProgress;
   latestEventSummary: string | null;
   canStartSprint: boolean;
+  scopeHoldBusyId: string | null;
   onStart: (input: { projectId: string; brief: string; constraints: string }) => Promise<void>;
   onStartBacklogDiscovery: () => Promise<void>;
   onActivate: () => Promise<void>;
   onStartSprint: () => Promise<void>;
+  onApproveScopeHold: (issueId: string) => Promise<void>;
+  onStartScopeHoldFollowUp: (issueId: string) => Promise<void>;
 }
 
 export function ProjectOnboardingPanel({
@@ -30,14 +33,17 @@ export function ProjectOnboardingPanel({
   busy,
   hostControlled,
   canStart,
-  kickoffHref,
+  onOpenKickoff,
   progress,
   latestEventSummary,
   canStartSprint,
+  scopeHoldBusyId,
   onStart,
   onStartBacklogDiscovery,
   onActivate,
   onStartSprint,
+  onApproveScopeHold,
+  onStartScopeHoldFollowUp,
 }: ProjectOnboardingPanelProps) {
   const [projectId, setProjectId] = useState("");
   const [brief, setBrief] = useState("");
@@ -122,6 +128,10 @@ export function ProjectOnboardingPanel({
   const analysisInProgress = onboarding.status === "analysis_in_progress";
   const sprintPlanning = onboarding.status === "sprint_planning";
   const projectCompleted = onboarding.status === "completed";
+  const canApproveScope =
+    onboarding.status === "backlog_in_progress" ||
+    onboarding.status === "sprint_planning" ||
+    onboarding.status === "active";
 
   return (
     <section className="project-onboarding project-onboarding-status" aria-labelledby="project-onboarding-title">
@@ -132,12 +142,12 @@ export function ProjectOnboardingPanel({
 
       <div className="project-onboarding-progress">
         {onboarding.rootIssueId && (
-          kickoffHref ? (
-            <a className="project-onboarding-kickoff" href={kickoffHref}>
+          onOpenKickoff ? (
+            <button className="project-onboarding-kickoff" type="button" onClick={onOpenKickoff}>
               <span className="project-onboarding-kickoff-kind">Kickoff ticket</span>
               <strong>Kickoff: {onboarding.projectName}</strong>
-              <span>Open the Technical Lead analysis in Paperclip</span>
-            </a>
+              <span>Open the Technical Lead analysis and workflow</span>
+            </button>
           ) : (
             <div className="project-onboarding-kickoff">
               <span className="project-onboarding-kickoff-kind">Kickoff ticket</span>
@@ -147,6 +157,7 @@ export function ProjectOnboardingPanel({
         )}
 
         <p className={`project-onboarding-stage is-${onboarding.status}`}>
+          {analysisInProgress && <span className="project-onboarding-spinner" aria-hidden="true" />}
           {stageLabel(onboarding.status, hostControlled)}
         </p>
 
@@ -168,10 +179,35 @@ export function ProjectOnboardingPanel({
 
         {onboarding.scopeHolds.length > 0 && (
           <div className="project-onboarding-lock" role="alert">
-            <strong>Human scope approval required</strong>
+            <strong>{projectCompleted ? "Human follow-up approval required" : "Human scope approval required"}</strong>
             <span>
-              {onboarding.scopeHolds.length} agent-created item{onboarding.scopeHolds.length === 1 ? " was" : "s were"} held outside this project: {onboarding.scopeHolds.map((hold) => hold.title).join(", ")}.
+              {projectCompleted
+                ? `${onboarding.scopeHolds.length} held item${onboarding.scopeHolds.length === 1 ? " is" : "s are"} ready for a new follow-up request. Approval starts a new technical analysis instead of reopening this completed project.`
+                : !canApproveScope
+                  ? `${onboarding.scopeHolds.length} held item${onboarding.scopeHolds.length === 1 ? " is" : "s are"} waiting for the new technical analysis and backlog discovery before scope can be approved.`
+                  : `${onboarding.scopeHolds.length} agent-created item${onboarding.scopeHolds.length === 1 ? " was" : "s were"} held outside this project. Approve an item to create a tracked project ticket for it.`}
             </span>
+            <div className="project-onboarding-scope-holds">
+              {onboarding.scopeHolds.map((hold) => (
+                <div key={hold.issueId} className="project-onboarding-scope-hold">
+                  <span>{hold.title}</span>
+                  <button
+                    className="btn btn-secondary"
+                    type="button"
+                    disabled={busy || (!projectCompleted && !canApproveScope) || scopeHoldBusyId === hold.issueId}
+                    onClick={() => void (projectCompleted ? onStartScopeHoldFollowUp : onApproveScopeHold)(hold.issueId)}
+                  >
+                    {scopeHoldBusyId === hold.issueId
+                      ? "Approving..."
+                      : projectCompleted
+                        ? "Approve as follow-up"
+                        : canApproveScope
+                          ? "Approve scope"
+                          : "Await analysis"}
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 

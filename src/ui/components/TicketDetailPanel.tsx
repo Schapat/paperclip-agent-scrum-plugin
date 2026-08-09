@@ -15,6 +15,11 @@
 
 import { useEffect, useRef, useState, useCallback, KeyboardEvent } from 'react';
 import type { AgentDecision, ScrumAgent, ScrumTask } from '../../core/types';
+import type { GitHubCommitChangesResult } from '../../core/github-repository';
+import {
+  PRODUCT_DECISION_REQUIRED_MARKER,
+  PRODUCT_DECISION_RESOLVED_MARKER,
+} from '../../core/review-routing';
 import { agentIcon, agentPresentation } from './agent-presentation';
 import { descriptionWithoutAcceptanceCriteria } from './ticket-description';
 
@@ -33,6 +38,8 @@ export interface TicketDetailPanelProps {
   onFetchComments?: (taskId: string) => Promise<Comment[]>;
   /** Optional callback to fetch decisions */
   onFetchDecisions?: (taskId: string) => Promise<Decision[]>;
+  /** Loads file-level GitHub changes for a developer-recorded ticket commit. */
+  onFetchCommitChanges?: (taskId: string, sha: string) => Promise<GitHubCommitChangesResult>;
   /**
    * Alle Tickets des Boards.
    *
@@ -42,6 +49,8 @@ export interface TicketDetailPanelProps {
   allTasks?: ScrumTask[];
   /** Managed team members used to resolve audit IDs to readable names. */
   agents?: Array<Pick<ScrumAgent, 'id' | 'name' | 'role'>>;
+  /** Resolves a human product decision through the board workflow. */
+  onResolveProductDecision?: (taskId: string) => Promise<boolean>;
 }
 
 export interface Comment {
@@ -64,7 +73,17 @@ export interface Decision {
   relatedTaskIds?: string[];
 }
 
-type TabId = 'overview' | 'comments' | 'history' | 'decisions';
+type TabId = 'overview' | 'code' | 'comments' | 'history' | 'decisions' | 'workflow';
+
+interface WorkflowEvent {
+  id: string;
+  kind: 'comment' | 'decision' | 'status';
+  title: string;
+  detail: string;
+  timestamp: string;
+  actor: string;
+  actorRole: string;
+}
 
 interface Tab {
   id: TabId;
@@ -78,9 +97,11 @@ interface Tab {
 
 const TABS: Tab[] = [
   { id: 'overview', label: 'Übersicht', icon: '📋' },
+  { id: 'code', label: 'Code', icon: '</>' },
   { id: 'comments', label: 'Kommentare', icon: '💬' },
   { id: 'history', label: 'History', icon: '📜' },
   { id: 'decisions', label: 'Entscheidungen', icon: '🤖' },
+  { id: 'workflow', label: 'Workflow', icon: '◷' },
 ];
 
 const STATUS_LABELS: Record<string, { label: string; color: string }> = {
@@ -140,8 +161,10 @@ export function TicketDetailPanel({
   onClose,
   onFetchComments,
   onFetchDecisions,
+  onFetchCommitChanges,
   allTasks,
   agents = [],
+  onResolveProductDecision,
 }: TicketDetailPanelProps) {
   // ---------------------------------------------------------------------------
   // State
@@ -150,8 +173,12 @@ export function TicketDetailPanel({
   const [activeTab, setActiveTab] = useState<TabId>('overview');
   const [comments, setComments] = useState<Comment[]>([]);
   const [decisions, setDecisions] = useState<Decision[]>([]);
+  const [commitChanges, setCommitChanges] = useState<Record<string, GitHubCommitChangesResult>>({});
   const [isLoadingComments, setIsLoadingComments] = useState(false);
   const [isLoadingDecisions, setIsLoadingDecisions] = useState(false);
+  const [isLoadingCommitChanges, setIsLoadingCommitChanges] = useState(false);
+  const [isResolvingProductDecision, setIsResolvingProductDecision] = useState(false);
+  const [productDecisionError, setProductDecisionError] = useState<string | null>(null);
 
   // Refs for focus management
   const panelRef = useRef<HTMLDivElement>(null);
@@ -187,7 +214,7 @@ export function TicketDetailPanel({
 
   // Fetch comments when tab switches
   useEffect(() => {
-    if (activeTab !== 'comments' || !task || !onFetchComments) return;
+    if ((activeTab !== 'comments' && activeTab !== 'workflow') || !task || !onFetchComments) return;
 
     setIsLoadingComments(true);
     onFetchComments(task.id)
@@ -198,7 +225,7 @@ export function TicketDetailPanel({
 
   // Fetch decisions when tab switches
   useEffect(() => {
-    if (activeTab !== 'decisions' || !task || !onFetchDecisions) return;
+    if ((activeTab !== 'decisions' && activeTab !== 'workflow') || !task || !onFetchDecisions) return;
 
     setIsLoadingDecisions(true);
     onFetchDecisions(task.id)
@@ -207,11 +234,46 @@ export function TicketDetailPanel({
       .finally(() => setIsLoadingDecisions(false));
   }, [activeTab, task?.id, task?.updatedAt, onFetchDecisions]);
 
+  useEffect(() => {
+    if (activeTab !== 'code' || !task || !onFetchCommitChanges || task.commits.length === 0) return;
+
+    let cancelled = false;
+    setIsLoadingCommitChanges(true);
+    Promise.all(
+      task.commits.map(async (commit): Promise<[string, GitHubCommitChangesResult]> => [
+        commit.sha,
+        await onFetchCommitChanges(task.id, commit.sha),
+      ])
+    )
+      .then((entries) => {
+        if (cancelled) return;
+        setCommitChanges(Object.fromEntries(entries));
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        const message = error instanceof Error ? error.message : 'GitHub code changes could not be loaded.';
+        const failures: Record<string, GitHubCommitChangesResult> = {};
+        for (const commit of task.commits) {
+          failures[commit.sha] = { valid: false, error: message };
+        }
+        setCommitChanges(failures);
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingCommitChanges(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, task?.id, task?.updatedAt, onFetchCommitChanges]);
+
   // Reset state when task changes
   useEffect(() => {
     setComments([]);
     setDecisions([]);
+    setCommitChanges({});
     setActiveTab('overview');
+    setProductDecisionError(null);
   }, [task?.id]);
 
   // ---------------------------------------------------------------------------
@@ -308,6 +370,28 @@ export function TicketDetailPanel({
   };
 
   const getAgentIcon = (agentId: string | null): string => agentIcon(agentPresentation(agentId, agents)?.role);
+  const hasPendingProductDecision = Boolean(
+    task &&
+      onResolveProductDecision &&
+      task.comments.some((comment) => comment.body.includes(PRODUCT_DECISION_REQUIRED_MARKER)) &&
+      !task.comments.some((comment) => comment.body.includes(PRODUCT_DECISION_RESOLVED_MARKER))
+  );
+
+  const handleResolveProductDecision = async () => {
+    if (!task || !onResolveProductDecision) return;
+
+    setIsResolvingProductDecision(true);
+    setProductDecisionError(null);
+    try {
+      if (!await onResolveProductDecision(task.id)) {
+        setProductDecisionError('Die Produktentscheidung konnte nicht freigegeben werden.');
+      }
+    } catch (error) {
+      setProductDecisionError(error instanceof Error ? error.message : 'Die Produktentscheidung konnte nicht freigegeben werden.');
+    } finally {
+      setIsResolvingProductDecision(false);
+    }
+  };
 
   // ---------------------------------------------------------------------------
   // Render Helpers
@@ -387,6 +471,24 @@ export function TicketDetailPanel({
             {description || <em>Keine Beschreibung</em>}
           </div>
         </div>
+
+        {hasPendingProductDecision && (
+          <section className="ticket-detail-approval" aria-label="Ausstehende Human Approval">
+            <div>
+              <h3 className="ticket-detail-section-title">Human Approval erforderlich</h3>
+              <p>Dieses Ticket wartet auf eine Produktentscheidung, bevor QA die technische Prüfung fortsetzen kann.</p>
+            </div>
+            <button
+              className="btn btn-primary"
+              type="button"
+              disabled={isResolvingProductDecision}
+              onClick={() => void handleResolveProductDecision()}
+            >
+              {isResolvingProductDecision ? 'Freigabe wird gespeichert...' : 'Produktentscheidung freigeben'}
+            </button>
+            {productDecisionError && <p className="ticket-detail-approval-error" role="alert">{productDecisionError}</p>}
+          </section>
+        )}
 
         {/* Labels */}
         {task.labels.length > 0 && (
@@ -725,16 +827,186 @@ export function TicketDetailPanel({
     );
   };
 
+  const renderCodeChangesTab = () => {
+    if (!task) return null;
+
+    if (task.commits.length === 0) {
+      return (
+        <div className="ticket-detail-empty">
+          <span className="ticket-detail-empty-icon">&lt;/&gt;</span>
+          <span className="ticket-detail-empty-text">Keine verifizierten Commit-Nachweise</span>
+        </div>
+      );
+    }
+
+    if (!onFetchCommitChanges) {
+      return (
+        <div className="ticket-detail-empty">
+          <span className="ticket-detail-empty-icon">&lt;/&gt;</span>
+          <span className="ticket-detail-empty-text">Code-Änderungen sind derzeit nicht verfügbar</span>
+        </div>
+      );
+    }
+
+    if (isLoadingCommitChanges) {
+      return (
+        <div className="ticket-detail-loading">
+          <div className="ticket-detail-loading-spinner" />
+          <span>Code-Änderungen werden geladen...</span>
+        </div>
+      );
+    }
+
+    return (
+      <div className="ticket-detail-code-changes">
+        {task.commits.map((commit) => {
+          const changes = commitChanges[commit.sha];
+          return (
+            <article key={commit.id} className="ticket-detail-commit">
+              <header className="ticket-detail-commit-header">
+                <div>
+                  {commit.url ? (
+                    <a href={commit.url} target="_blank" rel="noreferrer" className="ticket-detail-commit-sha">
+                      {commit.sha.slice(0, 7)}
+                    </a>
+                  ) : (
+                    <code className="ticket-detail-commit-sha">{commit.sha.slice(0, 7)}</code>
+                  )}
+                  <strong>{commit.message ?? 'GitHub commit'}</strong>
+                </div>
+                <span title={formatDate(commit.recordedAt)}>{formatRelativeTime(commit.recordedAt)}</span>
+              </header>
+
+              {!changes && <p className="ticket-detail-commit-pending">Code-Änderungen werden vorbereitet...</p>}
+              {changes && !changes.valid && <p className="ticket-detail-commit-error" role="alert">{changes.error}</p>}
+              {changes?.valid && (
+                changes.files.length === 0 ? (
+                  <p className="ticket-detail-commit-pending">GitHub meldet keine Dateiänderungen für diesen Commit.</p>
+                ) : (
+                  <ul className="ticket-detail-commit-files">
+                    {changes.files.map((file) => (
+                      <li key={`${changes.sha}:${file.path}`} className="ticket-detail-commit-file">
+                        <div className="ticket-detail-commit-file-meta">
+                          <code>{file.path}</code>
+                          <span>{file.status}</span>
+                          <span className="ticket-detail-commit-additions">+{file.additions}</span>
+                          <span className="ticket-detail-commit-deletions">-{file.deletions}</span>
+                        </div>
+                        {file.patch && (
+                          <details className="ticket-detail-commit-patch">
+                            <summary>Patch anzeigen</summary>
+                            <pre>{file.patch}</pre>
+                          </details>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )
+              )}
+            </article>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const renderWorkflowTab = () => {
+    if (!task) return null;
+
+    if (isLoadingComments || isLoadingDecisions) {
+      return (
+        <div className="ticket-detail-loading">
+          <div className="ticket-detail-loading-spinner" />
+          <span>Workflow wird geladen...</span>
+        </div>
+      );
+    }
+
+    const events: WorkflowEvent[] = [
+      ...task.statusHistory.map((entry, index) => {
+        const from = entry.from ? STATUS_LABELS[entry.from]?.label ?? entry.from : 'Neu';
+        const to = STATUS_LABELS[entry.to]?.label ?? entry.to;
+        return {
+          id: `status:${task.id}:${index}:${entry.timestamp}`,
+          kind: 'status' as const,
+          title: `${from} → ${to}`,
+          detail: 'Statusänderung aus dem Paperclip-Workflow.',
+          timestamp: entry.timestamp,
+          actor: entry.triggeredBy ?? 'Paperclip',
+          actorRole: 'Workflow',
+        };
+      }),
+      ...comments.map((comment) => {
+        const lines = comment.body.split('\n');
+        const titleIndex = lines.findIndex((line) => line.trim());
+        return {
+          id: `comment:${comment.id}`,
+          kind: 'comment' as const,
+          title: titleIndex === -1 ? 'Kommentar' : lines[titleIndex],
+          detail: titleIndex === -1 ? comment.body : lines.slice(titleIndex + 1).join('\n').trim(),
+          timestamp: comment.createdAt,
+          actor: comment.authorName,
+          actorRole: comment.authorRole,
+        };
+      }),
+      ...decisions.map((decision) => ({
+        id: `decision:${decision.id}`,
+        kind: 'decision' as const,
+        title: decision.description,
+        detail: decision.reasoning,
+        timestamp: decision.timestamp,
+        actor: decision.madeBy,
+        actorRole: decision.madeByRole,
+      })),
+    ].sort((left, right) => right.timestamp.localeCompare(left.timestamp));
+
+    if (events.length === 0) {
+      return (
+        <div className="ticket-detail-empty">
+          <span className="ticket-detail-empty-icon">◷</span>
+          <span className="ticket-detail-empty-text">Noch keine Workflow-Ereignisse</span>
+        </div>
+      );
+    }
+
+    const labels: Record<WorkflowEvent['kind'], string> = {
+      comment: 'Kommentar',
+      decision: 'Entscheidung',
+      status: 'Status',
+    };
+
+    return (
+      <div className="ticket-detail-workflow">
+        {events.map((event) => (
+          <article key={event.id} className="ticket-detail-workflow-event">
+            <span className={`ticket-detail-workflow-kind is-${event.kind}`}>{labels[event.kind]}</span>
+            <div className="ticket-detail-workflow-content">
+              <strong>{event.title}</strong>
+              {event.detail && <p>{event.detail}</p>}
+              <span title={formatDate(event.timestamp)}>
+                {formatRelativeTime(event.timestamp)} · {event.actor} ({event.actorRole})
+              </span>
+            </div>
+          </article>
+        ))}
+      </div>
+    );
+  };
+
   const renderTabContent = () => {
     switch (activeTab) {
       case 'overview':
         return renderOverviewTab();
+      case 'code':
+        return renderCodeChangesTab();
       case 'comments':
         return renderCommentsTab();
       case 'history':
         return renderHistoryTab();
       case 'decisions':
         return renderDecisionsTab();
+      case 'workflow':
+        return renderWorkflowTab();
       default:
         return null;
     }

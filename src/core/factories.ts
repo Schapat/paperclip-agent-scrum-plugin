@@ -65,6 +65,7 @@ export function createScrumTask(input: ScrumTaskInput): ScrumTask {
     refined: input.refined ?? false,
 
     comments: input.comments ?? [],
+    commits: input.commits ?? [],
     decisions: input.decisions ?? [],
 
     // Beim Normalisieren geladener Tickets müssen die Originalzeitstempel

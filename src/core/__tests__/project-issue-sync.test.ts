@@ -117,6 +117,40 @@ describe('project issue synchronization', () => {
     });
   });
 
+  it('keeps developer GitHub commit evidence on a completed project ticket', () => {
+    const tasks: ScrumTask[] = [];
+
+    syncProjectOnboardingIssue(
+      tasks,
+      onboarding(),
+      issue({
+        status: 'done',
+        comments: [
+          {
+            id: 'comment-developer-commit',
+            authorAgentId: 'id-dev',
+            authorUserId: null,
+            authorType: 'agent',
+            createdAt: '2026-08-08T12:09:00.000Z',
+            body:
+              '## Ready for Review\n<!-- agent-scrum:commit:v1 ' +
+              '{"sha":"a1b2c3d4e5f6","url":"https://github.com/acme/customer-portal/commit/a1b2c3d4e5f6","message":"feat: add accessible slider"} -->',
+          },
+        ],
+      }),
+      null,
+      [{ id: 'id-dev', name: 'Developer 1', role: 'developer' }]
+    );
+
+    expect(tasks[0].commits).toEqual([
+      expect.objectContaining({
+        sha: 'a1b2c3d4e5f6',
+        url: 'https://github.com/acme/customer-portal/commit/a1b2c3d4e5f6',
+        message: 'feat: add accessible slider',
+      }),
+    ]);
+  });
+
   it('removes a mirrored task when its host issue is cancelled or leaves the kickoff', () => {
     const tasks: ScrumTask[] = [];
     syncProjectOnboardingIssue(tasks, onboarding(), issue());

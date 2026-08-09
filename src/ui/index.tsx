@@ -31,9 +31,11 @@ import type {
   TaskStatus,
 } from "../core/types";
 import type { ProjectProgress } from "../core/project-issue-projection";
+import type { GitHubCommitChangesResult } from "../core/github-repository";
 
 import { KanbanBoard } from "./components/KanbanBoard";
 import { AgentLog } from "./components/AgentLog";
+import { TicketDetailPanel } from "./components/TicketDetailPanel";
 import { ProjectOnboardingPanel, type ProjectOption } from "./components/ProjectOnboardingPanel";
 import { AgentScrumStyleSheet } from "./styles";
 
@@ -48,6 +50,7 @@ interface BoardData {
   metrics: SprintMetrics;
   ceremonies: CeremonyRecord[];
   projectOnboarding: ProjectOnboarding;
+  kickoffTask: ScrumTask | null;
   canStartProjectOnboarding: boolean;
   canStartProjectSprint: boolean;
   projectProgress: ProjectProgress;
@@ -112,7 +115,7 @@ export function ScrumBoardSidebarLink({ context }: PluginSidebarProps) {
 // Page slot: the board
 // ---------------------------------------------------------------------------
 
-export function ScrumBoardPage({ context }: PluginWidgetProps) {
+export function ScrumBoardPage(_props: PluginWidgetProps) {
   const { data, loading, error, refresh } = usePluginData<BoardData>("board");
   const log = usePluginData<LogData>("log");
   const projects = usePluginData<ProjectOption[]>("projects");
@@ -126,11 +129,17 @@ export function ScrumBoardPage({ context }: PluginWidgetProps) {
   const startProjectSprint = usePluginAction("startProjectSprint");
   const requestProjectRefinement = usePluginAction("requestProjectRefinement");
   const retryProjectRefinement = usePluginAction("retryProjectRefinement");
+  const fetchTicketCommitChanges = usePluginAction("fetchTicketCommitChanges");
+  const resolveProductDecision = usePluginAction("resolveProductDecision");
+  const approveScopeHold = usePluginAction("approveScopeHold");
+  const startScopeHoldFollowUp = usePluginAction("startScopeHoldFollowUp");
 
   const [logOpen, setLogOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [onboardingBusy, setOnboardingBusy] = useState(false);
   const [refinementBusy, setRefinementBusy] = useState(false);
+  const [scopeHoldBusyId, setScopeHoldBusyId] = useState<string | null>(null);
+  const [kickoffDetailOpen, setKickoffDetailOpen] = useState(false);
 
   const tasks = useMemo(() => data?.tasks ?? [], [data]);
   const inReview = useMemo(() => tasks.filter((t) => t.column === "in_review"), [tasks]);
@@ -266,6 +275,51 @@ export function ScrumBoardPage({ context }: PluginWidgetProps) {
     }
   }, [data?.projectOnboarding.refinementRequestedTaskIds, requestProjectRefinement, refresh, retryProjectRefinement, tasks]);
 
+  const handleResolveProductDecision = useCallback(async (taskId: string): Promise<boolean> => {
+    try {
+      const result = (await resolveProductDecision({ taskId })) as { resolved?: boolean; error?: string };
+      if (!result?.resolved) {
+        setNotice(result?.error ?? "Product decision could not be approved");
+        return false;
+      }
+      setNotice(null);
+      refresh();
+      log.refresh();
+      return true;
+    } catch (actionError) {
+      setNotice(actionError instanceof Error ? actionError.message : "Product decision could not be approved");
+      return false;
+    }
+  }, [log, refresh, resolveProductDecision]);
+
+  const handleApproveScopeHold = useCallback(async (issueId: string) => {
+    setScopeHoldBusyId(issueId);
+    try {
+      const result = (await approveScopeHold({ issueId })) as { approved?: boolean; error?: string };
+      if (!result?.approved) setNotice(result?.error ?? "Project scope could not be approved");
+      else setNotice(null);
+      refreshOnboarding();
+    } catch (actionError) {
+      setNotice(actionError instanceof Error ? actionError.message : "Project scope could not be approved");
+    } finally {
+      setScopeHoldBusyId(null);
+    }
+  }, [approveScopeHold, refreshOnboarding]);
+
+  const handleStartScopeHoldFollowUp = useCallback(async (issueId: string) => {
+    setScopeHoldBusyId(issueId);
+    try {
+      const result = (await startScopeHoldFollowUp({ issueId })) as { started?: boolean; error?: string };
+      if (!result?.started) setNotice(result?.error ?? "Follow-up project request could not start");
+      else setNotice(null);
+      refreshOnboarding();
+    } catch (actionError) {
+      setNotice(actionError instanceof Error ? actionError.message : "Follow-up project request could not start");
+    } finally {
+      setScopeHoldBusyId(null);
+    }
+  }, [refreshOnboarding, startScopeHoldFollowUp]);
+
   const handleReview = useCallback(async () => {
     for (const task of inReview) {
       await reviewTicket({ taskId: task.id });
@@ -276,7 +330,8 @@ export function ScrumBoardPage({ context }: PluginWidgetProps) {
 
   const fetchComments = useCallback(
     async (taskId: string) => {
-      const task = tasks.find((t) => t.id === taskId);
+      const task = tasks.find((t) => t.id === taskId) ??
+        (data?.kickoffTask?.id === taskId ? data.kickoffTask : undefined);
       return (task?.comments ?? []).map((c) => ({
         id: c.id,
         authorId: c.authorId ?? "",
@@ -286,12 +341,13 @@ export function ScrumBoardPage({ context }: PluginWidgetProps) {
         createdAt: c.createdAt,
       }));
     },
-    [tasks],
+    [data?.kickoffTask, tasks],
   );
 
   const fetchDecisions = useCallback(
     async (taskId: string) => {
-      const task = tasks.find((t) => t.id === taskId);
+      const task = tasks.find((t) => t.id === taskId) ??
+        (data?.kickoffTask?.id === taskId ? data.kickoffTask : undefined);
       if (!task) return [];
 
       const structured = task.decisions.map((decision) => ({
@@ -319,7 +375,13 @@ export function ScrumBoardPage({ context }: PluginWidgetProps) {
         right.timestamp.localeCompare(left.timestamp)
       );
     },
-    [tasks],
+    [data?.kickoffTask, tasks],
+  );
+
+  const fetchCommitChanges = useCallback(
+    async (taskId: string, sha: string): Promise<GitHubCommitChangesResult> =>
+      (await fetchTicketCommitChanges({ taskId, sha })) as GitHubCommitChangesResult,
+    [fetchTicketCommitChanges],
   );
 
   if (loading && !data) {
@@ -341,11 +403,6 @@ export function ScrumBoardPage({ context }: PluginWidgetProps) {
   const hasPriorRefinementRequest = data.projectOnboarding.refinementRequestedTaskIds.some((taskId) =>
     tasks.some((task) => task.id === taskId && !task.refined)
   );
-  const kickoffHref =
-    data.projectOnboarding.rootIssueId && context.companyPrefix
-      ? `/${context.companyPrefix}/issues/${data.projectOnboarding.rootIssueId}`
-      : null;
-
   return (
     <AgentScrumRoot>
       <div className="app">
@@ -374,14 +431,17 @@ export function ScrumBoardPage({ context }: PluginWidgetProps) {
         busy={onboardingBusy}
         hostControlled={hostControlled}
         canStart={data.canStartProjectOnboarding}
-        kickoffHref={kickoffHref}
+        onOpenKickoff={data.kickoffTask ? () => setKickoffDetailOpen(true) : undefined}
         progress={data.projectProgress}
         latestEventSummary={lastCeremony?.summary ?? null}
         canStartSprint={data.canStartProjectSprint}
+        scopeHoldBusyId={scopeHoldBusyId}
         onStart={handleStartProjectOnboarding}
         onStartBacklogDiscovery={handleStartBacklogDiscovery}
         onActivate={handleActivateProjectOnboarding}
         onStartSprint={handleStartProjectSprint}
+        onApproveScopeHold={handleApproveScopeHold}
+        onStartScopeHoldFollowUp={handleStartScopeHoldFollowUp}
       />
 
       <div className="ceremony-bar">
@@ -446,7 +506,20 @@ export function ScrumBoardPage({ context }: PluginWidgetProps) {
           enableDragDrop={!hostControlled}
           onFetchComments={fetchComments}
           onFetchDecisions={fetchDecisions}
+          onFetchCommitChanges={fetchCommitChanges}
+          onResolveProductDecision={handleResolveProductDecision}
           agents={data.agents}
+        />
+        <TicketDetailPanel
+          task={data.kickoffTask}
+          isOpen={kickoffDetailOpen}
+          onClose={() => setKickoffDetailOpen(false)}
+          onFetchComments={fetchComments}
+          onFetchDecisions={fetchDecisions}
+          onFetchCommitChanges={fetchCommitChanges}
+          allTasks={data.kickoffTask ? [...tasks, data.kickoffTask] : tasks}
+          agents={data.agents}
+          onResolveProductDecision={handleResolveProductDecision}
         />
       </main>
 

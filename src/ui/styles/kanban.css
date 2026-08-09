@@ -680,11 +680,14 @@
 .ticket-detail-panel {
   background-color: var(--color-bg);
   border-radius: var(--radius-lg);
-  width: 100%;
-  max-width: 600px;
+  width: min(960px, 100%);
+  max-width: 960px;
+  height: min(820px, 90vh);
   max-height: 90vh;
   display: flex;
   flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
   box-shadow: 0 25px 50px rgba(0, 0, 0, 0.3);
   animation: panelSlideIn 0.3s ease-out;
 }
@@ -703,9 +706,13 @@
 /* Panel Header */
 .ticket-detail-header {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
   padding: var(--spacing-md) var(--spacing-lg);
+  position: relative;
+  z-index: 1;
+  background-color: var(--color-bg);
   border-bottom: 1px solid var(--color-border);
 }
 
@@ -743,16 +750,24 @@
 
 /* Tabs */
 .ticket-detail-tabs {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  flex: 0 0 auto;
+  min-height: 44px;
   border-bottom: 1px solid var(--color-border);
   padding: 0 var(--spacing-md);
-  overflow-x: auto;
+  position: relative;
+  z-index: 1;
+  overflow: visible;
+  background-color: var(--color-bg);
 }
 
 .ticket-detail-tab {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: var(--spacing-xs);
+  min-width: 0;
   padding: var(--spacing-sm) var(--spacing-md);
   border: none;
   background: transparent;
@@ -763,7 +778,9 @@
   border-bottom: 2px solid transparent;
   margin-bottom: -1px;
   transition: var(--transition-fast);
-  white-space: nowrap;
+  white-space: normal;
+  text-align: center;
+  line-height: 1.25;
 }
 
 .ticket-detail-tab:hover {
@@ -787,7 +804,9 @@
 
 /* Tab Content */
 .ticket-detail-content {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   padding: var(--spacing-lg);
 }
@@ -880,6 +899,30 @@
   gap: var(--spacing-sm);
 }
 
+.ticket-detail-approval {
+  display: grid;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-md);
+  border: 1px solid var(--color-warning);
+  border-left-width: 3px;
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-secondary);
+}
+
+.ticket-detail-approval p {
+  margin-top: var(--spacing-xs);
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+.ticket-detail-approval .btn {
+  justify-self: start;
+}
+
+.ticket-detail-approval-error {
+  color: var(--color-error) !important;
+}
+
 .ticket-detail-section-title {
   margin: 0;
   font-size: 0.875rem;
@@ -929,6 +972,178 @@
   font-size: 0.8rem;
   color: var(--color-text);
   font-family: var(--font-mono);
+}
+
+.ticket-detail-workflow {
+  display: grid;
+}
+
+.ticket-detail-workflow-event {
+  display: grid;
+  grid-template-columns: minmax(78px, auto) minmax(0, 1fr);
+  gap: var(--spacing-sm);
+  padding: var(--spacing-md) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.ticket-detail-workflow-event:first-child {
+  padding-top: 0;
+}
+
+.ticket-detail-workflow-event:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.ticket-detail-workflow-kind {
+  align-self: start;
+  padding: 2px var(--spacing-xs);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.ticket-detail-workflow-kind.is-decision {
+  color: var(--color-success);
+}
+
+.ticket-detail-workflow-kind.is-status {
+  color: var(--color-primary);
+}
+
+.ticket-detail-workflow-content {
+  min-width: 0;
+}
+
+.ticket-detail-workflow-content strong,
+.ticket-detail-workflow-content p,
+.ticket-detail-workflow-content span {
+  display: block;
+}
+
+.ticket-detail-workflow-content strong {
+  font-size: 0.875rem;
+}
+
+.ticket-detail-workflow-content p {
+  margin-top: 2px;
+  color: var(--color-text-muted);
+  font-size: 0.8125rem;
+  white-space: pre-wrap;
+}
+
+.ticket-detail-workflow-content span {
+  margin-top: var(--spacing-xs);
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+}
+
+.ticket-detail-code-changes {
+  display: grid;
+  gap: var(--spacing-md);
+}
+
+.ticket-detail-commit {
+  padding: var(--spacing-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-secondary);
+}
+
+.ticket-detail-commit-header,
+.ticket-detail-commit-header > div,
+.ticket-detail-commit-file-meta {
+  display: flex;
+  align-items: center;
+}
+
+.ticket-detail-commit-header {
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+}
+
+.ticket-detail-commit-header > div,
+.ticket-detail-commit-file-meta {
+  min-width: 0;
+  gap: var(--spacing-sm);
+}
+
+.ticket-detail-commit-header strong,
+.ticket-detail-commit-file-meta code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ticket-detail-commit-header > span,
+.ticket-detail-commit-file-meta span {
+  flex: 0 0 auto;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+}
+
+.ticket-detail-commit-sha {
+  color: var(--color-primary);
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+}
+
+.ticket-detail-commit-pending,
+.ticket-detail-commit-error {
+  margin-top: var(--spacing-sm);
+  font-size: 0.8125rem;
+}
+
+.ticket-detail-commit-pending {
+  color: var(--color-text-muted);
+}
+
+.ticket-detail-commit-error,
+.ticket-detail-commit-deletions {
+  color: var(--color-error) !important;
+}
+
+.ticket-detail-commit-additions {
+  color: var(--color-success) !important;
+}
+
+.ticket-detail-commit-files {
+  display: grid;
+  gap: var(--spacing-sm);
+  margin-top: var(--spacing-md);
+  list-style: none;
+}
+
+.ticket-detail-commit-file {
+  padding-top: var(--spacing-sm);
+  border-top: 1px solid var(--color-border);
+}
+
+.ticket-detail-commit-patch {
+  margin-top: var(--spacing-sm);
+}
+
+.ticket-detail-commit-patch summary {
+  color: var(--color-primary);
+  cursor: pointer;
+  font-size: 0.8125rem;
+}
+
+.ticket-detail-commit-patch pre {
+  max-height: 18rem;
+  margin-top: var(--spacing-sm);
+  overflow: auto;
+  padding: var(--spacing-sm);
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.2);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.45;
+  white-space: pre;
 }
 
 /* Loading & Empty States */

@@ -13,11 +13,13 @@ import type {
   ScrumAgent,
   ScrumTask,
   TicketComment,
+  TicketCommit,
   TicketRisk,
 } from './types';
 
 export const REFINEMENT_MARKER = 'agent-scrum:refinement:v1';
 export const DECISION_MARKER = 'agent-scrum:decision:v1';
+export const COMMIT_MARKER = 'agent-scrum:commit:v1';
 
 type HostTimestamp = Date | string;
 
@@ -49,6 +51,7 @@ export interface ProjectRefinementProjection {
 
 export interface ProjectIssueProjection {
   comments: TicketComment[];
+  commits: TicketCommit[];
   decisions: AgentDecision[];
   refinement: ProjectRefinementProjection;
 }
@@ -81,6 +84,12 @@ interface DecisionPayload {
   reasoning?: unknown;
 }
 
+interface CommitPayload {
+  sha?: unknown;
+  url?: unknown;
+  message?: unknown;
+}
+
 interface ValidDecisionPayload {
   type: DecisionType;
   description: string;
@@ -111,10 +120,11 @@ export function projectIssueProjection({
     .filter((comment) => !comment.deletedAt)
     .sort((left, right) => toIso(left.createdAt).localeCompare(toIso(right.createdAt)));
   const projectedComments = activeComments.map((comment) => toTicketComment(issueId, comment, agents));
+  const commits = uniqueCommits(activeComments.flatMap((comment) => toCommitEvidence(comment, agents)));
   const decisions = activeComments.flatMap((comment) => toDecision(issueId, comment, agents));
   const refinement = toRefinement(issueId, description ?? '', activeComments, agents);
 
-  return { comments: projectedComments, decisions, refinement };
+  return { comments: projectedComments, commits, decisions, refinement };
 }
 
 /**
@@ -204,6 +214,45 @@ function toDecision(
       relatedTaskIds: [],
     },
   ];
+}
+
+function toCommitEvidence(
+  comment: ProjectIssueCommentSnapshot,
+  agents: Array<Pick<ScrumAgent, 'id' | 'name' | 'role'>>
+): TicketCommit[] {
+  if (!isDeveloper(comment, agents) || !comment.authorAgentId) return [];
+
+  return markerPayloads<CommitPayload>(comment.body, COMMIT_MARKER).flatMap((payload, index) => {
+    const sha = parseCommitSha(payload.sha);
+    if (!sha) return [];
+    return [{
+      id: `host-commit:${comment.id}:${index}`,
+      sha,
+      url: parseGitHubCommitUrl(payload.url),
+      message: parseText(payload.message),
+      recordedBy: comment.authorAgentId,
+      recordedAt: toIso(comment.createdAt),
+    }];
+  });
+}
+
+function isDeveloper(
+  comment: ProjectIssueCommentSnapshot,
+  agents: Array<Pick<ScrumAgent, 'id' | 'name' | 'role'>>
+): boolean {
+  return Boolean(
+    comment.authorAgentId &&
+      agents.some((agent) => agent.id === comment.authorAgentId && agent.role === 'developer')
+  );
+}
+
+function uniqueCommits(commits: TicketCommit[]): TicketCommit[] {
+  const knownShas = new Set<string>();
+  return commits.filter((commit) => {
+    if (knownShas.has(commit.sha)) return false;
+    knownShas.add(commit.sha);
+    return true;
+  });
 }
 
 function toRefinement(
@@ -478,6 +527,43 @@ function lastMarkerPayload<T>(body: string, marker: string): T | null {
     }
   }
   return result;
+}
+
+function markerPayloads<T>(body: string, marker: string): T[] {
+  const expression = new RegExp(`<!--\\s*${escapeRegExp(marker)}\\s+([\\s\\S]*?)\\s*-->`, 'g');
+  const payloads: T[] = [];
+  for (const match of body.matchAll(expression)) {
+    try {
+      const parsed = JSON.parse(match[1]) as unknown;
+      if (typeof parsed === 'object' && parsed !== null) payloads.push(parsed as T);
+    } catch {
+      // A malformed marker is non-authoritative and must never alter board data.
+    }
+  }
+  return payloads;
+}
+
+function parseCommitSha(value: unknown): string | null {
+  const sha = parseText(value);
+  return sha && /^[0-9a-f]{7,64}$/i.test(sha) ? sha.toLowerCase() : null;
+}
+
+function parseGitHubCommitUrl(value: unknown): string | null {
+  const url = parseText(value);
+  if (!url) return null;
+
+  try {
+    const parsed = new URL(url);
+    return (
+      parsed.protocol === 'https:' &&
+      parsed.hostname.toLowerCase() === 'github.com' &&
+      /^\/[^/]+\/[^/]+\/commit\/[0-9a-f]{7,64}$/i.test(parsed.pathname)
+    )
+      ? url
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function escapeRegExp(value: string): string {

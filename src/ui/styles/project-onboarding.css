@@ -104,8 +104,20 @@
   text-decoration: none;
 }
 
-a.project-onboarding-kickoff:hover {
+.project-onboarding-kickoff:hover {
   background: var(--color-surface-hover);
+}
+
+button.project-onboarding-kickoff {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+button.project-onboarding-kickoff:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
 }
 
 .project-onboarding-kickoff-kind {
@@ -128,9 +140,28 @@ a.project-onboarding-kickoff:hover {
 }
 
 .project-onboarding-stage {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
   min-width: 0;
   color: var(--color-text-muted);
   font-size: 0.875rem;
+}
+
+.project-onboarding-spinner {
+  width: 0.875rem;
+  height: 0.875rem;
+  flex: 0 0 auto;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: project-onboarding-spin 0.8s linear infinite;
+}
+
+@keyframes project-onboarding-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .project-onboarding-stage.is-analysis_in_progress {
@@ -148,9 +179,41 @@ a.project-onboarding-kickoff:hover {
 }
 
 .project-onboarding-lock {
+  display: grid;
+  gap: var(--spacing-xs);
   max-width: 60ch;
   color: var(--color-text-muted);
   font-size: 0.8125rem;
+}
+
+.project-onboarding-scope-holds {
+  display: grid;
+  gap: var(--spacing-xs);
+  margin-top: var(--spacing-xs);
+}
+
+.project-onboarding-scope-hold {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+  min-width: 0;
+  padding: var(--spacing-sm);
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-warning);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-secondary);
+}
+
+.project-onboarding-scope-hold > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-onboarding-scope-hold .btn {
+  flex: 0 0 auto;
 }
 
 .project-onboarding-progress-summary {
@@ -179,6 +242,12 @@ a.project-onboarding-kickoff:hover {
   opacity: 0.55;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .project-onboarding-spinner {
+    animation: none;
+  }
+}
+
 @media (max-width: 720px) {
   .project-onboarding,
   .project-onboarding-form {
@@ -195,6 +264,15 @@ a.project-onboarding-kickoff:hover {
   }
 
   .project-onboarding-actions .btn {
+    width: 100%;
+  }
+
+  .project-onboarding-scope-hold {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .project-onboarding-scope-hold .btn {
     width: 100%;
   }
 }

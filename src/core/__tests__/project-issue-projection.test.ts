@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { createScrumTask } from '../factories';
 import {
+  COMMIT_MARKER,
   DECISION_MARKER,
   projectIssueProjection,
   projectProgress,
@@ -134,6 +135,46 @@ describe('project issue projection', () => {
         description: 'Prioritized keyboard navigation',
         reasoning: 'Accessibility is required for the first release.',
         madeByName: 'Product Owner',
+      }),
+    ]);
+  });
+
+  it('projects GitHub commit evidence only from a developer comment', () => {
+    const projection = projectIssueProjection({
+      issueId: 'issue-slider',
+      description: '',
+      comments: [
+        {
+          id: 'comment-developer-commit',
+          authorAgentId: 'id-dev',
+          authorUserId: null,
+          authorType: 'agent',
+          createdAt: '2026-08-09T10:00:00.000Z',
+          body:
+            `## Ready for Review\n<!-- ${COMMIT_MARKER} ` +
+            '{"sha":"a1b2c3d4e5f6","url":"https://github.com/acme/customer-portal/commit/a1b2c3d4e5f6","message":"feat: add accessible slider"} -->',
+        },
+        {
+          id: 'comment-untrusted-commit',
+          authorAgentId: 'id-po',
+          authorUserId: null,
+          authorType: 'agent',
+          createdAt: '2026-08-09T10:01:00.000Z',
+          body: `<!-- ${COMMIT_MARKER} {"sha":"deadbeef1234"} -->`,
+        },
+      ],
+      agents: [
+        ...agents,
+        { id: 'id-dev', name: 'Developer 1', role: 'developer' },
+      ],
+    });
+
+    expect(projection.commits).toEqual([
+      expect.objectContaining({
+        sha: 'a1b2c3d4e5f6',
+        url: 'https://github.com/acme/customer-portal/commit/a1b2c3d4e5f6',
+        message: 'feat: add accessible slider',
+        recordedBy: 'id-dev',
       }),
     ]);
   });

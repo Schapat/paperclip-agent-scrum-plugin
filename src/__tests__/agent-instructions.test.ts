@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   EVENT_ROUTING_MARKER,
+  GITHUB_COMMIT_EVIDENCE_MARKER,
   HEARTBEAT_QUEUE_MARKER,
   MANAGED_AGENT_INSTRUCTIONS,
   heartbeatAwareInstructions,
@@ -19,6 +20,7 @@ describe('managed agent instruction upgrades', () => {
 
     expect(upgraded).toContain('# Custom developer guidance');
     expect(upgraded).toContain(EVENT_ROUTING_MARKER);
+    expect(upgraded).toContain(GITHUB_COMMIT_EVIDENCE_MARKER);
     expect(heartbeatAwareInstructions('developer-1', upgraded)).toBe(upgraded);
   });
 

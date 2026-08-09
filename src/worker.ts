@@ -31,9 +31,19 @@ import {
   startProjectOnboarding,
   transitionProjectOnboarding,
 } from "./core/project-onboarding";
-import { syncProjectOnboardingIssue } from "./core/project-issue-sync";
-import { projectProgress } from "./core/project-issue-projection";
-import { hasQaReviewApproval, reviewOwnerForProjectIssue } from "./core/review-routing";
+import { projectIssueDetailTask, syncProjectOnboardingIssue } from "./core/project-issue-sync";
+import { projectIssueProjection, projectProgress } from "./core/project-issue-projection";
+import {
+  fetchGitHubCommitChanges,
+  parseGitHubRepositoryUrl,
+  validateGitHubRepository,
+} from "./core/github-repository";
+import {
+  PRODUCT_DECISION_REQUIRED_MARKER,
+  PRODUCT_DECISION_RESOLVED_MARKER,
+  hasQaReviewApproval,
+  reviewOwnerForProjectIssue,
+} from "./core/review-routing";
 import { migrateState } from "./core/storage";
 import { recalculateMetrics, createInitialMetrics, onStatusChange } from "./core/hooks";
 import { collectDecisions } from "./core/communication";
@@ -546,11 +556,47 @@ const plugin = definePlugin({
         return issue;
       }
 
-      const qa = state.agents.find((agent) => agent.role === "qa_engineer");
-      if (!qa) return issue;
-
       try {
         const comments = await ctx.issues.listComments(issue.id, companyId);
+        const commits = projectIssueProjection({
+          issueId: issue.id,
+          description: issue.description ?? "",
+          comments,
+          agents: state.agents,
+        }).commits;
+        if (commits.length === 0) {
+          const developer = developerForProjectRework(issue.id);
+          const status = developer ? "in_progress" : "blocked";
+          const returned = await ctx.issues.update(
+            issue.id,
+            { status, assigneeAgentId: developer?.id ?? null },
+            companyId
+          );
+          try {
+            await ctx.issues.createComment(
+              returned.id,
+              `## GitHub commit evidence required\n\nAgent Scrum returned this completion to Development. Add a developer comment with <!-- agent-scrum:commit:v1 {"sha":"...","url":"https://github.com/owner/repo/commit/...","message":"..."} --> before QA can complete the ticket.`,
+              companyId
+            );
+          } catch (error) {
+            ctx.logger.warn("Could not record the commit evidence gate", {
+              issueId: returned.id,
+              error: String(error),
+            });
+          }
+          const wakeup = developer
+            ? await requestIssueWakeup(returned.id, "project_commit_evidence")
+            : { queued: false };
+          ctx.logger.warn("Project completion blocked by missing GitHub commit evidence", {
+            issueId: returned.id,
+            developerId: developer?.id ?? null,
+            queued: wakeup.queued,
+          });
+          return returned;
+        }
+
+        const qa = state.agents.find((agent) => agent.role === "qa_engineer");
+        if (!qa) return issue;
         if (
           actorId === qa.id ||
           issue.assigneeAgentId === qa.id ||
@@ -805,10 +851,33 @@ const plugin = definePlugin({
       return true;
     }
 
+    type ProjectRefinementResult = {
+      requested: boolean;
+      error: string | null;
+      taskIds: string[];
+    };
+
+    let projectRefinementPromise: Promise<ProjectRefinementResult> | null = null;
+
     async function requestProjectRefinement(
       source: "automatic" | "manual" = "manual",
       force = false
-    ) {
+    ): Promise<ProjectRefinementResult> {
+      if (projectRefinementPromise) return projectRefinementPromise;
+
+      const refinement = requestProjectRefinementInternal(source, force);
+      projectRefinementPromise = refinement;
+      try {
+        return await refinement;
+      } finally {
+        projectRefinementPromise = null;
+      }
+    }
+
+    async function requestProjectRefinementInternal(
+      source: "automatic" | "manual" = "manual",
+      force = false
+    ): Promise<ProjectRefinementResult> {
       if (!companyId) return { requested: false, error: "No company context.", taskIds: [] as string[] };
 
       const requestStateChanged = reconcileProjectRefinementRequests();
@@ -1001,6 +1070,24 @@ const plugin = definePlugin({
           error: String(error),
         });
         return { ...issue, comments: [] };
+      }
+    }
+
+    /** Projects the kickoff for board-side analysis and workflow inspection. */
+    async function projectKickoffTask(): Promise<ScrumTask | null> {
+      const rootIssueId = state.projectOnboarding?.rootIssueId;
+      if (!companyId || !rootIssueId) return null;
+
+      try {
+        const issue = await ctx.issues.get(rootIssueId, companyId);
+        if (!issue) return null;
+        return projectIssueDetailTask(await withHostComments(issue), state.agents);
+      } catch (error) {
+        ctx.logger.warn("Could not project kickoff issue for board details", {
+          issueId: rootIssueId,
+          error: String(error),
+        });
+        return null;
       }
     }
 
@@ -1367,6 +1454,11 @@ const plugin = definePlugin({
       }
     }
 
+    function isGitHubRemote(repoUrl: unknown): repoUrl is string {
+      if (typeof repoUrl !== "string") return false;
+      return /^(?:https?:\/\/github\.com(?:\/|$)|git@github\.com:)/i.test(repoUrl.trim());
+    }
+
     // -------------------------------------------------------------------------
     // Ceremonies
     // -------------------------------------------------------------------------
@@ -1581,6 +1673,7 @@ const plugin = definePlugin({
       await refreshTechnicalAnalysisStatus();
       await syncOnboardingProjectIssues();
       const rootIssueId = state.projectOnboarding?.rootIssueId;
+      const kickoffTask = await projectKickoffTask();
       const projectTasks = rootIssueId
         ? state.tasks.filter((task) => task.parentId === rootIssueId)
         : [];
@@ -1592,6 +1685,7 @@ const plugin = definePlugin({
         ceremonies: state.ceremonies,
         settings: state.settings,
         projectOnboarding: state.projectOnboarding ?? createInitialProjectOnboarding(),
+        kickoffTask,
         canStartProjectOnboarding: canStartProjectOnboarding(),
         canStartProjectSprint: canStartProjectSprint(),
         projectProgress: projectProgress(projectTasks),
@@ -1674,6 +1768,21 @@ const plugin = definePlugin({
         };
       }
 
+      if (isGitHubRemote(workspace.repoUrl)) {
+        const config = await readConfig();
+        const token = String(config.githubToken ?? "").trim();
+        const validation = await validateGitHubRepository(workspace.repoUrl, { token });
+        if (!validation.valid) {
+          return { started: false, error: validation.error };
+        }
+        ctx.logger.info("GitHub repository validated for project onboarding", {
+          projectId: project.id,
+          repository: validation.repository.webUrl,
+          pipeline: validation.pipeline.name,
+          pipelineUrl: validation.pipeline.url,
+        });
+      }
+
       const technicalLead = state.agents.find((agent) => agent.role === "technical_lead");
       if (!technicalLead) {
         return {
@@ -1721,6 +1830,30 @@ const plugin = definePlugin({
         projectOnboarding: state.projectOnboarding,
         wakeup,
       };
+    });
+
+    ctx.actions.register("fetchTicketCommitChanges", async (params, context) => {
+      await ensureReady(context.companyId);
+      if (!companyId) return { valid: false, error: "No company context." };
+
+      await syncOnboardingProjectIssues();
+      const taskId = typeof params.taskId === "string" ? params.taskId : "";
+      const sha = typeof params.sha === "string" ? params.sha.trim().toLowerCase() : "";
+      const task = state.tasks.find((entry) => entry.id === taskId);
+      if (!task) return { valid: false, error: "Unknown project ticket." };
+      const commit = task.commits.find((entry) => entry.sha === sha);
+      if (!commit) return { valid: false, error: "The commit is not recorded for this ticket." };
+
+      const projectId = state.projectOnboarding?.projectId;
+      if (!projectId) return { valid: false, error: "The ticket is not linked to a project workspace." };
+      const workspace = await ctx.projects.getPrimaryWorkspace(projectId, companyId);
+      if (!workspace) return { valid: false, error: "The project has no primary workspace." };
+      const repository = parseGitHubRepositoryUrl(workspace.repoUrl);
+      if (!repository) return { valid: false, error: "The project workspace is not linked to a supported GitHub repository." };
+
+      const config = await readConfig();
+      const token = String(config.githubToken ?? "").trim();
+      return fetchGitHubCommitChanges(repository, commit.sha, { token });
     });
 
     ctx.actions.register("startBacklogDiscovery", async (_params, context) => {
@@ -1860,6 +1993,256 @@ const plugin = definePlugin({
         sprint: state.currentSprint,
         projectOnboarding: state.projectOnboarding,
       };
+    });
+
+    ctx.actions.register("resolveProductDecision", async (params, context) => {
+      await ensureReady(context.companyId);
+      if (!companyId) return { resolved: false, error: "No company context." };
+
+      const taskId = typeof params.taskId === "string" ? params.taskId : "";
+      const onboarding = state.projectOnboarding;
+      if (!taskId || !onboarding?.rootIssueId) {
+        return { resolved: false, error: "Choose a project ticket with a pending product decision." };
+      }
+
+      try {
+        const issue = await ctx.issues.get(taskId, companyId);
+        if (!issue || !isProjectOnboardingChildIssue(issue)) {
+          return { resolved: false, error: "This ticket is not part of the active project request." };
+        }
+
+        const comments = await ctx.issues.listComments(taskId, companyId);
+        const decisionTexts = [issue.description ?? "", ...comments.map((comment) => comment.body)];
+        const decisionRequired = decisionTexts.some((text) => text.includes(PRODUCT_DECISION_REQUIRED_MARKER));
+        const decisionResolved = decisionTexts.some((text) => text.includes(PRODUCT_DECISION_RESOLVED_MARKER));
+        if (!decisionRequired || decisionResolved) {
+          return { resolved: false, error: "This ticket has no pending product decision." };
+        }
+
+        await ctx.issues.createComment(
+          taskId,
+          `## Human product decision approved\n\nA human approved the pending product decision from the Scrum Board.\n\n${PRODUCT_DECISION_RESOLVED_MARKER}`,
+          companyId
+        );
+        await syncOnboardingIssue({ companyId, entityId: taskId });
+        ctx.logger.info("Human product decision resolved", { issueId: taskId });
+        return { resolved: true, error: null };
+      } catch (error) {
+        ctx.logger.warn("Could not resolve product decision from Scrum Board", {
+          issueId: taskId,
+          error: String(error),
+        });
+        return { resolved: false, error: String(error) };
+      }
+    });
+
+    ctx.actions.register("approveScopeHold", async (params, context) => {
+      await ensureReady(context.companyId);
+      if (!companyId) return { approved: false, error: "No company context." };
+
+      const issueId = typeof params.issueId === "string" ? params.issueId : "";
+      const onboarding = state.projectOnboarding;
+      const hold = onboarding?.scopeHolds.find((candidate) => candidate.issueId === issueId);
+      if (!issueId || !onboarding?.rootIssueId || !onboarding.projectId || !hold) {
+        return { approved: false, error: "This ticket has no pending human scope approval." };
+      }
+      if (onboarding.status === "completed") {
+        return {
+          approved: false,
+          error: "Project delivery is complete. Start a new project request before approving additional scope.",
+        };
+      }
+      if (
+        onboarding.status !== "backlog_in_progress" &&
+        onboarding.status !== "sprint_planning" &&
+        onboarding.status !== "active"
+      ) {
+        return {
+          approved: false,
+          error: "Wait for Technical Lead analysis and backlog discovery before approving additional scope.",
+        };
+      }
+
+      try {
+        const issue = await ctx.issues.get(issueId, companyId);
+        if (!issue || issue.projectId !== onboarding.projectId) {
+          return {
+            approved: false,
+            error: "Only tickets from the active Paperclip project can join this project request.",
+          };
+        }
+
+        const approvedIssue = await ctx.issues.create({
+          companyId,
+          projectId: onboarding.projectId,
+          parentId: onboarding.rootIssueId,
+          title: issue.title,
+          description: [
+            issue.description?.trim(),
+            `## Approved scope\n\nHuman-approved from held ticket ${issue.id}.`,
+          ].filter(Boolean).join("\n\n"),
+          status: "backlog",
+        });
+        await ctx.issues.createComment(
+          approvedIssue.id,
+          `## Human scope approved\n\nThis project ticket was created from held ticket ${issue.id} after human scope approval.`,
+          companyId
+        );
+        await ctx.issues.update(
+          issueId,
+          { status: "cancelled", assigneeAgentId: null },
+          companyId
+        );
+        await ctx.issues.createComment(
+          issueId,
+          `## Human scope approved\n\nA human approved this ticket as part of the active project request. Delivery now continues in project ticket ${approvedIssue.id}.`,
+          companyId
+        );
+        state.projectOnboarding = {
+          ...onboarding,
+          scopeHolds: onboarding.scopeHolds.filter((candidate) => candidate.issueId !== issueId),
+          updatedAt: new Date().toISOString(),
+        };
+        await syncOnboardingProjectIssues();
+        await save();
+        await requestProjectRefinement("automatic");
+        ctx.logger.info("Human scope approval granted", {
+          issueId,
+          approvedIssueId: approvedIssue.id,
+          rootIssueId: onboarding.rootIssueId,
+        });
+        return { approved: true, error: null, taskId: approvedIssue.id };
+      } catch (error) {
+        ctx.logger.warn("Could not approve project scope from Scrum Board", {
+          issueId,
+          error: String(error),
+        });
+        return { approved: false, error: String(error) };
+      }
+    });
+
+    ctx.actions.register("startScopeHoldFollowUp", async (params, context) => {
+      await ensureReady(context.companyId);
+      if (!companyId) return { started: false, error: "No company context." };
+
+      const issueId = typeof params.issueId === "string" ? params.issueId : "";
+      const onboarding = state.projectOnboarding;
+      const hold = onboarding?.scopeHolds.find((candidate) => candidate.issueId === issueId);
+      if (
+        !issueId ||
+        !onboarding?.projectId ||
+        !onboarding.rootIssueId ||
+        onboarding.status !== "completed" ||
+        !hold ||
+        !canStartProjectOnboarding()
+      ) {
+        return {
+          started: false,
+          error: "Finish the current project request before starting scope as a follow-up.",
+        };
+      }
+
+      try {
+        const project = await ctx.projects.get(onboarding.projectId, companyId);
+        if (!project) return { started: false, error: "The Paperclip project is no longer available." };
+
+        const workspace = await ctx.projects.getPrimaryWorkspace(project.id, companyId);
+        if (!workspace) {
+          return {
+            started: false,
+            error: "The follow-up project needs a primary workspace before technical analysis can start.",
+          };
+        }
+
+        const technicalLead = state.agents.find((agent) => agent.role === "technical_lead");
+        if (!technicalLead) return { started: false, error: "Activate the Scrum team before starting follow-up work." };
+
+        const heldIssue = await ctx.issues.get(issueId, companyId);
+        if (!heldIssue || heldIssue.projectId !== project.id) {
+          return {
+            started: false,
+            error: "Only held tickets from this Paperclip project can start a follow-up request.",
+          };
+        }
+
+        const requiresSprint = await projectSprintRequired();
+        const brief = [
+          `Human-approved follow-up scope: ${heldIssue.title}`,
+          heldIssue.description?.trim(),
+        ].filter(Boolean).join("\n\n");
+        const constraints = `Follow-up created from held ticket ${heldIssue.id}.`;
+        const provisionalOnboarding = startProjectOnboarding({
+          input: { projectId: project.id, brief, constraints },
+          projectName: project.name,
+          rootIssueId: "pending",
+          requiresSprint,
+        });
+        const rootIssue = await ctx.issues.create({
+          companyId,
+          projectId: project.id,
+          title: `Kickoff: ${project.name} follow-up`,
+          description: createTechnicalAnalysisPrompt(provisionalOnboarding),
+          status: "todo",
+          priority: "high",
+          assigneeAgentId: technicalLead.id,
+        });
+        const followUpIssue = await ctx.issues.create({
+          companyId,
+          projectId: project.id,
+          parentId: rootIssue.id,
+          title: heldIssue.title,
+          description: [
+            heldIssue.description?.trim(),
+            `## Human-approved follow-up\n\nCreated from held ticket ${heldIssue.id}.`,
+          ].filter(Boolean).join("\n\n"),
+          status: "backlog",
+        });
+        await ctx.issues.createComment(
+          followUpIssue.id,
+          `## Human scope approved\n\nThis follow-up ticket was created from held ticket ${heldIssue.id}.`,
+          companyId
+        );
+        await ctx.issues.update(issueId, { status: "cancelled", assigneeAgentId: null }, companyId);
+        await ctx.issues.createComment(
+          issueId,
+          `## Human scope approved as follow-up\n\nDelivery continues in new kickoff ${rootIssue.id} and project ticket ${followUpIssue.id}.`,
+          companyId
+        );
+
+        const followUpOnboarding = startProjectOnboarding({
+          input: { projectId: project.id, brief, constraints },
+          projectName: project.name,
+          rootIssueId: rootIssue.id,
+          requiresSprint,
+        });
+        state.projectOnboarding = {
+          ...followUpOnboarding,
+          scopeHolds: onboarding.scopeHolds.filter((candidate) => candidate.issueId !== issueId),
+        };
+        await save();
+
+        const wakeup = await requestIssueWakeup(rootIssue.id, "project_onboarding_analysis");
+        ctx.logger.info("Human scope follow-up started", {
+          heldIssueId: issueId,
+          rootIssueId: rootIssue.id,
+          followUpIssueId: followUpIssue.id,
+          workspaceId: workspace.id,
+          queued: wakeup.queued,
+        });
+        return {
+          started: true,
+          rootIssueId: rootIssue.id,
+          followUpIssueId: followUpIssue.id,
+          projectOnboarding: state.projectOnboarding,
+          wakeup,
+        };
+      } catch (error) {
+        ctx.logger.warn("Could not start scope follow-up from Scrum Board", {
+          issueId,
+          error: String(error),
+        });
+        return { started: false, error: String(error) };
+      }
     });
 
     ctx.actions.register("moveTask", async (params, context) => {

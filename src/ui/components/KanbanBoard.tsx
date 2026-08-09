@@ -15,6 +15,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import type { ScrumAgent, ScrumTask, TaskStatus } from '../../core/types';
+import type { GitHubCommitChangesResult } from '../../core/github-repository';
 import { KanbanColumn } from './KanbanColumn';
 import { KanbanCard } from './KanbanCard';
 import { DragDropProvider, useDragDrop, DEFAULT_ALLOWED_TRANSITIONS } from './DragDropContext';
@@ -48,6 +49,10 @@ interface KanbanBoardProps {
   onFetchComments?: (taskId: string) => Promise<Comment[]>;
   /** Callback to fetch decisions for a task */
   onFetchDecisions?: (taskId: string) => Promise<Decision[]>;
+  /** Callback to fetch file-level changes for a recorded GitHub commit. */
+  onFetchCommitChanges?: (taskId: string, sha: string) => Promise<GitHubCommitChangesResult>;
+  /** Callback that records a human product decision from the ticket details. */
+  onResolveProductDecision?: (taskId: string) => Promise<boolean>;
   /** Managed team members used by cards and details to resolve assignee IDs. */
   agents?: Array<Pick<ScrumAgent, 'id' | 'name' | 'role'>>;
 }
@@ -101,6 +106,8 @@ function KanbanBoardInner({
   enableDragDrop = true,
   onFetchComments,
   onFetchDecisions,
+  onFetchCommitChanges,
+  onResolveProductDecision,
   agents = [],
 }: KanbanBoardProps) {
   // ---------------------------------------------------------------------------
@@ -467,9 +474,11 @@ function KanbanBoardInner({
         onClose={handleCloseDetails}
         onFetchComments={onFetchComments}
         onFetchDecisions={onFetchDecisions}
+        onFetchCommitChanges={onFetchCommitChanges}
         // Damit das Panel Subtasks und verlinkte Tickets mit Titel auflösen kann
         allTasks={state.tasks}
         agents={agents}
+        onResolveProductDecision={onResolveProductDecision}
       />
     </div>
   );

@@ -115,6 +115,15 @@ Implementiert zugewiesene Tickets, schreibt Tests und Dokumentation, erstellt Pu
 - [x] Lokal getestet
 ```
 
+### GitHub Commit-Nachweis
+Für jedes projektgebundene Ticket mit GitHub-Repository ergänzt der Ready-for-Review-Kommentar nach dem Push genau einen Nachweis mit vollständigem SHA, GitHub-Commit-URL und Commit-Message:
+
+```html
+<!-- agent-scrum:commit:v1 {"sha":"{full-sha}","url":"https://github.com/{owner}/{repo}/commit/{full-sha}","message":"{commit message}"} -->
+```
+
+Ohne diesen Nachweis darf QA das Ticket nicht auf Done lassen.
+
 ## Collaboration & Escalation
 
 ### Zusammenarbeit

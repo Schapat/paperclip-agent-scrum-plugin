@@ -1,5 +1,5 @@
 import { createTestHarness, type PluginWorkspace, type Project } from '@paperclipai/plugin-sdk';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import manifest from '../manifest';
 import plugin from '../worker';
@@ -9,15 +9,62 @@ import {
   PRODUCT_DECISION_RESOLVED_MARKER,
   QA_REVIEW_APPROVED_MARKER,
 } from '../core/review-routing';
-import { DECISION_MARKER, REFINEMENT_MARKER } from '../core/project-issue-projection';
+import { COMMIT_MARKER, DECISION_MARKER, REFINEMENT_MARKER } from '../core/project-issue-projection';
 import type { CeremonyRecord, ProjectOnboarding, ScrumAgent, ScrumTask } from '../core/types';
 
 const COMPANY_ID = 'company-bmw';
 const PROJECT_ID = 'project-bmw';
 
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+function successfulGitHubFetch() {
+  return vi.fn(async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.endsWith('/repos/example/bmw-website')) return jsonResponse({});
+    if (url.endsWith('/repos/example/bmw-website/actions/workflows?per_page=1')) {
+      return jsonResponse({ total_count: 1 });
+    }
+    if (url.endsWith('/repos/example/bmw-website/actions/runs?per_page=1')) {
+      return jsonResponse({
+        workflow_runs: [{
+          name: 'CI',
+          status: 'completed',
+          conclusion: 'success',
+          html_url: 'https://github.com/example/bmw-website/actions/runs/1',
+          updated_at: '2026-08-09T12:00:00.000Z',
+        }],
+      });
+    }
+    if (url.endsWith('/repos/example/bmw-website/commits/a1b2c3d4e5f6')) {
+      return jsonResponse({
+        sha: 'a1b2c3d4e5f6',
+        html_url: 'https://github.com/example/bmw-website/commit/a1b2c3d4e5f6',
+        commit: {
+          message: 'feat: deliver ticket',
+          author: { date: '2026-08-09T12:05:00.000Z' },
+        },
+        files: [{
+          filename: 'src/slider.ts',
+          status: 'modified',
+          additions: 4,
+          deletions: 1,
+          patch: '@@ -1 +1 @@\n-old\n+new',
+        }],
+      });
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+}
+
 interface BoardData {
   agents: ScrumAgent[];
   tasks: ScrumTask[];
+  kickoffTask: ScrumTask | null;
   ceremonies: CeremonyRecord[];
   projectOnboarding: ProjectOnboarding;
   currentSprint: { id: string; status: string; taskIds: string[] } | null;
@@ -37,6 +84,21 @@ async function completeTechnicalAnalysis(
     { authorAgentId: technicalLead?.id }
   );
   await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+}
+
+async function recordDeveloperCommit(
+  harness: ReturnType<typeof createTestHarness>,
+  issueId: string,
+  developerId: string | undefined
+): Promise<void> {
+  if (!developerId) throw new Error('Developer is required for commit evidence.');
+
+  await harness.ctx.issues.createComment(
+    issueId,
+    `<!-- ${COMMIT_MARKER} {"sha":"a1b2c3d4e5f6","url":"https://github.com/example/bmw-website/commit/a1b2c3d4e5f6","message":"feat: deliver ticket"} -->`,
+    COMPANY_ID,
+    { authorAgentId: developerId }
+  );
 }
 
 function project(): Project {
@@ -97,9 +159,14 @@ describe('project onboarding worker actions', () => {
   let harness: ReturnType<typeof createTestHarness>;
 
   beforeEach(async () => {
+    vi.stubGlobal('fetch', successfulGitHubFetch());
     harness = createTestHarness({ manifest, config: { enableTeam: true, requireProjectSprint: false } });
     harness.seed({ projects: [project()], projectWorkspaces: [workspace()] });
     await plugin.definition.setup(harness.ctx);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it('creates a project-bound kickoff issue and queues the Technical Lead', async () => {
@@ -134,6 +201,88 @@ describe('project onboarding worker actions', () => {
       assigneeAgentId: technicalLead?.id,
     });
     expect(rootIssue?.description).toContain('Inspect the repository');
+  });
+
+  it('does not create a kickoff when the linked GitHub repository cannot be validated', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({}, 404)));
+
+    const result = await harness.performAction<{ started: boolean; error?: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+
+    expect(result).toEqual({
+      started: false,
+      error: 'The GitHub repository is not reachable. Configure a GitHub token for private repositories.',
+    });
+    expect(await harness.ctx.issues.list({ companyId: COMPANY_ID })).toEqual([]);
+  });
+
+  it('loads GitHub file changes for a developer-recorded project commit', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const developer = board.agents.find((agent) => agent.role === 'developer');
+    const child = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Deliver image slider',
+      status: 'backlog',
+    });
+    await recordDeveloperCommit(harness, child.id, developer?.id);
+
+    const result = await harness.performAction<{
+      valid: boolean;
+      sha?: string;
+      files?: Array<{ path: string; additions: number; deletions: number; patch: string | null }>;
+    }>(
+      'fetchTicketCommitChanges',
+      { taskId: child.id, sha: 'a1b2c3d4e5f6' },
+      { companyId: COMPANY_ID }
+    );
+
+    expect(result).toMatchObject({
+      valid: true,
+      sha: 'a1b2c3d4e5f6',
+      files: [{ path: 'src/slider.ts', additions: 4, deletions: 1, patch: '@@ -1 +1 @@\n-old\n+new' }],
+    });
+  });
+
+  it('projects kickoff analysis and comments into board data', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    const initialBoard = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const technicalLead = initialBoard.agents.find((agent) => agent.role === 'technical_lead');
+    await harness.ctx.issues.createComment(
+      kickoff.rootIssueId,
+      `## Technical analysis\n\nThe existing media primitives can be reused.\n\n${TECHNICAL_ANALYSIS_COMPLETION_MARKER}`,
+      COMPANY_ID,
+      { authorAgentId: technicalLead?.id }
+    );
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+
+    expect(board.kickoffTask).toMatchObject({
+      id: kickoff.rootIssueId,
+      title: 'Kickoff: BMW Website',
+      type: 'epic',
+    });
+    expect(board.kickoffTask?.comments).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ body: expect.stringContaining(TECHNICAL_ANALYSIS_COMPLETION_MARKER) }),
+      ])
+    );
   });
 
   it('reconciles the Scrum-Master watchdog and on-demand runtime policies onto managed agents', async () => {
@@ -502,6 +651,64 @@ describe('project onboarding worker actions', () => {
     expect(harness.logs.filter((entry) => entry.message === 'Project refinement requested')).toHaveLength(1);
   });
 
+  it('coalesces concurrent refinement requests for the same project tickets', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+    await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+    const child = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Implement image slider controls',
+      status: 'backlog',
+    });
+    await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+
+    let notifyFirstInvocation = () => {};
+    let releaseFirstInvocation = () => {};
+    const firstInvocationStarted = new Promise<void>((resolve) => {
+      notifyFirstInvocation = resolve;
+    });
+    const allowFirstInvocation = new Promise<void>((resolve) => {
+      releaseFirstInvocation = resolve;
+    });
+    const originalInvoke = harness.ctx.agents.invoke.bind(harness.ctx.agents);
+    let invocationCount = 0;
+    const invokeSpy = vi.spyOn(harness.ctx.agents, 'invoke').mockImplementation(async (...invocationArguments) => {
+      invocationCount += 1;
+      if (invocationCount === 1) {
+        notifyFirstInvocation();
+        await allowFirstInvocation;
+      }
+      return originalInvoke(...invocationArguments);
+    });
+
+    const firstRequest = harness.performAction('requestProjectRefinement', {}, { companyId: COMPANY_ID });
+    await firstInvocationStarted;
+    const secondRequest = harness.performAction('requestProjectRefinement', {}, { companyId: COMPANY_ID });
+    releaseFirstInvocation();
+
+    await expect(Promise.all([firstRequest, secondRequest])).resolves.toEqual([
+      { requested: true, error: null, taskIds: [child.id] },
+      { requested: true, error: null, taskIds: [child.id] },
+    ]);
+    expect(invokeSpy).toHaveBeenCalledTimes(1);
+    expect(
+      harness.logs.filter(
+        (entry) =>
+          entry.message === 'Project refinement requested' &&
+          Array.isArray(entry.meta?.taskIds) &&
+          entry.meta.taskIds.includes(child.id)
+      )
+    ).toHaveLength(1);
+  });
+
   it('requests refinement for an already active project ticket missing an estimate', async () => {
     const kickoff = await harness.performAction<{ rootIssueId: string }>(
       'startProjectOnboarding',
@@ -707,6 +914,51 @@ describe('project onboarding worker actions', () => {
     });
   });
 
+  it('resolves a product decision from the Scrum Board and returns it to QA', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const developer = board.agents.find((agent) => agent.role === 'developer');
+    const qa = board.agents.find((agent) => agent.role === 'qa_engineer');
+    const productDecision = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Choose image slider auto-play behaviour',
+      description: `Decision required\n${PRODUCT_DECISION_REQUIRED_MARKER}`,
+      status: 'in_review',
+      assigneeAgentId: developer?.id,
+    });
+    await harness.emit(
+      'issue.updated',
+      { issueId: productDecision.id },
+      { companyId: COMPANY_ID, entityId: productDecision.id, entityType: 'issue' }
+    );
+
+    const resolution = await harness.performAction<{ resolved: boolean; error?: string }>(
+      'resolveProductDecision',
+      { taskId: productDecision.id },
+      { companyId: COMPANY_ID }
+    );
+
+    expect(resolution).toMatchObject({ resolved: true });
+    expect(await harness.ctx.issues.listComments(productDecision.id, COMPANY_ID)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ body: expect.stringContaining(PRODUCT_DECISION_RESOLVED_MARKER) }),
+      ])
+    );
+    expect(await harness.ctx.issues.get(productDecision.id, COMPANY_ID)).toMatchObject({
+      status: 'in_review',
+      assigneeAgentId: qa?.id,
+    });
+  });
+
   it('hands QA-returned project work to a developer for the repair', async () => {
     const kickoff = await harness.performAction<{ rootIssueId: string }>(
       'startProjectOnboarding',
@@ -776,6 +1028,7 @@ describe('project onboarding worker actions', () => {
       { issueId: child.id },
       { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
     );
+    await recordDeveloperCommit(harness, child.id, developer?.id);
     await harness.ctx.issues.update(child.id, { status: 'done' }, COMPANY_ID);
     await harness.emit(
       'issue.updated',
@@ -794,6 +1047,49 @@ describe('project onboarding worker actions', () => {
     });
   });
 
+  it('returns a QA-approved completion without a developer commit to Development', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const developer = board.agents.find((agent) => agent.role === 'developer');
+    const qa = board.agents.find((agent) => agent.role === 'qa_engineer');
+    const child = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Verify commit evidence',
+      status: 'done',
+      assigneeAgentId: qa?.id,
+    });
+    await harness.ctx.issues.createComment(
+      child.id,
+      `QA approved\n${QA_REVIEW_APPROVED_MARKER}`,
+      COMPANY_ID,
+      { authorAgentId: qa?.id }
+    );
+    await harness.emit(
+      'issue.created',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue', actorId: qa?.id }
+    );
+
+    expect(await harness.ctx.issues.get(child.id, COMPANY_ID)).toMatchObject({
+      status: 'in_progress',
+      assigneeAgentId: developer?.id,
+    });
+    expect(await harness.ctx.issues.listComments(child.id, COMPANY_ID)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ body: expect.stringContaining('GitHub commit evidence required') }),
+      ])
+    );
+  });
+
   it('completes a delivered project instead of asking for further refinement', async () => {
     const kickoff = await harness.performAction<{ rootIssueId: string }>(
       'startProjectOnboarding',
@@ -806,6 +1102,7 @@ describe('project onboarding worker actions', () => {
 
     const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
     const qa = board.agents.find((agent) => agent.role === 'qa_engineer');
+    const developer = board.agents.find((agent) => agent.role === 'developer');
     const child = await harness.ctx.issues.create({
       companyId: COMPANY_ID,
       projectId: PROJECT_ID,
@@ -814,6 +1111,7 @@ describe('project onboarding worker actions', () => {
       status: 'done',
       assigneeAgentId: qa?.id,
     });
+    await recordDeveloperCommit(harness, child.id, developer?.id);
     await harness.ctx.issues.createComment(
       child.id,
       `QA approved\n${QA_REVIEW_APPROVED_MARKER}`,
@@ -870,6 +1168,216 @@ describe('project onboarding worker actions', () => {
     );
   });
 
+  it('approves a scope-held issue from the Scrum Board into the active project', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+    await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const productOwner = board.agents.find((agent) => agent.role === 'product_owner');
+    const developer = board.agents.find((agent) => agent.role === 'developer');
+    const unscoped = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      title: 'Approved product addition',
+      status: 'todo',
+      assigneeAgentId: developer?.id,
+    });
+    await harness.emit(
+      'issue.created',
+      { issueId: unscoped.id },
+      { companyId: COMPANY_ID, entityId: unscoped.id, entityType: 'issue', actorId: productOwner?.id }
+    );
+
+    const approval = await harness.performAction<{ approved: boolean; error?: string; taskId?: string }>(
+      'approveScopeHold',
+      { issueId: unscoped.id },
+      { companyId: COMPANY_ID }
+    );
+    const approvedIssue = await harness.ctx.issues.get(unscoped.id, COMPANY_ID);
+    const refreshedBoard = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+
+    expect(approval).toMatchObject({ approved: true });
+    expect(approvedIssue).toMatchObject({
+      status: 'cancelled',
+      assigneeAgentId: null,
+    });
+    expect(await harness.ctx.issues.listComments(unscoped.id, COMPANY_ID)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ body: expect.stringContaining('Human scope approved') }),
+      ])
+    );
+    expect(refreshedBoard.projectOnboarding.scopeHolds).not.toContainEqual(
+      expect.objectContaining({ issueId: unscoped.id })
+    );
+    const approvedTask = refreshedBoard.tasks.find((task) => task.id === approval.taskId);
+    expect(approvedTask).toMatchObject({ parentId: kickoff.rootIssueId, column: 'backlog' });
+    expect(approvedTask?.comments).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ body: expect.stringContaining('Human scope approved') }),
+      ])
+    );
+  });
+
+  it('does not approve held scope after the project request is complete', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+    await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const productOwner = board.agents.find((agent) => agent.role === 'product_owner');
+    const qa = board.agents.find((agent) => agent.role === 'qa_engineer');
+    const developer = board.agents.find((agent) => agent.role === 'developer');
+    const heldIssue = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      title: 'Deferred product addition',
+      status: 'todo',
+      assigneeAgentId: developer?.id,
+    });
+    await harness.emit(
+      'issue.created',
+      { issueId: heldIssue.id },
+      { companyId: COMPANY_ID, entityId: heldIssue.id, entityType: 'issue', actorId: productOwner?.id }
+    );
+
+    const completedChild = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Completed delivery',
+      status: 'done',
+      assigneeAgentId: qa?.id,
+    });
+    await recordDeveloperCommit(harness, completedChild.id, developer?.id);
+    await harness.ctx.issues.createComment(
+      completedChild.id,
+      `QA approved\n${QA_REVIEW_APPROVED_MARKER}`,
+      COMPANY_ID,
+      { authorAgentId: qa?.id }
+    );
+    await harness.emit(
+      'issue.created',
+      { issueId: completedChild.id },
+      { companyId: COMPANY_ID, entityId: completedChild.id, entityType: 'issue', actorId: qa?.id }
+    );
+
+    const approval = await harness.performAction<{ approved: boolean; error?: string }>(
+      'approveScopeHold',
+      { issueId: heldIssue.id },
+      { companyId: COMPANY_ID }
+    );
+
+    expect(approval).toEqual({
+      approved: false,
+      error: 'Project delivery is complete. Start a new project request before approving additional scope.',
+    });
+    expect(await harness.ctx.issues.get(heldIssue.id, COMPANY_ID)).toMatchObject({ status: 'blocked' });
+  });
+
+  it('starts a follow-up project request from held scope after project completion', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+    await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const productOwner = board.agents.find((agent) => agent.role === 'product_owner');
+    const qa = board.agents.find((agent) => agent.role === 'qa_engineer');
+    const developer = board.agents.find((agent) => agent.role === 'developer');
+    const heldIssue = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      title: 'Deferred product addition',
+      description: 'Add a customer-requested analytics dashboard.',
+      status: 'todo',
+      assigneeAgentId: developer?.id,
+    });
+    await harness.emit(
+      'issue.created',
+      { issueId: heldIssue.id },
+      { companyId: COMPANY_ID, entityId: heldIssue.id, entityType: 'issue', actorId: productOwner?.id }
+    );
+    const remainingHeldIssue = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      title: 'Another deferred product addition',
+      status: 'todo',
+      assigneeAgentId: developer?.id,
+    });
+    await harness.emit(
+      'issue.created',
+      { issueId: remainingHeldIssue.id },
+      { companyId: COMPANY_ID, entityId: remainingHeldIssue.id, entityType: 'issue', actorId: productOwner?.id }
+    );
+
+    const completedChild = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Completed delivery',
+      status: 'done',
+      assigneeAgentId: qa?.id,
+    });
+    await recordDeveloperCommit(harness, completedChild.id, developer?.id);
+    await harness.ctx.issues.createComment(
+      completedChild.id,
+      `QA approved\n${QA_REVIEW_APPROVED_MARKER}`,
+      COMPANY_ID,
+      { authorAgentId: qa?.id }
+    );
+    await harness.emit(
+      'issue.created',
+      { issueId: completedChild.id },
+      { companyId: COMPANY_ID, entityId: completedChild.id, entityType: 'issue', actorId: qa?.id }
+    );
+
+    const followUp = await harness.performAction<{
+      started: boolean;
+      rootIssueId?: string;
+      followUpIssueId?: string;
+      wakeup?: { queued: boolean };
+    }>('startScopeHoldFollowUp', { issueId: heldIssue.id }, { companyId: COMPANY_ID });
+    const nextBoard = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const followUpKickoff = await harness.ctx.issues.get(followUp.rootIssueId!, COMPANY_ID);
+    const followUpIssue = await harness.ctx.issues.get(followUp.followUpIssueId!, COMPANY_ID);
+
+    expect(followUp).toMatchObject({ started: true, wakeup: { queued: true } });
+    expect(followUpKickoff).toMatchObject({
+      projectId: PROJECT_ID,
+      title: 'Kickoff: BMW Website follow-up',
+      status: 'todo',
+    });
+    expect(followUpIssue).toMatchObject({
+      parentId: followUp.rootIssueId,
+      title: 'Deferred product addition',
+      status: 'backlog',
+    });
+    expect(await harness.ctx.issues.get(heldIssue.id, COMPANY_ID)).toMatchObject({ status: 'cancelled' });
+    expect(nextBoard.projectOnboarding).toMatchObject({
+      status: 'analysis_in_progress',
+      rootIssueId: followUp.rootIssueId,
+      projectId: PROJECT_ID,
+    });
+    expect(nextBoard.projectOnboarding.scopeHolds).toEqual([
+      expect.objectContaining({ issueId: remainingHeldIssue.id }),
+    ]);
+  });
+
   it('keeps a QA-marked completion done when project issues are hydrated', async () => {
     const kickoff = await harness.performAction<{ rootIssueId: string }>(
       'startProjectOnboarding',
@@ -882,6 +1390,7 @@ describe('project onboarding worker actions', () => {
 
     const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
     const qa = board.agents.find((agent) => agent.role === 'qa_engineer');
+    const developer = board.agents.find((agent) => agent.role === 'developer');
     const child = await harness.ctx.issues.create({
       companyId: COMPANY_ID,
       projectId: PROJECT_ID,
@@ -890,6 +1399,7 @@ describe('project onboarding worker actions', () => {
       status: 'done',
       assigneeAgentId: qa?.id,
     });
+    await recordDeveloperCommit(harness, child.id, developer?.id);
     await harness.ctx.issues.createComment(
       child.id,
       `Review approved\n${QA_REVIEW_APPROVED_MARKER}`,
@@ -917,6 +1427,7 @@ describe('project onboarding worker actions', () => {
 
     const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
     const qa = board.agents.find((agent) => agent.role === 'qa_engineer');
+    const developer = board.agents.find((agent) => agent.role === 'developer');
     const child = await harness.ctx.issues.create({
       companyId: COMPANY_ID,
       projectId: PROJECT_ID,
@@ -930,6 +1441,7 @@ describe('project onboarding worker actions', () => {
       { issueId: child.id },
       { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
     );
+    await recordDeveloperCommit(harness, child.id, developer?.id);
     await harness.ctx.issues.update(child.id, { status: 'done' }, COMPANY_ID);
     await harness.emit(
       'issue.updated',
@@ -995,6 +1507,7 @@ describe('project onboarding worker actions', () => {
       title: 'Completed prerequisite',
       status: 'done',
     });
+    await recordDeveloperCommit(harness, completedBlocker.id, developer?.id);
     await harness.ctx.issues.createComment(
       completedBlocker.id,
       `QA approved\n${QA_REVIEW_APPROVED_MARKER}`,
@@ -1022,6 +1535,7 @@ describe('project onboarding worker actions', () => {
 
     expect(await harness.ctx.issues.get(blocked.id, COMPANY_ID)).toMatchObject({ status: 'blocked' });
 
+    await recordDeveloperCommit(harness, openBlocker.id, developer?.id);
     await harness.ctx.issues.createComment(
       openBlocker.id,
       `QA approved\n${QA_REVIEW_APPROVED_MARKER}`,

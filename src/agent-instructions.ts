@@ -22,6 +22,7 @@ export const HEARTBEAT_QUEUE_MARKER = '## Heartbeat Queue Scan';
 export const EVENT_ROUTING_MARKER = '<!-- agent-scrum:event-driven-activation -->';
 export const QA_REWORK_HANDOFF_MARKER = '## QA Rework Handoff';
 export const HUMAN_SCOPE_GUARD_MARKER = '## Human Scope Guard';
+export const GITHUB_COMMIT_EVIDENCE_MARKER = '## GitHub Commit Evidence';
 
 const HUMAN_SCOPE_GUARD = `${HUMAN_SCOPE_GUARD_MARKER}
 
@@ -30,6 +31,14 @@ Diese Regel hat Vorrang vor Leerlauf-, Backlog- oder Heartbeat-Regeln: Ein leere
 const QA_REWORK_HANDOFF = `${QA_REWORK_HANDOFF_MARKER}
 
 Wenn QA einen Defekt findet, dokumentiert QA das betroffene Kriterium und den konkreten Fix, setzt das Ticket auf Development und weist es einem Developer zu. QA implementiert den Fix niemals selbst. Der Developer liefert erneut nach Review; erst die nachfolgende QA-Prüfung darf das Ticket auf Done setzen.`;
+
+const GITHUB_COMMIT_EVIDENCE = `${GITHUB_COMMIT_EVIDENCE_MARKER}
+
+Für jedes projektgebundene Ticket mit GitHub-Repository muss der Ready-for-Review-Kommentar einen eigenen Commit-Nachweis enthalten. Ergänze nach dem Push exakt einen Marker mit vollständigem SHA, GitHub-Commit-URL und Commit-Message:
+
+<!-- agent-scrum:commit:v1 {"sha":"{full-sha}","url":"https://github.com/{owner}/{repo}/commit/{full-sha}","message":"{commit message}"} -->
+
+Ohne diesen Nachweis darf QA das Ticket nicht auf Done lassen.`;
 
 /** Minimal append-only activation rules for existing operator-customized instructions. */
 export const EVENT_ROUTING_INSTRUCTIONS: Record<TeamAgentKey, string> = {
@@ -78,8 +87,14 @@ export function heartbeatAwareInstructions(agentKey: TeamAgentKey, existing: str
     ? withEventRouting
     : `${withEventRouting.trimEnd()}\n\n${HUMAN_SCOPE_GUARD}\n`;
 
-  if (agentKey !== 'qa-engineer' || withScopeGuard.includes(QA_REWORK_HANDOFF_MARKER)) {
-    return withScopeGuard;
+  const withCommitEvidence =
+    (agentKey === 'developer-1' || agentKey === 'developer-2') &&
+    !withScopeGuard.includes(GITHUB_COMMIT_EVIDENCE_MARKER)
+      ? `${withScopeGuard.trimEnd()}\n\n${GITHUB_COMMIT_EVIDENCE}\n`
+      : withScopeGuard;
+
+  if (agentKey !== 'qa-engineer' || withCommitEvidence.includes(QA_REWORK_HANDOFF_MARKER)) {
+    return withCommitEvidence;
   }
-  return `${withScopeGuard.trimEnd()}\n\n${QA_REWORK_HANDOFF}\n`;
+  return `${withCommitEvidence.trimEnd()}\n\n${QA_REWORK_HANDOFF}\n`;
 }

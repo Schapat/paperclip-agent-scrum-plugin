@@ -102,6 +102,7 @@ export function syncProjectOnboardingIssue(
         updatedAt: hostFields.updatedAt,
         startedAt: hostFields.startedAt,
         completedAt: hostFields.completedAt,
+        commits: hostFields.commits,
         statusHistory: [
           {
             from: null,
@@ -133,6 +134,50 @@ export function syncProjectOnboardingIssue(
   return { handled: true, changed: true, action: 'updated', taskId: issue.id };
 }
 
+/**
+ * Projects a host issue for board-side inspection without turning it into a
+ * delivery card. The kickoff uses this so its analysis remains in the board
+ * while direct child issues alone remain Kanban work.
+ */
+export function projectIssueDetailTask(
+  issue: ProjectIssueSnapshot,
+  agents: Array<Pick<ScrumAgent, 'id' | 'name' | 'role'>> = []
+): ScrumTask | null {
+  if (issue.status === 'cancelled') return null;
+
+  const fields = toHostFields(issue, agents);
+  return createScrumTask({
+    id: issue.id,
+    title: fields.title,
+    description: fields.description,
+    type: 'epic',
+    column: fields.column,
+    priority: fields.priority,
+    assignedAgentId: fields.assignedAgentId,
+    parentId: fields.parentId,
+    storyPoints: fields.storyPoints,
+    acceptanceCriteria: fields.acceptanceCriteria,
+    technicalNotes: fields.technicalNotes,
+    risks: fields.risks,
+    refined: fields.refined,
+    comments: fields.comments,
+    commits: fields.commits,
+    decisions: fields.decisions,
+    createdAt: fields.createdAt,
+    updatedAt: fields.updatedAt,
+    startedAt: fields.startedAt,
+    completedAt: fields.completedAt,
+    statusHistory: [
+      {
+        from: null,
+        to: fields.column,
+        timestamp: fields.updatedAt,
+        triggeredBy: fields.assignedAgentId,
+      },
+    ],
+  });
+}
+
 interface HostTaskFields {
   title: string;
   description: string;
@@ -150,6 +195,7 @@ interface HostTaskFields {
   risks: ScrumTask['risks'];
   refined: boolean;
   comments: ScrumTask['comments'];
+  commits: ScrumTask['commits'];
   decisions: ScrumTask['decisions'];
 }
 
@@ -185,6 +231,7 @@ function toHostFields(
     risks: projection.refinement.risks,
     refined: projection.refinement.refined,
     comments: projection.comments,
+    commits: projection.commits,
     decisions: projection.decisions,
   };
 }
@@ -207,6 +254,7 @@ function hasSameHostFields(task: ScrumTask, fields: HostTaskFields): boolean {
     sameJson(task.acceptanceCriteria, fields.acceptanceCriteria) &&
     sameJson(task.risks, fields.risks) &&
     sameJson(task.comments, fields.comments) &&
+    sameJson(task.commits, fields.commits) &&
     sameJson(task.decisions, fields.decisions)
   );
 }
