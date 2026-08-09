@@ -22,6 +22,7 @@ import {
 } from '../../core/review-routing';
 import { agentIcon, agentPresentation } from './agent-presentation';
 import { descriptionWithoutAcceptanceCriteria } from './ticket-description';
+import { ticketDisplayId } from './ticket-display-id';
 
 // =============================================================================
 // Types
@@ -476,7 +477,7 @@ export function TicketDetailPanel({
       <div className="ticket-detail-overview">
         {/* Title, ID & Typ */}
         <div className="ticket-detail-header-info">
-          <span className="ticket-detail-id">#{task.id.slice(0, 8)}</span>
+          <span className="ticket-detail-id">{ticketDisplayId(task)}</span>
           <span
             className="ticket-detail-type-badge"
             style={{ backgroundColor: typeInfo.color }}

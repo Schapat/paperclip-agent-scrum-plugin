@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   EVENT_ROUTING_MARKER,
+  FEATURE_BRANCH_DELIVERY_MARKER,
   GITHUB_COMMIT_EVIDENCE_MARKER,
   HEARTBEAT_QUEUE_MARKER,
   MANAGED_AGENT_INSTRUCTIONS,
@@ -42,5 +43,16 @@ describe('managed agent instruction upgrades', () => {
 
     expect(upgraded).toContain('## Human Scope Guard');
     expect(heartbeatAwareInstructions('scrum-master', upgraded)).toBe(upgraded);
+  });
+
+  it('uses one feature branch and one feature pull request instead of ticket pull requests', () => {
+    const developerInstructions = MANAGED_AGENT_INSTRUCTIONS['developer-1'];
+    const upgraded = heartbeatAwareInstructions('developer-1', '# Existing developer guidance\n');
+
+    expect(developerInstructions).toContain('Erstelle keinen Pull Request pro Ticket.');
+    expect(developerInstructions).toContain('Feature-Branch des zugehoerigen Features');
+    expect(developerInstructions).toContain('Einen Pull Request nur einmal fuer das gesamte Feature erstellen');
+    expect(upgraded).toContain(FEATURE_BRANCH_DELIVERY_MARKER);
+    expect(upgraded).toContain('Erstelle keinen Pull Request pro Ticket.');
   });
 });

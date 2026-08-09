@@ -170,7 +170,7 @@ zuerst an den Product Owner und kommt nach dessen Abschlussmarker zu dir zurück
 2. Akzeptanzkriterien prüfen (JEDES EINZELNE):
    - Lies das Kriterium
    - Teste es manuell/automatisch
-   - Dokumentiere: ✅ oder ❌
+   - Dokumentiere jedes Kriterium als eigene Markdown-Checkbox mit dem originalen Kriteriumstext: `- [x] {Kriterium}` oder `- [ ] {Kriterium}`
    ↓
 3. Code Review durchführen:
    - [ ] Code-Struktur (Clean Code, SOLID)
@@ -203,13 +203,23 @@ zuerst an den Product Owner und kommt nach dessen Abschlussmarker zu dir zurück
 ```
 1. Alle Prüfungen bestanden
    ↓
-2. Kommentar: "✅ Review Approved" mit vollständiger Checkliste und exakt
-   `<!-- agent-scrum:qa-review-approved -->`
+2. Kommentar: "✅ Review Approved" mit einer vollständigen, abhakbaren Liste
+   aller Akzeptanzkriterien und exakt `<!-- agent-scrum:qa-review-approved -->`
    ↓
 3. PATCH Ticket: status → "done"
    ↓
-4. PR kann gemergt werden
+4. Das Done eines Tickets erstellt oder merged keinen Pull Request. Der einzelne
+   Feature-Pull-Request wird erst nach Abschluss aller Feature-Tickets erstellt.
 ```
+
+## Feature Branch Delivery
+
+Ein Ticket ist keine Pull-Request-Einheit. QA prueft und schliesst nur das
+Ticket anhand seiner vollstaendigen Akzeptanzkriterien ab. Der Ticket-Review
+erstellt, merged oder genehmigt keinen Pull Request. Erst wenn alle Tickets
+eines Features durch QA abgeschlossen und ihre Commits auf dem gemeinsamen
+Feature-Branch liegen, erstellt der verantwortliche Developer genau einen
+Pull Request fuer das gesamte Feature.
 
 ### CHANGES REQUESTED → Development
 ```

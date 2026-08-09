@@ -47,6 +47,7 @@ export function createScrumTask(input: ScrumTaskInput): ScrumTask {
 
   return {
     id: input.id ?? createId(),
+    identifier: input.identifier ?? null,
     title: input.title,
     description: input.description,
     type: input.type ?? 'story',

@@ -16,6 +16,7 @@ import { useRef, KeyboardEvent, DragEvent, MouseEvent } from 'react';
 import type { ScrumAgent, ScrumTask } from '../../core/types';
 import { useDragDropOptional, isDraggable, getDragId, DragDropContextValue } from './DragDropContext';
 import { agentIcon, agentPresentation } from './agent-presentation';
+import { ticketDisplayId } from './ticket-display-id';
 
 interface KanbanCardProps {
   task: ScrumTask;
@@ -77,7 +78,7 @@ export function KanbanCard({
   // Fortschritt der Akzeptanzkriterien — im Review der wichtigste Indikator
   const criteriaTotal = task.acceptanceCriteria.length;
   const criteriaMet = task.acceptanceCriteria.filter((c) => c.met).length;
-  const shortId = task.id.slice(0, 8);
+  const displayId = ticketDisplayId(task);
   const assignee = agentPresentation(task.assignedAgentId, agents);
 
   // Drag & Drop Context - use injected context or try the hook
@@ -202,7 +203,7 @@ export function KanbanCard({
     >
       {/* Card Header: ID + Typ + Story Points */}
       <div className="kanban-card-header">
-        <span className="kanban-card-id">#{shortId}</span>
+        <span className="kanban-card-id">{displayId}</span>
         <span
           className="kanban-card-type"
           style={{ backgroundColor: typeBadge.color }}

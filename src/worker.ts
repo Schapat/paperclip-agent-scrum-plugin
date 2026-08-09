@@ -38,7 +38,11 @@ import {
   TECHNICAL_ANALYSIS_CHANGES_REQUESTED_MARKER,
   transitionProjectOnboarding,
 } from "./core/project-onboarding";
-import { projectIssueDetailTask, syncProjectOnboardingIssue } from "./core/project-issue-sync";
+import {
+  projectIssueDetailTask,
+  syncProjectOnboardingIssue,
+  syncTaskIdentifiers,
+} from "./core/project-issue-sync";
 import { projectIssueProjection, projectProgress } from "./core/project-issue-projection";
 import {
   fetchGitHubCommitChanges,
@@ -52,7 +56,7 @@ import {
 } from "./core/review-routing";
 import { migrateState } from "./core/storage";
 import { recalculateMetrics, createInitialMetrics, onStatusChange } from "./core/hooks";
-import { collectDecisions } from "./core/communication";
+import { collectDecisions, recordDecision, sendMessage } from "./core/communication";
 import { CeremonyTriggerEngine } from "./core/triggers";
 import {
   runSprintPlanning,
@@ -260,6 +264,7 @@ const plugin = definePlugin({
       }
 
       await reconcileTeam();
+      reconcileLocalDoneTicketsWithUnmetCriteria();
       await syncOnboardingProjectIssues();
       await holdExistingUnscopedManagedIssues();
       await requestProjectRefinement("automatic");
@@ -518,6 +523,60 @@ const plugin = definePlugin({
       return Boolean(state.projectOnboarding?.rootIssueId && task.parentId === state.projectOnboarding.rootIssueId);
     }
 
+    /** Returns legacy local completions to QA when their recorded criteria are incomplete. */
+    function reconcileLocalDoneTicketsWithUnmetCriteria(): boolean {
+      const qa = state.agents.find((agent) => agent.role === "qa_engineer") ?? null;
+      let changed = false;
+
+      for (const task of state.tasks) {
+        const unmetCriteria = task.acceptanceCriteria.filter((criterion) => !criterion.met);
+        const hasCriteria = task.acceptanceCriteria.length > 0;
+        if (
+          isProjectBackedTask(task) ||
+          task.column !== "done" ||
+          (hasCriteria && unmetCriteria.length === 0)
+        ) {
+          continue;
+        }
+
+        const now = new Date().toISOString();
+        task.statusHistory.push({
+          from: "done",
+          to: "in_review",
+          timestamp: now,
+          triggeredBy: qa?.id ?? null,
+        });
+        task.column = "in_review";
+        task.assignedAgentId = qa?.id ?? task.assignedAgentId;
+        task.completedAt = null;
+        task.updatedAt = now;
+        sendMessage(state, {
+          from: null,
+          to: qa ? [qa] : null,
+          subject: "QA acceptance criteria verification required",
+          body:
+            hasCriteria
+              ? "Agent Scrum returned this persisted Done ticket to QA because not every acceptance criterion is verified. " +
+                `Open criteria:\n${unmetCriteria.map((criterion) => `- ${criterion.text}`).join("\n")}`
+              : "Agent Scrum returned this persisted Done ticket to QA because it has no acceptance criteria.",
+          taskId: task.id,
+        });
+        recordDecision(state, {
+          task,
+          type: "review_rejected",
+          description: "Persisted Done ticket returned to QA review",
+          reasoning: hasCriteria
+            ? `${unmetCriteria.length} acceptance criterion/criteria remain unverified.`
+            : "The ticket has no acceptance criteria and cannot be verified for Done.",
+          madeBy: null,
+        });
+        changed = true;
+      }
+
+      if (changed) state.metrics = recalculateMetrics(state);
+      return changed;
+    }
+
     /** Mirrors active project work onto the compact team status shown by the board. */
     function syncProjectAgentActivity(): boolean {
       const rootIssueId = state.projectOnboarding?.rootIssueId;
@@ -622,12 +681,13 @@ const plugin = definePlugin({
 
       try {
         const comments = await ctx.issues.listComments(issue.id, companyId);
-        const commits = projectIssueProjection({
+        const projection = projectIssueProjection({
           issueId: issue.id,
           description: issue.description ?? "",
           comments,
           agents: state.agents,
-        }).commits;
+        });
+        const commits = projection.commits;
         if (commits.length === 0) {
           const developer = developerForProjectRework(issue.id);
           const status = developer ? "in_progress" : "blocked";
@@ -661,6 +721,37 @@ const plugin = definePlugin({
 
         const qa = state.agents.find((agent) => agent.role === "qa_engineer");
         if (!qa) return issue;
+        const incompleteAcceptanceCriteria =
+          projection.refinement.acceptanceCriteria.length > 0 &&
+          projection.refinement.acceptanceCriteria.some((criterion) => !criterion.met);
+        if (incompleteAcceptanceCriteria) {
+          const review = await ctx.issues.update(
+            issue.id,
+            { status: "in_review", assigneeAgentId: qa.id },
+            companyId
+          );
+          try {
+            await ctx.issues.createComment(
+              review.id,
+              "## QA acceptance criteria verification required\n\nAgent Scrum returned this completion to QA. Record every acceptance criterion as a checked QA checklist entry before approving Done.",
+              companyId
+            );
+          } catch (error) {
+            ctx.logger.warn("Could not record the acceptance criteria gate", {
+              issueId: review.id,
+              error: String(error),
+            });
+          }
+          const wakeup = await requestIssueWakeup(review.id, "project_completion_qa");
+          ctx.logger.warn("Project completion blocked by incomplete QA acceptance criteria", {
+            issueId: review.id,
+            qaId: qa.id,
+            verifiedCriteria: projection.refinement.acceptanceCriteria.filter((criterion) => criterion.met).length,
+            totalCriteria: projection.refinement.acceptanceCriteria.length,
+            queued: wakeup.queued,
+          });
+          return review;
+        }
         if (
           actorId === qa.id ||
           issue.assigneeAgentId === qa.id ||
@@ -1231,6 +1322,36 @@ const plugin = definePlugin({
       return changed || projectCompleted;
     }
 
+    /** Backfills Paperclip identifiers for legacy board tasks outside the current kickoff tree. */
+    async function hydrateTaskIdentifiers(): Promise<boolean> {
+      if (!companyId || !state.tasks.some((task) => !task.identifier)) return false;
+
+      const unresolvedTaskIds = new Set(
+        state.tasks.filter((task) => !task.identifier).map((task) => task.id)
+      );
+      const limit = 100;
+      let offset = 0;
+      let changed = false;
+
+      try {
+        while (unresolvedTaskIds.size > 0) {
+          const issues = await ctx.issues.list({ companyId, limit, offset });
+          changed ||= syncTaskIdentifiers(state.tasks, issues);
+          for (const issue of issues) {
+            if (issue.identifier?.trim()) unresolvedTaskIds.delete(issue.id);
+          }
+          if (issues.length < limit) break;
+          offset += issues.length;
+        }
+      } catch (error) {
+        ctx.logger.warn("Could not backfill Paperclip ticket identifiers", { error: String(error) });
+        return false;
+      }
+
+      if (changed) await save();
+      return changed;
+    }
+
     /**
      * Finds the company lead the Scrum roles report to.
      *
@@ -1727,6 +1848,7 @@ const plugin = definePlugin({
     registerCompanyData("board", async (params) => {
       await refreshTechnicalAnalysisStatus();
       await syncOnboardingProjectIssues();
+      await hydrateTaskIdentifiers();
       const rootIssueId = state.projectOnboarding?.rootIssueId;
       const kickoffTask = await projectKickoffTask();
       const projectTasks = rootIssueId

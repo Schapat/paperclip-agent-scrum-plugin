@@ -23,6 +23,7 @@ export const EVENT_ROUTING_MARKER = '<!-- agent-scrum:event-driven-activation --
 export const QA_REWORK_HANDOFF_MARKER = '## QA Rework Handoff';
 export const HUMAN_SCOPE_GUARD_MARKER = '## Human Scope Guard';
 export const GITHUB_COMMIT_EVIDENCE_MARKER = '## GitHub Commit Evidence';
+export const FEATURE_BRANCH_DELIVERY_MARKER = '## Feature Branch Delivery';
 
 const HUMAN_SCOPE_GUARD = `${HUMAN_SCOPE_GUARD_MARKER}
 
@@ -34,11 +35,20 @@ Wenn QA einen Defekt findet, dokumentiert QA das betroffene Kriterium und den ko
 
 const GITHUB_COMMIT_EVIDENCE = `${GITHUB_COMMIT_EVIDENCE_MARKER}
 
-Für jedes projektgebundene Ticket mit GitHub-Repository muss der Ready-for-Review-Kommentar einen eigenen Commit-Nachweis enthalten. Ergänze nach dem Push exakt einen Marker mit vollständigem SHA, GitHub-Commit-URL und Commit-Message:
+Für jedes projektgebundene Ticket mit GitHub-Repository muss der Ready-for-Review-Kommentar einen eigenen Commit-Nachweis fuer einen bereits auf den zugehoerigen Feature-Branch gepushten Commit enthalten. Ergänze nach dem Push exakt einen Marker mit vollständigem SHA, GitHub-Commit-URL und Commit-Message:
 
 <!-- agent-scrum:commit:v1 {"sha":"{full-sha}","url":"https://github.com/{owner}/{repo}/commit/{full-sha}","message":"{commit message}"} -->
 
 Ohne diesen Nachweis darf QA das Ticket nicht auf Done lassen.`;
+
+const FEATURE_BRANCH_DELIVERY = `${FEATURE_BRANCH_DELIVERY_MARKER}
+
+Diese Regel hat Vorrang vor frueheren Anweisungen zu Ticket-Branches oder Ticket-Pull-Requests. Ein Ticket ist eine Liefertranche innerhalb eines Features, keine Pull-Request-Einheit.
+
+- Arbeite auf dem vorgegebenen Feature-Branch des zugehoerigen Features und pushe die Ticket-Commits dorthin. Erstelle keinen Pull Request pro Ticket.
+- Der Ready-for-Review-Kommentar eines Tickets nennt den Feature-Branch und nur die Commits dieses Tickets; ein PR-Link gehoert dort nicht hinein.
+- QA schliesst ein Ticket erst nach der vollstaendigen Einzelpruefung seiner Akzeptanzkriterien ab. Das Done eines einzelnen Tickets erstellt, merged oder genehmigt keinen Pull Request.
+- Erst wenn alle Tickets eines Features durch QA abgeschlossen und ihre Commits auf dem Feature-Branch liegen, erstellt der fuer den Feature-Branch verantwortliche Developer genau einen Pull Request fuer das gesamte Feature.`;
 
 /** Minimal append-only activation rules for existing operator-customized instructions. */
 export const EVENT_ROUTING_INSTRUCTIONS: Record<TeamAgentKey, string> = {
@@ -93,8 +103,14 @@ export function heartbeatAwareInstructions(agentKey: TeamAgentKey, existing: str
       ? `${withScopeGuard.trimEnd()}\n\n${GITHUB_COMMIT_EVIDENCE}\n`
       : withScopeGuard;
 
-  if (agentKey !== 'qa-engineer' || withCommitEvidence.includes(QA_REWORK_HANDOFF_MARKER)) {
-    return withCommitEvidence;
+  const withFeatureBranchDelivery =
+    (agentKey === 'developer-1' || agentKey === 'developer-2' || agentKey === 'qa-engineer') &&
+    !withCommitEvidence.includes(FEATURE_BRANCH_DELIVERY_MARKER)
+      ? `${withCommitEvidence.trimEnd()}\n\n${FEATURE_BRANCH_DELIVERY}\n`
+      : withCommitEvidence;
+
+  if (agentKey !== 'qa-engineer' || withFeatureBranchDelivery.includes(QA_REWORK_HANDOFF_MARKER)) {
+    return withFeatureBranchDelivery;
   }
-  return `${withCommitEvidence.trimEnd()}\n\n${QA_REWORK_HANDOFF}\n`;
+  return `${withFeatureBranchDelivery.trimEnd()}\n\n${QA_REWORK_HANDOFF}\n`;
 }

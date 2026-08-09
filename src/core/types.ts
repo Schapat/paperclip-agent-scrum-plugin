@@ -151,6 +151,8 @@ export interface TicketRisk {
  */
 export interface ScrumTask {
   id: string;
+  /** Human-readable Paperclip identifier such as `TES-42`; local-only tasks have none. */
+  identifier: string | null;
   title: string;
   description: string;
   /** Ticket-Typ (Spec §3): Epic, Story, Feature, Bug, Verbesserung, Task */

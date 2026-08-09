@@ -1,7 +1,7 @@
 # Developer 2
 
 ## Description
-Zweite Developer-Instanz im Scrum-Team. Implementiert zugewiesene Tickets, schreibt Tests und Dokumentation, erstellt Pull Requests und verschiebt Tickets nach Review. Folgt strikt dem Workflow TODO → Development → Review.
+Zweite Developer-Instanz im Scrum-Team. Implementiert zugewiesene Tickets, schreibt Tests und Dokumentation, liefert Commits in den zugehoerigen Feature-Branch und verschiebt Tickets nach Review. Folgt strikt dem Workflow TODO → Development → Review.
 
 **Hinweis:** Diese Rolle ist identisch mit Developer 1 und ermöglicht parallele Entwicklung an verschiedenen Tickets.
 
@@ -12,7 +12,7 @@ Zweite Developer-Instanz im Scrum-Team. Implementiert zugewiesene Tickets, schre
 - **Features implementieren** — Code schreiben nach Spezifikation
 - **Tests schreiben** — Unit Tests und Integration Tests (≥80% Coverage)
 - **Änderungen dokumentieren** — Code-Kommentare, README
-- **Pull Requests erstellen** — mit beschreibendem Text
+- **Feature-Branches beliefern** — Ticket-Commits sauber auf dem zugehoerigen Branch halten
 - **Tickets nach Review verschieben** — nach Fertigstellung
 
 ### Skills
@@ -42,7 +42,7 @@ Zweite Developer-Instanz im Scrum-Team. Implementiert zugewiesene Tickets, schre
 
 ### ✅ ERLAUBTE Status-Änderungen
 - `todo` → `in_progress` (wenn du mit Arbeit beginnst)
-- `in_progress` → `in_review` (wenn du fertig bist und PR erstellt)
+- `in_progress` → `in_review` (wenn die Ticket-Commits auf dem Feature-Branch liegen)
 - `in_review` → `in_progress` (nur bei Feedback vom QA, automatisch)
 
 ## Tools & Permissions
@@ -55,9 +55,9 @@ Zweite Developer-Instanz im Scrum-Team. Implementiert zugewiesene Tickets, schre
 - `GET /api/issues/{issueId}` — Ticket-Details lesen
 
 ### Code-Repository
-- Feature-Branch erstellen
-- Code pushen
-- Pull Request erstellen
+- Den vorgegebenen Feature-Branch auschecken und nutzen
+- Ticket-Commits auf den Feature-Branch pushen
+- Einen Pull Request nur einmal fuer das gesamte Feature erstellen
 
 ### Nicht erlaubt
 - Direkt auf main/master pushen
@@ -70,7 +70,7 @@ Zweite Developer-Instanz im Scrum-Team. Implementiert zugewiesene Tickets, schre
 ```markdown
 ## Development gestartet
 
-**Branch:** `feature/{ticket-id}-{kurzbeschreibung}`
+**Feature-Branch:** `feature/{feature-id}-{kurzbeschreibung}`
 **Geplanter Ansatz:** {kurze Beschreibung}
 **Geschätzte Zeit:** {Stunden/Tage}
 ```
@@ -102,8 +102,11 @@ Zweite Developer-Instanz im Scrum-Team. Implementiert zugewiesene Tickets, schre
 - Unit Tests: ✅ {anzahl} Tests, {coverage}% Coverage
 - Integration Tests: ✅ {anzahl} Tests
 
-### Pull Request
-[PR #{nummer}]({url})
+### Feature-Branch
+`feature/{feature-id}-{kurzbeschreibung}`
+
+### Ticket-Commits
+- `{full-sha}` {commit message}
 
 ### Test-Hinweise für QA
 - {Hinweis 1}
@@ -118,7 +121,7 @@ Zweite Developer-Instanz im Scrum-Team. Implementiert zugewiesene Tickets, schre
 ```
 
 ### GitHub Commit-Nachweis
-Für jedes projektgebundene Ticket mit GitHub-Repository ergänzt der Ready-for-Review-Kommentar nach dem Push genau einen Nachweis mit vollständigem SHA, GitHub-Commit-URL und Commit-Message:
+Für jedes projektgebundene Ticket mit GitHub-Repository ergänzt der Ready-for-Review-Kommentar nach dem Push genau einen Nachweis fuer einen bereits auf den zugehoerigen Feature-Branch gepushten Commit mit vollständigem SHA, GitHub-Commit-URL und Commit-Message:
 
 ```html
 <!-- agent-scrum:commit:v1 {"sha":"{full-sha}","url":"https://github.com/{owner}/{repo}/commit/{full-sha}","message":"{commit message}"} -->
@@ -182,13 +185,13 @@ Tickets dem Scrum Master statt sie still umzuhängen.
    ↓
 6. PATCH Ticket: status → "in_progress"
    ↓
-7. Kommentar: "Development gestartet" mit Branch-Name
+7. Kommentar: "Development gestartet" mit Feature-Branch
 ```
 
 ### Schritt 2: Implementierung
 ```
-1. Feature-Branch erstellen:
-   git checkout -b feature/{ticket-id}-{kurzbeschreibung}
+1. Vorgegebenen Feature-Branch des zugehoerigen Features auschecken. Lege ihn nur fuer das erste Ticket eines neuen Features an:
+   git checkout -b feature/{feature-id}-{kurzbeschreibung}
    ↓
 2. Implementiere alle Anforderungen:
    - Alle Akzeptanzkriterien umsetzen
@@ -219,14 +222,11 @@ Tickets dem Scrum Master statt sie still umzuhängen.
    - Keine Linter-Fehler?
    - Code dokumentiert?
    ↓
-2. Pull Request erstellen:
-   - Beschreibender Titel
-   - Ticket-ID verlinken
-   - Änderungen beschreiben
+2. Erstelle keinen Pull Request pro Ticket. Stelle sicher, dass die Ticket-Commits auf dem Feature-Branch gepusht sind.
    ↓
 3. PATCH Ticket: status → "in_review"
    ↓
-4. Kommentar: "Ready for Review" mit PR-Link
+4. Kommentar: "Ready for Review" mit Feature-Branch und Commit-Nachweisen
 ```
 
 ### Produktentscheidung im Review
@@ -268,8 +268,8 @@ Vor JEDER Status-Änderung:
 
 ### Branch-Naming
 ```
-feature/{ticket-id}-{kurzbeschreibung}
-Beispiel: feature/SCRUM-42-user-login
+feature/{feature-id}-{kurzbeschreibung}
+Beispiel: feature/FE-42-user-login
 ```
 
 ### Commit-Messages
@@ -280,13 +280,23 @@ Typen: feat, fix, docs, style, refactor, test, chore
 Beispiel: feat(auth): add user login endpoint
 ```
 
+### Feature Pull Request
+Erstelle keinen Pull Request pro Ticket. Erst wenn alle Tickets des Features
+von QA abgeschlossen sind und alle Ticket-Commits auf dem Feature-Branch liegen,
+erstellt der fuer den Feature-Branch verantwortliche Developer genau einen Pull
+Request fuer das gesamte Feature.
+
 ### Pull Request Template
 ```markdown
 ## Beschreibung
 {Was wurde implementiert}
 
-## Ticket
-{Link zum Ticket}
+## Feature
+{Link zum Feature}
+
+## Enthaltene Tickets
+- {Ticket 1}
+- {Ticket 2}
 
 ## Änderungen
 - {Änderung 1}
@@ -334,7 +344,8 @@ Falls du bereits 1 Ticket in `in_progress` hast:
 - [ ] Code dokumentiert (Kommentare, JSDoc)
 - [ ] Keine Linter-/Compiler-Fehler
 - [ ] Lokal getestet
-- [ ] PR erstellt mit Beschreibung
+- [ ] Ticket-Commits auf Feature-Branch gepusht
+- [ ] Kein Pull Request pro Ticket erstellt
 - [ ] Commit-History sauber
 
 ## Human Scope Guard

@@ -14,6 +14,7 @@ import {
   QA_REVIEW_APPROVED_MARKER,
 } from '../core/review-routing';
 import { COMMIT_MARKER, DECISION_MARKER, REFINEMENT_MARKER } from '../core/project-issue-projection';
+import { createAcceptanceCriterion, createScrumTask } from '../core/factories';
 import type { CeremonyRecord, ProjectOnboarding, ScrumAgent, ScrumTask } from '../core/types';
 
 const COMPANY_ID = 'company-bmw';
@@ -255,6 +256,99 @@ describe('project onboarding worker actions', () => {
     } finally {
       stateGetSpy.mockRestore();
     }
+  });
+
+  it('reopens a persisted local done ticket with unverified acceptance criteria', async () => {
+    const firstCriterion = createAcceptanceCriterion('Theme can be toggled');
+    const secondCriterion = createAcceptanceCriterion('Theme preference persists');
+    firstCriterion.met = true;
+    const completedTask = createScrumTask({
+      id: 'legacy-theme-toggle',
+      title: 'Theme Toggle Infrastruktur implementieren',
+      description: '',
+      column: 'done',
+      acceptanceCriteria: [firstCriterion, secondCriterion],
+      completedAt: '2026-08-09T12:00:00.000Z',
+    });
+    await harness.ctx.state.set(
+      { scopeKind: 'company', scopeId: COMPANY_ID, stateKey: 'board' },
+      { tasks: [completedTask] }
+    );
+
+    await plugin.definition.setup(harness.ctx);
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const qa = board.agents.find((agent) => agent.role === 'qa_engineer');
+    const reconciledTask = board.tasks.find((task) => task.id === completedTask.id);
+
+    expect(reconciledTask).toMatchObject({
+      column: 'in_review',
+      assignedAgentId: qa?.id,
+      completedAt: null,
+    });
+    expect(reconciledTask?.comments).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ body: expect.stringContaining('acceptance criteria verification required') }),
+      ])
+    );
+  });
+
+  it('reopens a persisted local done ticket without acceptance criteria', async () => {
+    const completedTask = createScrumTask({
+      id: 'legacy-unrefined-completion',
+      title: 'Legacy task without refinement',
+      description: '',
+      column: 'done',
+      completedAt: '2026-08-09T12:00:00.000Z',
+    });
+    await harness.ctx.state.set(
+      { scopeKind: 'company', scopeId: COMPANY_ID, stateKey: 'board' },
+      { tasks: [completedTask] }
+    );
+
+    await plugin.definition.setup(harness.ctx);
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const qa = board.agents.find((agent) => agent.role === 'qa_engineer');
+    const reconciledTask = board.tasks.find((task) => task.id === completedTask.id);
+
+    expect(reconciledTask).toMatchObject({
+      column: 'in_review',
+      assignedAgentId: qa?.id,
+      completedAt: null,
+    });
+    expect(reconciledTask?.comments).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ body: expect.stringContaining('no acceptance criteria') }),
+      ])
+    );
+  });
+
+  it('keeps a persisted local done ticket with fully verified acceptance criteria', async () => {
+    const firstCriterion = createAcceptanceCriterion('Theme can be toggled');
+    const secondCriterion = createAcceptanceCriterion('Theme preference persists');
+    firstCriterion.met = true;
+    secondCriterion.met = true;
+    const completedTask = createScrumTask({
+      id: 'verified-local-completion',
+      title: 'Verified local task',
+      description: '',
+      column: 'done',
+      acceptanceCriteria: [firstCriterion, secondCriterion],
+      completedAt: '2026-08-09T12:00:00.000Z',
+    });
+    await harness.ctx.state.set(
+      { scopeKind: 'company', scopeId: COMPANY_ID, stateKey: 'board' },
+      { tasks: [completedTask] }
+    );
+
+    await plugin.definition.setup(harness.ctx);
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const reconciledTask = board.tasks.find((task) => task.id === completedTask.id);
+
+    expect(reconciledTask).toMatchObject({
+      column: 'done',
+      completedAt: '2026-08-09T12:00:00.000Z',
+    });
+    expect(reconciledTask?.comments).toHaveLength(0);
   });
 
   it('trusts a Paperclip-linked GitHub workspace without requiring GitHub Actions', async () => {
@@ -1159,6 +1253,59 @@ describe('project onboarding worker actions', () => {
     });
   });
 
+    it('returns a QA-marked completion with incomplete acceptance criteria to review', async () => {
+      const kickoff = await harness.performAction<{ rootIssueId: string }>(
+        'startProjectOnboarding',
+        { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+        { companyId: COMPANY_ID }
+      );
+      await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+      await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+
+      const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+      const developer = board.agents.find((agent) => agent.role === 'developer');
+      const qa = board.agents.find((agent) => agent.role === 'qa_engineer');
+      const child = await harness.ctx.issues.create({
+        companyId: COMPANY_ID,
+        projectId: PROJECT_ID,
+        parentId: kickoff.rootIssueId,
+        title: 'Verify all image slider acceptance criteria',
+        description: [
+          '## Akzeptanzkriterien',
+          '- [ ] Slider supports keyboard navigation',
+          '- [ ] Slider images have alternative text',
+        ].join('\n'),
+        status: 'done',
+        assigneeAgentId: qa?.id,
+      });
+      await recordDeveloperCommit(harness, child.id, developer?.id);
+      await harness.ctx.issues.createComment(
+        child.id,
+        [
+          '## QA approved',
+          '- [x] Slider supports keyboard navigation',
+          QA_REVIEW_APPROVED_MARKER,
+        ].join('\n'),
+        COMPANY_ID,
+        { authorAgentId: qa?.id }
+      );
+      await harness.emit(
+        'issue.created',
+        { issueId: child.id },
+        { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue', actorId: qa?.id }
+      );
+
+      expect(await harness.ctx.issues.get(child.id, COMPANY_ID)).toMatchObject({
+        status: 'in_review',
+        assigneeAgentId: qa?.id,
+      });
+      expect(await harness.ctx.issues.listComments(child.id, COMPANY_ID)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ body: expect.stringContaining('acceptance criteria verification required') }),
+        ])
+      );
+    });
+
   it('returns a QA-approved completion without a developer commit to Development', async () => {
     const kickoff = await harness.performAction<{ rootIssueId: string }>(
       'startProjectOnboarding',
@@ -1525,6 +1672,54 @@ describe('project onboarding worker actions', () => {
     expect(await harness.ctx.issues.get(child.id, COMPANY_ID)).toMatchObject({ status: 'done' });
     expect(after.tasks.find((task) => task.id === child.id)).toMatchObject({ column: 'done' });
     expect(after.projectOnboarding.status).toBe('completed');
+  });
+
+  it('returns a hydrated completion with incomplete QA acceptance criteria to review', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+    await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const qa = board.agents.find((agent) => agent.role === 'qa_engineer');
+    const developer = board.agents.find((agent) => agent.role === 'developer');
+    const child = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Hydrated incomplete QA verification',
+      description: [
+        '## Akzeptanzkriterien',
+        '- [ ] Slider supports keyboard navigation',
+        '- [ ] Slider images have alternative text',
+      ].join('\n'),
+      status: 'done',
+      assigneeAgentId: qa?.id,
+    });
+    await recordDeveloperCommit(harness, child.id, developer?.id);
+    await harness.ctx.issues.createComment(
+      child.id,
+      [
+        '## QA approved',
+        '- [x] Slider supports keyboard navigation',
+        QA_REVIEW_APPROVED_MARKER,
+      ].join('\n'),
+      COMPANY_ID,
+      { authorAgentId: qa?.id }
+    );
+
+    await plugin.definition.setup(harness.ctx);
+    const after = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+
+    expect(await harness.ctx.issues.get(child.id, COMPANY_ID)).toMatchObject({
+      status: 'in_review',
+      assigneeAgentId: qa?.id,
+    });
+    expect(after.tasks.find((task) => task.id === child.id)).toMatchObject({ column: 'in_review' });
   });
 
   it('keeps a QA-owned completion done when the host event does not expose an actor', async () => {

@@ -19,6 +19,7 @@ type HostTimestamp = Date | string;
 /** Die fuer das Board benoetigte, stabile Teilmenge eines Paperclip-Issues. */
 export interface ProjectIssueSnapshot {
   id: string;
+  identifier: string | null;
   projectId: string | null;
   parentId: string | null;
   title: string;
@@ -41,6 +42,29 @@ export interface ProjectIssueSyncResult {
   changed: boolean;
   action: ProjectIssueSyncAction;
   taskId?: string;
+}
+
+/** Completes legacy board tasks with the current human-readable Paperclip identifier. */
+export function syncTaskIdentifiers(
+  tasks: ScrumTask[],
+  issues: Array<Pick<ProjectIssueSnapshot, 'id' | 'identifier'>>
+): boolean {
+  const identifiers = new Map(
+    issues.flatMap((issue) => {
+      const identifier = issue.identifier?.trim();
+      return identifier ? [[issue.id, identifier]] : [];
+    })
+  );
+
+  let changed = false;
+  for (const task of tasks) {
+    const identifier = identifiers.get(task.id);
+    if (identifier && task.identifier !== identifier) {
+      task.identifier = identifier;
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 /**
@@ -92,6 +116,7 @@ export function syncProjectOnboardingIssue(
     tasks.push(
       createScrumTask({
         id: issue.id,
+        identifier: hostFields.identifier,
         title: hostFields.title,
         description: hostFields.description,
         column: hostFields.column,
@@ -148,6 +173,7 @@ export function projectIssueDetailTask(
   const fields = toHostFields(issue, agents);
   return createScrumTask({
     id: issue.id,
+    identifier: fields.identifier,
     title: fields.title,
     description: fields.description,
     type: 'epic',
@@ -179,6 +205,7 @@ export function projectIssueDetailTask(
 }
 
 interface HostTaskFields {
+  identifier: string | null;
   title: string;
   description: string;
   column: TaskStatus;
@@ -215,6 +242,7 @@ function toHostFields(
   });
 
   return {
+    identifier: issue.identifier,
     title: issue.title,
     description: issue.description ?? '',
     column: issue.status,
@@ -238,6 +266,7 @@ function toHostFields(
 
 function hasSameHostFields(task: ScrumTask, fields: HostTaskFields): boolean {
   return (
+    task.identifier === fields.identifier &&
     task.title === fields.title &&
     task.description === fields.description &&
     task.column === fields.column &&

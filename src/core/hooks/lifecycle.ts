@@ -167,6 +167,10 @@ async function runBeforeHooks(context: BeforeStatusChangeContext): Promise<void>
 
   // Hook: Agent-Verfügbarkeit prüfen (bei in_progress)
   await beforeAgentCheck(context);
+  if (context.cancel) return;
+
+  // Ein Ticket mit offenen Akzeptanzkriterien darf nicht an der QA vorbei Done werden.
+  await beforeAcceptanceCriteriaCheck(context);
 }
 
 /**
@@ -215,6 +219,24 @@ async function beforeAgentCheck(context: BeforeStatusChangeContext): Promise<voi
       // Nicht blockieren, nur warnen - Multi-Tasking erlauben
     }
   }
+}
+
+/** Verhindert manuelle Done-Übergänge, solange vorhandene Kriterien offen sind. */
+async function beforeAcceptanceCriteriaCheck(context: BeforeStatusChangeContext): Promise<void> {
+  if (context.to !== 'done') return;
+
+  if (context.task.acceptanceCriteria.length === 0) {
+    context.cancel = true;
+    context.cancelReason = 'Cannot move ticket to Done with no acceptance criteria.';
+    return;
+  }
+
+  const unmetCriteria = context.task.acceptanceCriteria.filter((criterion) => !criterion.met);
+  if (unmetCriteria.length === 0) return;
+
+  context.cancel = true;
+  context.cancelReason =
+    `Cannot move ticket to Done while ${unmetCriteria.length} acceptance criterion/criteria remain unverified.`;
 }
 
 // =============================================================================

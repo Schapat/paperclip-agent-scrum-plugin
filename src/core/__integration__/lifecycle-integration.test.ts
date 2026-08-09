@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import type { ScrumAgent, ScrumSprint, ScrumTask, WorkerState } from '../types';
+import type { PluginContext, ScrumAgent, ScrumSprint, ScrumTask, WorkerState } from '../types';
 import { createDefaultSettings } from '../types';
 import { createAcceptanceCriterion, createScrumTask } from '../factories';
 
@@ -22,6 +22,7 @@ import type { AgentWorkRequest, CeremonyContext } from '../ceremonies/types';
 
 import { reviewTicket } from '../ceremonies/qa-review';
 import { validateTransition } from '../hooks/transitions';
+import { onStatusChange } from '../hooks/lifecycle';
 import { migrateState } from '../storage';
 
 // =============================================================================
@@ -198,6 +199,53 @@ describe('Ticket-Lifecycle end-to-end', () => {
     // Spec §3: Alles muss durch Review
     expect(move(task, 'done', 'dev-1')).toBe(false);
     expect(task.column).toBe('in_progress');
+  });
+
+  it('blockiert einen lokalen Review-zu-Done-Übergang mit offenen Kriterien', async () => {
+    const task = createScrumTask({
+      title: 'Offene QA-Prüfung',
+      description: '',
+      column: 'in_review',
+      acceptanceCriteria: [createAcceptanceCriterion('Akzeptanzkriterium noch offen')],
+    });
+    state.tasks.push(task);
+    const hookContext: PluginContext = {
+      state,
+      currentAgent: state.agents.find((agent) => agent.role === 'qa_engineer') ?? null,
+      emit: () => undefined,
+      updateState: () => undefined,
+      saveState: async () => undefined,
+    };
+
+    const result = await onStatusChange(task, 'in_review', 'done', hookContext);
+
+    expect(result).toMatchObject({ success: false, cancelled: true });
+    expect(result.error).toContain('acceptance criterion');
+    expect(task.column).toBe('in_review');
+    expect(task.completedAt).toBeNull();
+  });
+
+  it('blockiert einen lokalen Review-zu-Done-Übergang ohne Kriterien', async () => {
+    const task = createScrumTask({
+      title: 'Unverfeinerte QA-Prüfung',
+      description: '',
+      column: 'in_review',
+    });
+    state.tasks.push(task);
+    const hookContext: PluginContext = {
+      state,
+      currentAgent: state.agents.find((agent) => agent.role === 'qa_engineer') ?? null,
+      emit: () => undefined,
+      updateState: () => undefined,
+      saveState: async () => undefined,
+    };
+
+    const result = await onStatusChange(task, 'in_review', 'done', hookContext);
+
+    expect(result).toMatchObject({ success: false, cancelled: true });
+    expect(result.error).toContain('no acceptance criteria');
+    expect(task.column).toBe('in_review');
+    expect(task.completedAt).toBeNull();
   });
 
   it('übersteht eine Serialisierungs-Runde mit vollständigem Verlauf', async () => {

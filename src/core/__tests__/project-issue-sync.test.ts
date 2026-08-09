@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { syncProjectOnboardingIssue, type ProjectIssueSnapshot } from '../project-issue-sync';
+import {
+  syncProjectOnboardingIssue,
+  syncTaskIdentifiers,
+  type ProjectIssueSnapshot,
+} from '../project-issue-sync';
+import { createScrumTask } from '../factories';
 import { startProjectOnboarding, parseProjectOnboardingInput } from '../project-onboarding';
 import type { ScrumTask } from '../types';
 
@@ -25,6 +30,7 @@ function issue(overrides: Partial<ProjectIssueSnapshot> = {}): ProjectIssueSnaps
   const now = new Date('2026-08-08T12:00:00.000Z');
   return {
     id: 'issue-slider',
+    identifier: 'BMW-42',
     projectId: 'project-bmw',
     parentId: 'issue-kickoff',
     title: 'Add image slider',
@@ -41,6 +47,20 @@ function issue(overrides: Partial<ProjectIssueSnapshot> = {}): ProjectIssueSnaps
 }
 
 describe('project issue synchronization', () => {
+  it('backfills Paperclip identifiers onto legacy board tasks', () => {
+    const tasks = [
+      createScrumTask({
+        id: 'issue-slider',
+        title: 'Add image slider',
+        description: '',
+        identifier: null,
+      }),
+    ];
+
+    expect(syncTaskIdentifiers(tasks, [{ id: 'issue-slider', identifier: 'BMW-42' }])).toBe(true);
+    expect(tasks[0]).toMatchObject({ id: 'issue-slider', identifier: 'BMW-42' });
+  });
+
   it('creates a local task only for a direct kickoff child', () => {
     const tasks: ScrumTask[] = [];
 
@@ -50,6 +70,7 @@ describe('project issue synchronization', () => {
     expect(tasks).toHaveLength(1);
     expect(tasks[0]).toMatchObject({
       id: 'issue-slider',
+      identifier: 'BMW-42',
       parentId: 'issue-kickoff',
       column: 'backlog',
       priority: 'high',

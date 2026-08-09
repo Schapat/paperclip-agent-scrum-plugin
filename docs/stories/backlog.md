@@ -32,3 +32,7 @@
 | DF-018 | Defekt | Projekt-Onboarding darf keine GitHub-Actions-Pipeline erzwingen | Erledigt | 2026-08-09 |
 | DF-019 | Defekt | Kickoff-Analyse im initialen Setup im Kanban oeffnen und entscheiden | Erledigt | 2026-08-09 |
 | DF-020 | Defekt | Board-Zustand bei parallelen Company-Invocations isolieren | Erledigt | 2026-08-09 |
+| DF-021 | Defekt | Done-Tickets nur mit vollstaendig verifizierten Akzeptanzkriterien zulassen | Erledigt | 2026-08-09 |
+| DF-022 | Defekt | Pull Requests pro Feature statt pro Ticket erzeugen | Erledigt | 2026-08-09 |
+| DF-023 | Defekt | Lokale und Legacy-Done-Tickets ohne vollstaendig verifizierte Akzeptanzkriterien erneut zur QA geben | Erledigt | 2026-08-09 |
+| DF-024 | Defekt | Paperclip-Ticketkennungen statt UUID-Praefixe im Board anzeigen | Erledigt | 2026-08-09 |
