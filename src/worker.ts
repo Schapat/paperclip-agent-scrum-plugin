@@ -988,6 +988,72 @@ const plugin = definePlugin({
       }
     }
 
+    /** Restores ready work that was incorrectly assigned to the Technical Lead before sprint approval. */
+    async function returnMisassignedSprintPlanningIssueToBacklog(issue: Issue): Promise<Issue> {
+      const onboarding = state.projectOnboarding;
+      if (
+        !companyId ||
+        onboarding?.status !== "sprint_planning" ||
+        !isProjectOnboardingChildIssue(issue) ||
+        issue.status !== "blocked"
+      ) {
+        return issue;
+      }
+
+      const technicalLead = state.agents.find((agent) => agent.role === "technical_lead");
+      if (!technicalLead || issue.assigneeAgentId !== technicalLead.id) return issue;
+
+      try {
+        const [comments, relations] = await Promise.all([
+          ctx.issues.listComments(issue.id, companyId),
+          ctx.issues.relations.get(issue.id, companyId),
+        ]);
+        if (relations.blockedBy.length > 0) return issue;
+
+        const projection = projectIssueProjection({
+          issueId: issue.id,
+          description: issue.description ?? "",
+          comments,
+          agents: state.agents,
+        });
+        const refinement = projection.refinement;
+        const readyForSprint =
+          refinement.refined &&
+          refinement.storyPoints > 0 &&
+          refinement.acceptanceCriteria.length > 0;
+        if (!readyForSprint) return issue;
+
+        const returned = await ctx.issues.update(
+          issue.id,
+          { status: "backlog", assigneeAgentId: null },
+          companyId
+        );
+        try {
+          await ctx.issues.createComment(
+            returned.id,
+            "## Sprint planning recovery\n\nAgent Scrum returned this ready ticket to Backlog because it was blocked under the Technical Lead without a native issue blocker. The human can now start the sprint; sprint planning will assign an available Developer.",
+            companyId
+          );
+        } catch (error) {
+          ctx.logger.warn("Could not record sprint planning recovery", {
+            issueId: returned.id,
+            error: String(error),
+          });
+        }
+        ctx.logger.warn("Recovered misassigned sprint planning issue", {
+          issueId: returned.id,
+          technicalLeadId: technicalLead.id,
+        });
+        return returned;
+      } catch (error) {
+        ctx.logger.warn("Could not recover misassigned sprint planning issue", {
+          issueId: issue.id,
+          error: String(error),
+        });
+        return issue;
+      }
+    }
+
     function developerForProjectRework(issueId: string): WorkerState["agents"][number] | null {
       const activeColumns = new Set(["todo", "in_progress", "in_review"]);
       return state.agents
@@ -1437,7 +1503,8 @@ const plugin = definePlugin({
             const completionGatedIssue = await routeProjectCompletionToQa(issue, null);
             const qaCompletedIssue = await completeFinalQaProjectReview(completionGatedIssue);
             const reworkRoutedIssue = await routeProjectReworkToDeveloper(qaCompletedIssue);
-            const routedIssue = await routeProjectReview(reworkRoutedIssue);
+            const recoveredIssue = await returnMisassignedSprintPlanningIssueToBacklog(reworkRoutedIssue);
+            const routedIssue = await routeProjectReview(recoveredIssue);
             const result = syncProjectOnboardingIssue(
               state.tasks,
               onboarding,
@@ -2070,7 +2137,8 @@ const plugin = definePlugin({
         const completionGatedIssue = await routeProjectCompletionToQa(issue, event.actorId ?? null);
         const qaCompletedIssue = await completeFinalQaProjectReview(completionGatedIssue);
         const reworkRoutedIssue = await routeProjectReworkToDeveloper(qaCompletedIssue);
-        const routedIssue = await routeProjectReview(reworkRoutedIssue);
+        const recoveredIssue = await returnMisassignedSprintPlanningIssueToBacklog(reworkRoutedIssue);
+        const routedIssue = await routeProjectReview(recoveredIssue);
         const result = syncProjectOnboardingIssue(
           state.tasks,
           state.projectOnboarding,

@@ -52,3 +52,4 @@
 | DF-034 | Defekt | Retrospektiv-Skills werden nicht als native Paperclip Skills veroeffentlicht | Erledigt | 2026-08-09 |
 | FE-011 | Feature | Externen Projektworkflow und Freigaben oberhalb des Scrum Boards anzeigen | Erledigt | 2026-08-09 |
 | OP-005 | Betrieb | README aktualisieren und aktuellen Plugin-Stand veroeffentlichen | Erledigt | 2026-08-09 |
+| DF-035 | Defekt | Falsch blockierte, bereite Projekt-Tickets an freie Developer zurueckgeben | Erledigt | 2026-08-09 |

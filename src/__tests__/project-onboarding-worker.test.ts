@@ -778,6 +778,72 @@ describe('project onboarding worker actions', () => {
     });
   });
 
+  it('returns a ready ticket wrongly blocked under the Technical Lead to backlog during sprint planning', async () => {
+    const sprintHarness = createTestHarness({ manifest, config: { enableTeam: true } });
+    sprintHarness.seed({ projects: [project()], projectWorkspaces: [workspace()] });
+    await plugin.definition.setup(sprintHarness.ctx);
+
+    const kickoff = await sprintHarness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(sprintHarness, kickoff.rootIssueId);
+    await sprintHarness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+    const child = await sprintHarness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Add accessible image slider',
+      status: 'backlog',
+    });
+    await sprintHarness.emit(
+      'issue.created',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
+    );
+    await sprintHarness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+    let board = await sprintHarness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const technicalLead = board.agents.find((agent) => agent.role === 'technical_lead');
+    const refinement = await sprintHarness.ctx.issues.createComment(
+      child.id,
+      `<!-- ${REFINEMENT_MARKER} {"storyPoints":3,"acceptanceCriteria":["Keyboard navigation works"],"technicalNotes":"Reuse the media primitives."} -->`,
+      COMPANY_ID,
+      { authorAgentId: technicalLead?.id }
+    );
+    await sprintHarness.emit(
+      'issue.comment.created',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: refinement.id, entityType: 'issue_comment' }
+    );
+
+    await sprintHarness.ctx.issues.update(
+      child.id,
+      { status: 'blocked', assigneeAgentId: technicalLead?.id },
+      COMPANY_ID
+    );
+    await sprintHarness.emit(
+      'issue.updated',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue', actorId: technicalLead?.id }
+    );
+
+    expect(await sprintHarness.ctx.issues.get(child.id, COMPANY_ID)).toMatchObject({
+      status: 'backlog',
+      assigneeAgentId: null,
+    });
+    board = await sprintHarness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    expect(board.canStartProjectSprint).toBe(true);
+
+    const developer = board.agents.find((agent) => agent.role === 'developer');
+    await sprintHarness.performAction('startProjectSprint', {}, { companyId: COMPANY_ID });
+    expect(await sprintHarness.ctx.issues.get(child.id, COMPANY_ID)).toMatchObject({
+      status: 'todo',
+      assigneeAgentId: developer?.id,
+    });
+  });
+
   it('closes the project sprint with review and retrospective before unlocking the next feature request', async () => {
     const sprintHarness = createTestHarness({ manifest, config: { enableTeam: true } });
     sprintHarness.seed({ projects: [project()], projectWorkspaces: [workspace()] });
