@@ -53,3 +53,4 @@
 | FE-011 | Feature | Externen Projektworkflow und Freigaben oberhalb des Scrum Boards anzeigen | Erledigt | 2026-08-09 |
 | OP-005 | Betrieb | README aktualisieren und aktuellen Plugin-Stand veroeffentlichen | Erledigt | 2026-08-09 |
 | DF-035 | Defekt | Falsch blockierte, bereite Projekt-Tickets an freie Developer zurueckgeben | Erledigt | 2026-08-09 |
+| DF-036 | Defekt | Retry-Refinement mit Issue-gebundenem Technical-Lead-Run starten | In Bearbeitung | 2026-08-09 |

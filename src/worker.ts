@@ -1284,17 +1284,16 @@ const plugin = definePlugin({
       }
 
       try {
-        await ctx.agents.invoke(technicalLead.id, companyId, {
-          reason: "Agent Scrum: project refinement",
-          prompt: [
-            "Refine the following Paperclip project issues:",
-            taskIds.map((taskId) => `- ${taskId}`).join("\n"),
-            "Some issues may already be in delivery, review, blocked, or done. Read each issue and the project workspace; do not change issue status or assignee.",
-            "For every issue, add a Technical Refinement comment that ends with exactly:",
-            '<!-- agent-scrum:refinement:v1 {"storyPoints":5,"acceptanceCriteria":["..."],"technicalNotes":"...","risks":[]} -->',
-            "Use a realistic Fibonacci story-point estimate and concrete acceptance criteria.",
-          ].join("\n\n"),
-        });
+        const wakeups = await Promise.all(
+          taskIds.map(async (taskId) => {
+            await ctx.issues.update(taskId, { assigneeAgentId: technicalLead.id }, companyId);
+            return requestIssueWakeup(taskId, "project_refinement");
+          })
+        );
+        const failedWakeup = wakeups.find((wakeup) => !wakeup.queued);
+        if (failedWakeup) {
+          throw new Error(failedWakeup.error ?? "Could not queue project refinement.");
+        }
         state.projectOnboarding = {
           ...onboarding,
           refinementRequestedTaskIds: [...new Set([...requestedTaskIds, ...taskIds])],

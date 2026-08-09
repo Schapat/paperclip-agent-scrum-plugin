@@ -1212,15 +1212,15 @@ describe('project onboarding worker actions', () => {
     const allowFirstInvocation = new Promise<void>((resolve) => {
       releaseFirstInvocation = resolve;
     });
-    const originalInvoke = harness.ctx.agents.invoke.bind(harness.ctx.agents);
+    const originalRequestWakeup = harness.ctx.issues.requestWakeup.bind(harness.ctx.issues);
     let invocationCount = 0;
-    const invokeSpy = vi.spyOn(harness.ctx.agents, 'invoke').mockImplementation(async (...invocationArguments) => {
+    const requestWakeupSpy = vi.spyOn(harness.ctx.issues, 'requestWakeup').mockImplementation(async (...wakeupArguments) => {
       invocationCount += 1;
       if (invocationCount === 1) {
         notifyFirstInvocation();
         await allowFirstInvocation;
       }
-      return originalInvoke(...invocationArguments);
+      return originalRequestWakeup(...wakeupArguments);
     });
 
     const firstRequest = harness.performAction('requestProjectRefinement', {}, { companyId: COMPANY_ID });
@@ -1232,7 +1232,7 @@ describe('project onboarding worker actions', () => {
       { requested: true, error: null, taskIds: [child.id] },
       { requested: true, error: null, taskIds: [child.id] },
     ]);
-    expect(invokeSpy).toHaveBeenCalledTimes(1);
+    expect(requestWakeupSpy).toHaveBeenCalledTimes(1);
     expect(
       harness.logs.filter(
         (entry) =>
@@ -1254,14 +1254,13 @@ describe('project onboarding worker actions', () => {
     await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
 
     const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
-    const developer = board.agents.find((agent) => agent.role === 'developer');
+    const technicalLead = board.agents.find((agent) => agent.role === 'technical_lead');
     const child = await harness.ctx.issues.create({
       companyId: COMPANY_ID,
       projectId: PROJECT_ID,
       parentId: kickoff.rootIssueId,
       title: 'Implement image slider controls',
-      status: 'in_progress',
-      assigneeAgentId: developer?.id,
+      status: 'backlog',
     });
     await harness.emit(
       'issue.created',
@@ -1308,9 +1307,18 @@ describe('project onboarding worker actions', () => {
     await expect(
       harness.performAction('requestProjectRefinement', {}, { companyId: COMPANY_ID })
     ).resolves.toMatchObject({ requested: false });
+    const requestWakeupSpy = vi.spyOn(harness.ctx.issues, 'requestWakeup');
     await expect(
       harness.performAction('retryProjectRefinement', {}, { companyId: COMPANY_ID })
     ).resolves.toMatchObject({ requested: true, taskIds: [child.id] });
+    expect(requestWakeupSpy).toHaveBeenCalledWith(
+      child.id,
+      COMPANY_ID,
+      expect.objectContaining({ reason: 'project_refinement' })
+    );
+    await expect(harness.ctx.issues.get(child.id, COMPANY_ID)).resolves.toMatchObject({
+      assigneeAgentId: technicalLead?.id,
+    });
   });
 
   it('plans a technically refined project story in Paperclip and assigns a developer', async () => {
