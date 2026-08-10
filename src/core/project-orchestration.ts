@@ -196,7 +196,16 @@ export function mergeStalls(
    * ein fertiges Projekt weiter "blocked — human approval required", weil der
    * Stillstand von vorhin nie jemand zurueckgenommen hat.
    */
-  settledTaskIds: ReadonlySet<string> = new Set()
+  settledTaskIds: ReadonlySet<string> = new Set(),
+  /**
+   * Tickets, die inzwischen verfeinert sind.
+   *
+   * Ein "Refinement fehlt"-Stillstand ueberlebte die Schaetzung, die ihn
+   * aufhebt: er wird nur beim Tool-Aufruf zurueckgenommen, und ein als
+   * Kommentar nachgereichter Marker laeuft nicht durch das Tool. Das Board
+   * meldete danach "blocked" auf einem sprintreifen Backlog.
+   */
+  refinedTaskIds: ReadonlySet<string> = new Set()
 ): TicketStall[] {
   const hostOwned = new Set<TicketStall['kind']>([
     'run_failed',
@@ -206,11 +215,14 @@ export function mergeStalls(
   ]);
   const observedIds = new Set(observed.map((stall) => stall.taskId));
 
+  // Die Schaetzung ist da — der Vermerk "es fehlt eine Schaetzung" ist damit
+  // erledigt, unabhaengig davon, auf welchem Weg sie kam.
+  const obsolete = (stall: TicketStall) =>
+    settledTaskIds.has(stall.taskId) ||
+    (stall.kind === 'refinement_invalid' && refinedTaskIds.has(stall.taskId));
+
   const kept = existing.filter(
-    (stall) =>
-      !hostOwned.has(stall.kind) &&
-      !observedIds.has(stall.taskId) &&
-      !settledTaskIds.has(stall.taskId)
+    (stall) => !hostOwned.has(stall.kind) && !observedIds.has(stall.taskId) && !obsolete(stall)
   );
-  return [...kept, ...observed.filter((stall) => !settledTaskIds.has(stall.taskId))];
+  return [...kept, ...observed.filter((stall) => !obsolete(stall))];
 }

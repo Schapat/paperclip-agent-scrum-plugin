@@ -2330,6 +2330,146 @@ describe('project onboarding worker actions', () => {
   });
 
   /**
+   * Der Refinement-Lauf hat sich selbst ueberholt.
+   *
+   * Der Reconcile-Job fragt jede Minute nach. Wurde die Anfrageliste
+   * zwischendurch geleert — etwa weil ein Ticket desselben Batches fertig
+   * wurde — galt jedes Ticket wieder als "nie gefragt": neuer Weckruf, neuer
+   * Run, der laufende von vorne. Ein Ticket kam so auf sechs Anlaeufe bei einem
+   * Limit von drei und wurde in acht Minuten nicht fertig.
+   */
+  describe('asking for a refinement twice', () => {
+    /** Der Deckel aus dem Worker; hier bewusst als Erwartung ausgeschrieben. */
+    const MAX_ATTEMPTS = 3;
+
+    async function boardWithTwoUnrefinedStories() {
+      const harness = createTestHarness({ manifest, config: { enableTeam: true } });
+      harness.seed({ projects: [project()], projectWorkspaces: [workspace()] });
+      await plugin.definition.setup(harness.ctx);
+
+      const kickoff = await harness.performAction<{ rootIssueId: string }>(
+        'startProjectOnboarding',
+        { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+        { companyId: COMPANY_ID }
+      );
+      await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+      await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+
+      const children = [];
+      for (const title of ['Slider markup', 'Slider controls']) {
+        const issue = await harness.ctx.issues.create({
+          companyId: COMPANY_ID,
+          projectId: PROJECT_ID,
+          parentId: kickoff.rootIssueId,
+          title,
+          status: 'backlog',
+        });
+        await harness.emit(
+          'issue.created',
+          { issueId: issue.id },
+          { companyId: COMPANY_ID, entityId: issue.id, entityType: 'issue' }
+        );
+        children.push(issue);
+      }
+      await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+      return { harness, children };
+    }
+
+    it('does not overtake a run the host still reports as live', async () => {
+      const { harness, children } = await boardWithTwoUnrefinedStories();
+
+      const wakeups: string[] = [];
+      vi.spyOn(harness.ctx.issues, 'requestWakeup').mockImplementation(async (issueId) => {
+        wakeups.push(issueId as string);
+        return { queued: true, runId: 'run-1' };
+      });
+      vi.spyOn(harness.ctx.issues.summaries, 'getOrchestration').mockResolvedValue({
+        runs: children.map((child, index) => ({
+          id: `run-${index}`,
+          issueId: child.id,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+          error: null,
+          finishedAt: null,
+          createdAt: new Date().toISOString(),
+        })),
+        approvals: [],
+        invocationBlocks: [],
+        openBudgetIncidents: [],
+      } as never);
+      // Der Board-Abruf im Schreibfenster liest den Host-Snapshot ein.
+      await harness.getData<BoardData>('board', { companyId: COMPANY_ID, force: true });
+
+      wakeups.length = 0;
+      // Der ausdrueckliche Retry umgeht Wartefrist und Versuchsdeckel — der
+      // laufende Run darf er trotzdem nicht ueberholen.
+      await harness.performAction('retryProjectRefinement', {}, { companyId: COMPANY_ID });
+
+      expect(wakeups, 'a live run must not be overtaken by a second wake-up').toEqual([]);
+    });
+
+    it('never exceeds three automatic attempts, however often the memory is cleared', async () => {
+      const harness = createTestHarness({ manifest, config: { enableTeam: true } });
+      harness.seed({ projects: [project()], projectWorkspaces: [workspace()] });
+      await plugin.definition.setup(harness.ctx);
+
+      const kickoff = await harness.performAction<{ rootIssueId: string }>(
+        'startProjectOnboarding',
+        { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+        { companyId: COMPANY_ID }
+      );
+      await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+      await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+
+      const children = [];
+      for (const title of ['A', 'B', 'C', 'D', 'Never refined']) {
+        const issue = await harness.ctx.issues.create({
+          companyId: COMPANY_ID,
+          projectId: PROJECT_ID,
+          parentId: kickoff.rootIssueId,
+          title,
+          status: 'backlog',
+        });
+        await harness.emit(
+          'issue.created',
+          { issueId: issue.id },
+          { companyId: COMPANY_ID, entityId: issue.id, entityType: 'issue' }
+        );
+        children.push(issue);
+      }
+      await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+      const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+      const technicalLead = board.agents.find((agent) => agent.role === 'technical_lead');
+      const stubborn = children[children.length - 1];
+
+      // Jedes fertige Ticket desselben Batches leert die Anfrageliste. Fuer das
+      // letzte Ticket galt danach jedes Mal "nie gefragt" — der Deckel lief ins
+      // Leere, und in der Praxis stand der Zaehler bei sechs statt drei.
+      for (const child of children.slice(0, -1)) {
+        const comment = await harness.ctx.issues.createComment(
+          child.id,
+          `<!-- ${REFINEMENT_MARKER} {"storyPoints":3,"acceptanceCriteria":["Works"]} -->`,
+          COMPANY_ID,
+          { authorAgentId: technicalLead?.id }
+        );
+        await harness.emit(
+          'issue.comment.created',
+          { issueId: child.id },
+          { companyId: COMPANY_ID, entityId: comment.id, entityType: 'issue_comment' }
+        );
+      }
+
+      const after = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+      const attempt = (after.projectOnboarding.refinementAttempts ?? []).find(
+        (entry) => entry.taskId === stubborn.id
+      );
+      expect(attempt?.attempts ?? 0).toBeGreaterThan(0);
+      expect(attempt?.attempts ?? 0).toBeLessThanOrEqual(MAX_ATTEMPTS);
+    });
+  });
+
+  /**
    * Stories → Refinement → Sprint lief bisher nur vorwaerts. Ein Sprint auf
    * falscher Grundlage liess sich nicht zurueckholen: die Uebergaenge gehen
    * nur in eine Richtung, und die alten Refinement-Marker haetten jede Story

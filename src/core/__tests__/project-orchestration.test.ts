@@ -102,3 +102,39 @@ describe('project orchestration run limits', () => {
     expect(remaining).toEqual([]);
   });
 });
+/**
+ * Ein Vermerk "es fehlt eine Schaetzung" hat die Schaetzung ueberlebt, die ihn
+ * aufhebt: das Board meldete "blocked" auf einem sprintreifen Backlog, weil der
+ * Marker als Kommentar kam statt durch das Tool, das den Vermerk zuruecknimmt.
+ */
+describe('stalls that the board has outgrown', () => {
+  const refinementStall = {
+    taskId: 'ticket-1',
+    kind: 'refinement_invalid' as const,
+    reason: 'The Technical Lead did not produce a valid refinement marker in 3 attempts.',
+    detectedAt: RUN_STARTED_AT,
+    retriedAt: null,
+  };
+
+  it('drops a missing-refinement stall once the ticket is refined', () => {
+    expect(mergeStalls([refinementStall], [], new Set(), new Set(['ticket-1']))).toEqual([]);
+  });
+
+  it('keeps it while the ticket is still unrefined', () => {
+    expect(mergeStalls([refinementStall], [], new Set(), new Set(['other']))).toEqual([
+      refinementStall,
+    ]);
+  });
+
+  it('does not let a refinement clear an unrelated impediment', () => {
+    const approval = {
+      taskId: 'ticket-1',
+      kind: 'awaiting_approval' as const,
+      reason: 'Waiting for a human approval outside the board.',
+      detectedAt: RUN_STARTED_AT,
+      retriedAt: null,
+    };
+
+    expect(mergeStalls([], [approval], new Set(), new Set(['ticket-1']))).toEqual([approval]);
+  });
+});

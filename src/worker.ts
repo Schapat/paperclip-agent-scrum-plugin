@@ -1543,6 +1543,10 @@ const plugin = definePlugin({
           return issue;
         }
 
+        // Die Schaetzung ist da. Ein Vermerk "es fehlt eine Schaetzung" gilt
+        // damit nicht mehr — auch wenn der Marker als Kommentar kam statt
+        // durch das Tool, das ihn sonst zuruecknimmt.
+        clearStall(issue.id);
         const returned = await ctx.issues.update(
           issue.id,
           { status: "backlog", assigneeAgentId: null },
@@ -2057,6 +2061,19 @@ const plugin = definePlugin({
       }
       const taskIds = candidates
         .filter((task) => {
+          // Ein laufender Run ist das staerkste "frag nicht nochmal": ein
+          // zweiter Weckruf ueberholt ihn, und der Technical Lead faengt von
+          // vorne an. Genau so hat ein Ticket sechs Anlaeufe verbraucht, ohne
+          // je fertig zu werden — im Minutentakt des Reconcile-Jobs.
+          if (state.liveRuns?.some((run) => run.taskId === task.id)) return false;
+
+          // Der Deckel gehoert vor die Gedaechtnispruefung. Stand er dahinter,
+          // liess ihn jedes Leeren der Anfrageliste ins Leere laufen: das
+          // Ticket galt als "noch nie gefragt" und wurde erneut gefragt,
+          // waehrend der Zaehler weiterlief.
+          const attempt = attempts.get(task.id);
+          if (!force && attempt && attempt.attempts >= MAX_REFINEMENT_ATTEMPTS) return false;
+
           if (force) return true;
           if (!requestedTaskIds.has(task.id)) return true;
 
@@ -2064,8 +2081,7 @@ const plugin = definePlugin({
           // erkennbar nichts geliefert hat — entweder weil er gescheitert ist
           // oder weil die Frist verstrichen ist. Bisher war jedes Ticket nach
           // genau einem Versuch endgueltig verloren.
-          const attempt = attempts.get(task.id);
-          if (!attempt || attempt.attempts >= MAX_REFINEMENT_ATTEMPTS) return false;
+          if (!attempt) return false;
 
           const failedRun = state.stalls?.some(
             (entry) => entry.taskId === task.id && entry.kind === "run_failed"
@@ -2110,11 +2126,28 @@ const plugin = definePlugin({
         // gehoert ins Carrier-Ticket, sonst muss der Agent es aus 12 KB
         // Instruktionen erraten — und genau daran scheitert der Batch.
         const brief = refinementBriefComment(attempts.get(carrierTaskId)?.attempts ?? 0);
-        await postIssueNotice(
+        const briefPosted = await postIssueNotice(
           carrierTaskId,
           "refinement-brief",
           `${brief}\n\n${batchRefinementBrief(batchTasks, deferred)}`
         );
+        // Ohne zugestellten Auftrag ist der Weckruf schaedlich: der Technical
+        // Lead startet, findet die erwartete Batch-Liste nicht im Ticket,
+        // liefert keinen gueltigen Marker — und das zaehlt ihm als
+        // Fehlversuch. Die Notizbremse hatte den Auftrag unterdrueckt, der
+        // Weckruf ging trotzdem raus.
+        if (!briefPosted) {
+          ctx.logger.warn("Skipped a refinement wake-up because its brief was suppressed", {
+            issueId: carrierTaskId,
+            taskIds: batchTaskIds,
+          });
+          if (requestStateChanged) await save();
+          return {
+            requested: false,
+            error: "The refinement brief could not be posted; waking the Technical Lead without it would only burn an attempt.",
+            taskIds,
+          };
+        }
         const wakeup = await requestIssueWakeup(carrierTaskId, "project_refinement");
         if (!wakeup.queued) {
           throw new Error(wakeup.error ?? "Could not queue project refinement.");
@@ -2449,7 +2482,10 @@ const plugin = definePlugin({
         const settled = new Set(
           state.tasks.filter((task) => task.column === "done").map((task) => task.id)
         );
-        const merged = mergeStalls(state.stalls ?? [], observed, settled);
+        const refined = new Set(
+          state.tasks.filter((task) => task.refined).map((task) => task.id)
+        );
+        const merged = mergeStalls(state.stalls ?? [], observed, settled, refined);
         annotateTimeoutRecoveryStalls(merged, summary, knownTaskIds);
         if (
           !recoveryChanged &&
