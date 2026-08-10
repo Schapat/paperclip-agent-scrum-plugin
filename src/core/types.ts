@@ -459,6 +459,13 @@ export interface ProjectScopeHold {
  * und Product Owner. Er tragt Projekt- und Workspace-Kontext; alle daraus
  * entstehenden Stories werden als Child-Issues angelegt.
  */
+/** Wiederanlauf-Zaehler einer Refinement-Anforderung. */
+export interface ProjectRefinementAttempt {
+  taskId: string;
+  attempts: number;
+  lastRequestedAt: string;
+}
+
 export interface ProjectOnboarding {
   status: ProjectOnboardingStatus;
   projectId: string | null;
@@ -468,6 +475,14 @@ export interface ProjectOnboarding {
   requiresSprint: boolean;
   /** Child-Issues, fuer die der Technical Lead bereits ein Refinement angefordert bekam. */
   refinementRequestedTaskIds: string[];
+  /**
+   * Wie oft ein Refinement je Ticket angefordert wurde.
+   *
+   * Ohne Zaehler war die erste Anfrage zugleich die letzte: ein
+   * fehlgeschlagener Lauf oder ein Kommentar ohne gueltigen Marker liess das
+   * Ticket dauerhaft liegen.
+   */
+  refinementAttempts?: ProjectRefinementAttempt[];
   /** Ungebundene Agentenarbeit, die auf menschliche Scope-Freigabe wartet. */
   scopeHolds: ProjectScopeHold[];
   brief: string | null;
@@ -520,6 +535,26 @@ export interface WorkerState {
    * eingefügter Skill-Abschnitt nicht sauber ersetzen.
    */
   agentInstructions: Record<string, string>;
+  /**
+   * Tickets, die nachweislich stehen.
+   *
+   * Ein Ticket steht nicht, weil es lange dauert, sondern weil etwas
+   * Benennbares passiert ist: ein Agent-Run ist gescheitert, ein Weckruf wurde
+   * nicht eingereiht, eine Freigabe wartet. Ohne diese Liste ist ein
+   * abgestuerzter Run vom laufenden Run nicht zu unterscheiden.
+   */
+  stalls?: TicketStall[];
+}
+
+/** Grund und Zeitpunkt, warum ein Ticket nicht weiterlaeuft. */
+export interface TicketStall {
+  taskId: string;
+  reason: string;
+  /** Kategorie fuer die Board-Darstellung. */
+  kind: 'run_failed' | 'wakeup_failed' | 'awaiting_approval' | 'budget' | 'refinement_invalid';
+  detectedAt: string;
+  /** Gesetzt, sobald der Worker selbst einen Wiederanlauf versucht hat. */
+  retriedAt?: string | null;
 }
 
 /**

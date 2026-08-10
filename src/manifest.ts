@@ -38,6 +38,14 @@ const manifest: PaperclipPluginManifestV1 = {
     "issue.comments.create",
     "issue.relations.read",
     "issue.relations.write",
+    // Der Kickoff-Teilbaum ist genau der Liefer-Scope. Ihn in einem Aufruf zu
+    // lesen ersetzt ein projektweites Listing samt anschliessendem Filtern.
+    "issue.subtree.read",
+    // Ein stehendes Ticket ist von einem laufenden nur unterscheidbar, wenn der
+    // Host nach Runs, Freigaben und Budget-Sperren gefragt werden kann. Aus
+    // Events allein laesst sich das nicht rekonstruieren: was waehrend eines
+    // Worker-Neustarts passiert, hoert niemand.
+    "issues.orchestration.read",
     // Assignment and the retrospective's skill delivery need agent access.
     "agents.read",
     "agents.invoke",
@@ -51,7 +59,18 @@ const manifest: PaperclipPluginManifestV1 = {
     // Board state (tickets, learnings, ceremony log) lives in plugin state.
     "plugin.state.read",
     "plugin.state.write",
+    // The reconcile tick — see the `jobs` declaration for why it exists and
+    // what it deliberately does not do.
+    "jobs.schedule",
+    // Structured verdicts instead of hand-typed HTML markers — see `tools`.
+    "agent.tools.register",
     // Ceremonies are triggered by board events, not by a schedule.
+    //
+    // This also carries the stall detection: `agent.run.failed`,
+    // `approval.created`, and `budget.incident.opened` tell the board why a
+    // ticket stopped moving. Only the *subscription* is capability-gated —
+    // the plugin reads no approval or cost record, so it asks for no
+    // additional read permission.
     "events.subscribe",
     // Setting the reporting line goes through the host's REST API: the plugin
     // API has no way to give a managed agent a superior. Optional — without
@@ -66,6 +85,124 @@ const manifest: PaperclipPluginManifestV1 = {
     worker: "./dist/worker.js",
     ui: "./dist/ui",
   },
+
+  // ---------------------------------------------------------------------------
+  // Agent tools
+  // ---------------------------------------------------------------------------
+
+  // Der Ablauf haengt daran, dass ein Modell HTML-Marker mit gueltigem JSON von
+  // Hand tippt; ein fehlendes Anfuehrungszeichen liess ein Ticket dauerhaft
+  // ungeplant liegen. Diese Tools sind schemavalidiert — eine falsche Eingabe
+  // wird abgelehnt, bevor sie das Board erreicht. Das *Speicherformat* bleibt
+  // der Marker, damit bestehende Tickets und die Projektion unveraendert gelten.
+  tools: [
+    {
+      name: "submit_refinement",
+      displayName: "Submit ticket refinement",
+      description:
+        "Record the estimate, acceptance criteria, technical notes, risks, and labels for a project ticket. Use this instead of writing the refinement marker by hand. Only the Technical Lead may call it.",
+      parametersSchema: {
+        type: "object",
+        required: ["issueId", "storyPoints", "acceptanceCriteria"],
+        properties: {
+          issueId: { type: "string", description: "UUID of the ticket being refined." },
+          storyPoints: {
+            type: "number",
+            minimum: 1,
+            maximum: 100,
+            description: "Whole-number effort estimate.",
+          },
+          acceptanceCriteria: {
+            type: "array",
+            minItems: 1,
+            items: { type: "string" },
+            description: "Verifiable criteria QA will check one by one.",
+          },
+          technicalNotes: { type: "string", description: "Implementation guidance for the developer." },
+          labels: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Technical domains of this ticket. Sprint planning picks the matching developer from these.",
+          },
+          risks: {
+            type: "array",
+            items: {
+              type: "object",
+              required: ["description"],
+              properties: {
+                description: { type: "string" },
+                severity: { type: "string", enum: ["low", "medium", "high"] },
+                mitigation: { type: "string" },
+              },
+            },
+          },
+        },
+      },
+    },
+    {
+      name: "submit_qa_verdict",
+      displayName: "Submit QA verdict",
+      description:
+        "Record the QA result for a ticket in review: every acceptance criterion with its outcome, plus approval or a change request. Only the QA Engineer may call it. An approval with an unmet criterion is rejected.",
+      parametersSchema: {
+        type: "object",
+        required: ["issueId", "approved", "criteria"],
+        properties: {
+          issueId: { type: "string", description: "UUID of the reviewed ticket." },
+          approved: { type: "boolean", description: "True only when every criterion is met." },
+          criteria: {
+            type: "array",
+            minItems: 1,
+            items: {
+              type: "object",
+              required: ["text", "met"],
+              properties: {
+                text: { type: "string", description: "The acceptance criterion, as refined." },
+                met: { type: "boolean" },
+              },
+            },
+          },
+          notes: { type: "string", description: "What failed and what the developer should fix." },
+        },
+      },
+    },
+    {
+      name: "record_commit",
+      displayName: "Record delivery commit",
+      description:
+        "Record the pushed commit that delivers a ticket. Required before QA can complete a GitHub-backed ticket. Only a Developer may call it.",
+      parametersSchema: {
+        type: "object",
+        required: ["issueId", "sha", "url", "message"],
+        properties: {
+          issueId: { type: "string", description: "UUID of the delivered ticket." },
+          sha: { type: "string", description: "Full commit SHA already pushed to the feature branch." },
+          url: { type: "string", description: "https://github.com/<owner>/<repo>/commit/<sha>" },
+          message: { type: "string", description: "Commit message." },
+        },
+      },
+    },
+  ],
+
+  // ---------------------------------------------------------------------------
+  // Reconcile tick
+  // ---------------------------------------------------------------------------
+
+  // Dies ist *kein* Zeremonien-Scheduler — die Trennung aus dem Kopf dieser
+  // Datei gilt weiter. Der Tick startet nichts, er stellt nur fest, was steht:
+  // ein Agent-Run, der waehrend eines Worker-Neustarts gescheitert ist, erzeugt
+  // kein Event mehr, das jemand hoeren koennte. Ohne ihn faellt ein solcher
+  // Stillstand erst auf, wenn ein Mensch das Board oeffnet.
+  jobs: [
+    {
+      jobKey: "reconcile-stalled-work",
+      displayName: "Detect stalled delivery",
+      description:
+        "Reads the host's orchestration view and reports tickets whose agent run failed, whose approval is pending, or which a budget incident stopped.",
+      schedule: "*/10 * * * *",
+    },
+  ],
 
   // ---------------------------------------------------------------------------
   // Managed agents — the Scrum team

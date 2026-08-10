@@ -26,6 +26,15 @@ export const SPRINT_AUTONOMY_MARKER = '## Approved Sprint Autonomy';
 export const GITHUB_COMMIT_EVIDENCE_MARKER = '## GitHub Commit Evidence';
 export const FEATURE_BRANCH_DELIVERY_MARKER = '## Feature Branch Delivery';
 export const REPORTING_LINE_MARKER = '<!-- agent-scrum:reporting-line -->';
+export const STRUCTURED_INPUT_MARKER = '## Structured Input';
+/**
+ * Fruehere Schreibweise desselben Markers.
+ *
+ * Die ausgelieferten AGENTS.md tragen `scrum-team:reporting-line`, die Pruefung
+ * suchte `agent-scrum:reporting-line`. Sie schlug damit immer fehl und hat bei
+ * jeder Reconciliation einen zweiten Reporting-Line-Abschnitt angehaengt.
+ */
+export const LEGACY_REPORTING_LINE_MARKER = '<!-- scrum-team:reporting-line -->';
 
 const HUMAN_SCOPE_GUARD = `${HUMAN_SCOPE_GUARD_MARKER}
 
@@ -51,6 +60,38 @@ Für jedes projektgebundene Ticket mit GitHub-Repository muss der Ready-for-Revi
 
 Ohne diesen Nachweis darf QA das Ticket nicht auf Done lassen.`;
 
+/**
+ * Der Tool-Weg je Rolle.
+ *
+ * Bewusst ohne "hat Vorrang"-Formel: das Tool ersetzt keine Regel, es ist der
+ * verlaessliche Weg, dieselbe Information abzugeben. Wer weiterhin von Hand
+ * schreibt, bleibt korrekt — nur fehleranfaelliger.
+ */
+const STRUCTURED_INPUT: Record<TeamAgentKey, string | null> = {
+  'technical-lead': `${STRUCTURED_INPUT_MARKER}
+
+Gib dein Refinement ueber das Tool \`submit_refinement\` ab, nicht als handgeschriebenen Marker. Das Tool prueft Schaetzung und Akzeptanzkriterien sofort und meldet einen Fehler zurueck, statt das Ticket stumm ungeplant liegen zu lassen.
+
+- Pflichtfelder: \`issueId\`, \`storyPoints\` (1–100), \`acceptanceCriteria\` (mindestens eines).
+- \`labels\` nennt die technischen Domaenen des Tickets; die Sprint-Planung waehlt darueber den passenden Developer.
+- Der handgeschriebene Refinement-Marker aus dem Abschnitt oben bleibt gueltig, falls das Tool nicht verfuegbar ist.`,
+  'qa-engineer': `${STRUCTURED_INPUT_MARKER}
+
+Gib dein Review-Ergebnis ueber \`submit_qa_verdict\` ab. Liste jedes Akzeptanzkriterium einzeln mit seinem Ergebnis.
+
+- Eine Freigabe mit einem offenen Kriterium wird abgelehnt — das ist Absicht: genau dieser Widerspruch wuerde das Ticket spaeter erneut aufmachen.
+- Bei \`approved: false\` gehoert in \`notes\`, was konkret zu tun ist.
+- Die handgeschriebene Checkliste mit dem QA-Freigabemarker bleibt gueltig, falls das Tool nicht verfuegbar ist.`,
+  'developer-1': `${STRUCTURED_INPUT_MARKER}
+
+Melde deinen Liefer-Commit ueber \`record_commit\`, nachdem du auf den Feature-Branch gepusht hast. Das Tool prueft, dass SHA und GitHub-URL zusammenpassen; der handgeschriebene Commit-Nachweis aus dem Abschnitt oben bleibt als Rueckfallweg gueltig.`,
+  'developer-2': `${STRUCTURED_INPUT_MARKER}
+
+Melde deinen Liefer-Commit ueber \`record_commit\`, nachdem du auf den Feature-Branch gepusht hast. Das Tool prueft, dass SHA und GitHub-URL zusammenpassen; der handgeschriebene Commit-Nachweis aus dem Abschnitt oben bleibt als Rueckfallweg gueltig.`,
+  'product-owner': null,
+  'scrum-master': null,
+};
+
 const FEATURE_BRANCH_DELIVERY = `${FEATURE_BRANCH_DELIVERY_MARKER}
 
 Diese Regel hat Vorrang vor frueheren Anweisungen zu Ticket-Branches oder Ticket-Pull-Requests. Ein Ticket ist eine Liefertranche innerhalb eines Features, keine Pull-Request-Einheit.
@@ -60,7 +101,7 @@ Diese Regel hat Vorrang vor frueheren Anweisungen zu Ticket-Branches oder Ticket
 - QA schliesst ein Ticket erst nach der vollstaendigen Einzelpruefung seiner Akzeptanzkriterien ab. Das Done eines einzelnen Tickets erstellt, merged oder genehmigt keinen Pull Request.
 - Erst wenn alle Tickets eines Features durch QA abgeschlossen und ihre Commits auf dem Feature-Branch liegen, erstellt der fuer den Feature-Branch verantwortliche Developer genau einen Pull Request fuer das gesamte Feature.`;
 
-const REPORTING_LINE_INSTRUCTIONS: Record<TeamAgentKey, string> = {
+export const REPORTING_LINE_INSTRUCTIONS: Record<TeamAgentKey, string> = {
   'product-owner': `${REPORTING_LINE_MARKER}
 
 ## Reporting Line
@@ -127,12 +168,54 @@ Diese Regel hat Vorrang vor frueheren Timer- oder Queue-Scan-Anweisungen. Du erh
 Du bist der einzige zeitgesteuerte Watchdog und pruefst alle 30 Minuten nur Blocker, WIP-Verstoesse und liegengebliebene, bereits freigegebene Arbeit. Der Plugin-Worker entscheidet weiterhin die operativen Zeremonien und Rollenaktivierungen. Beanspruche keine Delivery-Arbeit; dokumentiere, wecke oder eskaliere die zustaendige Rolle ohne Zuweisungen zu ueberschreiben.`,
 };
 
+/**
+ * Entfernt Bloecke, die eine frueher fehlerhafte Marker-Pruefung angehaengt hat.
+ *
+ * Die Pruefung suchte `agent-scrum:reporting-line`, die ausgelieferten Bundles
+ * tragen `scrum-team:reporting-line`. Sie schlug damit bei *jeder*
+ * Reconciliation fehl und hat den Abschnitt erneut angehaengt — das Ergebnis
+ * waren zwei konkurrierende Reporting-Line-Abschnitte je Agent, bei Developern
+ * zusaetzlich zwei Fassungen derselben Commit-Nachweis-Pflicht.
+ *
+ * Entfernt wird ausschliesslich der exakte, vom Plugin erzeugte Text. Eigene
+ * Anpassungen eines Betreibers bleiben unberuehrt.
+ */
+export function repairInstructionBundle(agentKey: TeamAgentKey, bundle: string): string {
+  let repaired = bundle;
+
+  const appendedReportingLine = REPORTING_LINE_INSTRUCTIONS[agentKey];
+  // Nur der Legacy-Marker beweist eine *ausgelieferte* Reporting-Line. Auf die
+  // Ueberschrift zu pruefen wuerde auch den selbst angehaengten Block treffen —
+  // die Reparatur nimmt dann zurueck, was die Ergaenzung zurecht gesetzt hat.
+  const hasShippedReportingLine = repaired.includes(LEGACY_REPORTING_LINE_MARKER);
+  if (hasShippedReportingLine && repaired.includes(appendedReportingLine)) {
+    repaired = removeBlock(repaired, appendedReportingLine);
+  }
+
+  const isDeveloper = agentKey === 'developer-1' || agentKey === 'developer-2';
+  const commitMentions = repaired.match(/agent-scrum:commit:v1/g)?.length ?? 0;
+  if (isDeveloper && commitMentions > 1 && repaired.includes(GITHUB_COMMIT_EVIDENCE)) {
+    repaired = removeBlock(repaired, GITHUB_COMMIT_EVIDENCE);
+  }
+
+  return repaired;
+}
+
+/** Schneidet einen Block samt seiner umgebenden Leerzeilen heraus. */
+function removeBlock(bundle: string, block: string): string {
+  return bundle.replace(block, '').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
+}
+
 /** Keeps existing customized instructions intact while adding the activation rule once. */
 export function heartbeatAwareInstructions(agentKey: TeamAgentKey, existing: string | null): string {
   const source = !existing || !existing.trim()
     ? MANAGED_AGENT_INSTRUCTIONS[agentKey]
-    : existing;
-  const withReportingLine = source.includes(REPORTING_LINE_MARKER)
+    : repairInstructionBundle(agentKey, existing);
+  const hasReportingLine =
+    source.includes(REPORTING_LINE_MARKER) ||
+    source.includes(LEGACY_REPORTING_LINE_MARKER) ||
+    /^##\s+Reporting[- ]line\s*$/im.test(source);
+  const withReportingLine = hasReportingLine
     ? source
     : `${source.trimEnd()}\n\n${REPORTING_LINE_INSTRUCTIONS[agentKey]}\n`;
   const withEventRouting = withReportingLine.includes(EVENT_ROUTING_MARKER)
@@ -146,9 +229,14 @@ export function heartbeatAwareInstructions(agentKey: TeamAgentKey, existing: str
     ? withScopeGuard
     : `${withScopeGuard.trimEnd()}\n\n${SPRINT_AUTONOMY}\n`;
 
+  // Die ausgelieferten Developer-Bundles fuehren dieselbe Regel bereits als
+  // "### GitHub Commit-Nachweis". Nur den Marker zu pruefen haengt sie ein
+  // zweites Mal an — mit abweichendem Wortlaut zur selben Pflicht.
+  const hasCommitEvidence =
+    withSprintAutonomy.includes(GITHUB_COMMIT_EVIDENCE_MARKER) ||
+    withSprintAutonomy.includes('agent-scrum:commit:v1');
   const withCommitEvidence =
-    (agentKey === 'developer-1' || agentKey === 'developer-2') &&
-    !withSprintAutonomy.includes(GITHUB_COMMIT_EVIDENCE_MARKER)
+    (agentKey === 'developer-1' || agentKey === 'developer-2') && !hasCommitEvidence
       ? `${withSprintAutonomy.trimEnd()}\n\n${GITHUB_COMMIT_EVIDENCE}\n`
       : withSprintAutonomy;
 
@@ -158,8 +246,14 @@ export function heartbeatAwareInstructions(agentKey: TeamAgentKey, existing: str
       ? `${withCommitEvidence.trimEnd()}\n\n${FEATURE_BRANCH_DELIVERY}\n`
       : withCommitEvidence;
 
-  if (agentKey !== 'qa-engineer' || withFeatureBranchDelivery.includes(QA_REWORK_HANDOFF_MARKER)) {
-    return withFeatureBranchDelivery;
+  const structuredInput = STRUCTURED_INPUT[agentKey];
+  const withStructuredInput =
+    structuredInput && !withFeatureBranchDelivery.includes(STRUCTURED_INPUT_MARKER)
+      ? `${withFeatureBranchDelivery.trimEnd()}\n\n${structuredInput}\n`
+      : withFeatureBranchDelivery;
+
+  if (agentKey !== 'qa-engineer' || withStructuredInput.includes(QA_REWORK_HANDOFF_MARKER)) {
+    return withStructuredInput;
   }
-  return `${withFeatureBranchDelivery.trimEnd()}\n\n${QA_REWORK_HANDOFF}\n`;
+  return `${withStructuredInput.trimEnd()}\n\n${QA_REWORK_HANDOFF}\n`;
 }

@@ -69,10 +69,13 @@ export function rankCandidates(
     })
     .filter((c) => c.load < wipLimit)
     .sort((a, b) => {
-      // Bester Skill-Match zuerst, bei Gleichstand die geringste Auslastung
+      // Bester Skill-Match zuerst, bei Gleichstand die geringste Auslastung.
       if (b.skillScore !== a.skillScore) return b.skillScore - a.skillScore;
-      if (a.load !== b.load) return a.load - b.load;
-      return a.agent.id.localeCompare(b.agent.id);
+      return a.load - b.load;
+      // Danach bewusst kein weiteres Kriterium: `sort` ist stabil, also bleibt
+      // die uebergebene Teamreihenfolge erhalten. Nach der UUID zu sortieren
+      // waere zwar deterministisch, aber sachlich willkuerlich — Developer 2
+      // ginge vor Developer 1, sobald sein Schluessel kleiner ist.
     });
 }
 

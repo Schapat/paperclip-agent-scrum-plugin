@@ -123,6 +123,7 @@ export function syncProjectOnboardingIssue(
         priority: hostFields.priority,
         assignedAgentId: hostFields.assignedAgentId,
         parentId: hostFields.parentId,
+        labels: hostFields.labels,
         createdAt: hostFields.createdAt,
         updatedAt: hostFields.updatedAt,
         startedAt: hostFields.startedAt,
@@ -181,6 +182,7 @@ export function projectIssueDetailTask(
     priority: fields.priority,
     assignedAgentId: fields.assignedAgentId,
     parentId: fields.parentId,
+    labels: fields.labels,
     storyPoints: fields.storyPoints,
     acceptanceCriteria: fields.acceptanceCriteria,
     technicalNotes: fields.technicalNotes,
@@ -221,6 +223,7 @@ interface HostTaskFields {
   technicalNotes: string | null;
   risks: ScrumTask['risks'];
   refined: boolean;
+  labels: string[];
   comments: ScrumTask['comments'];
   commits: ScrumTask['commits'];
   decisions: ScrumTask['decisions'];
@@ -258,6 +261,7 @@ function toHostFields(
     technicalNotes: projection.refinement.technicalNotes,
     risks: projection.refinement.risks,
     refined: projection.refinement.refined,
+    labels: projection.refinement.labels,
     comments: projection.comments,
     commits: projection.commits,
     decisions: projection.decisions,
@@ -280,6 +284,7 @@ function hasSameHostFields(task: ScrumTask, fields: HostTaskFields): boolean {
     task.storyPoints === fields.storyPoints &&
     task.technicalNotes === fields.technicalNotes &&
     task.refined === fields.refined &&
+    sameJson(task.labels, fields.labels) &&
     sameJson(task.acceptanceCriteria, fields.acceptanceCriteria) &&
     sameJson(task.risks, fields.risks) &&
     sameJson(task.comments, fields.comments) &&

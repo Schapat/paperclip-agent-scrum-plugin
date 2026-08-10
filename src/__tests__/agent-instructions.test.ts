@@ -6,9 +6,12 @@ import {
   GITHUB_COMMIT_EVIDENCE_MARKER,
   HEARTBEAT_QUEUE_MARKER,
   MANAGED_AGENT_INSTRUCTIONS,
+  LEGACY_REPORTING_LINE_MARKER,
+  REPORTING_LINE_INSTRUCTIONS,
   REPORTING_LINE_MARKER,
   SPRINT_AUTONOMY_MARKER,
   heartbeatAwareInstructions,
+  repairInstructionBundle,
 } from '../agent-instructions';
 
 describe('managed agent instruction upgrades', () => {
@@ -79,5 +82,84 @@ describe('managed agent instruction upgrades', () => {
     expect(developerInstructions).toContain('Einen Pull Request nur einmal fuer das gesamte Feature erstellen');
     expect(upgraded).toContain(FEATURE_BRANCH_DELIVERY_MARKER);
     expect(upgraded).toContain('Erstelle keinen Pull Request pro Ticket.');
+  });
+});
+/**
+ * Das Bundle darf nicht bei jedem Reconcile wachsen.
+ *
+ * Die ausgelieferten AGENTS.md tragen `scrum-team:reporting-line`, geprueft
+ * wurde `agent-scrum:reporting-line`. Die Pruefung schlug damit immer fehl und
+ * hat jedem Agenten bei jeder Reconciliation einen zweiten, konkurrierenden
+ * Reporting-Line-Abschnitt angehaengt.
+ */
+describe('managed instruction bundles are stable across reconciliations', () => {
+  const agentKeys = [
+    'product-owner',
+    'scrum-master',
+    'technical-lead',
+    'developer-1',
+    'developer-2',
+    'qa-engineer',
+  ] as const;
+
+  it('produces a byte-identical bundle on a second pass', () => {
+    for (const agentKey of agentKeys) {
+      const first = heartbeatAwareInstructions(agentKey, null);
+      const second = heartbeatAwareInstructions(agentKey, first);
+      expect(second, `${agentKey} bundle grew on the second reconcile`).toBe(first);
+    }
+  });
+
+  it('never adds a second reporting-line section to a shipped bundle', () => {
+    for (const agentKey of agentKeys) {
+      const bundle = heartbeatAwareInstructions(agentKey, MANAGED_AGENT_INSTRUCTIONS[agentKey]);
+      const reportingSections = bundle.match(/^##\s+Reporting[- ]line\s*$/gim) ?? [];
+      expect(reportingSections, `${agentKey} has duplicate reporting-line sections`).toHaveLength(1);
+    }
+  });
+
+  it('never restates the commit-evidence rule twice for a developer', () => {
+    for (const agentKey of ['developer-1', 'developer-2'] as const) {
+      const bundle = heartbeatAwareInstructions(agentKey, MANAGED_AGENT_INSTRUCTIONS[agentKey]);
+      const markerBlocks = bundle.match(/agent-scrum:commit:v1/g) ?? [];
+      expect(markerBlocks, `${agentKey} repeats the commit marker rule`).toHaveLength(1);
+    }
+  });
+});
+
+/**
+ * Bereits beschaedigte Bundles muessen heilen, nicht nur aufhoeren zu wachsen.
+ *
+ * Die fehlerhafte Marker-Pruefung lief ueber mehrere Reconciliations. Ein Fix,
+ * der nur weitere Duplikate verhindert, laesst die Agenten mit den bereits
+ * angehaengten, widersprechenden Abschnitten weiterarbeiten.
+ */
+describe('repairs bundles damaged by the earlier marker mismatch', () => {
+  function damage(agentKey: 'technical-lead' | 'developer-1'): string {
+    // Genau das, was die fehlerhafte Pruefung erzeugt hat: das ausgelieferte
+    // Bundle plus ein zweiter, angehaengter Reporting-Line-Abschnitt.
+    return `${MANAGED_AGENT_INSTRUCTIONS[agentKey].trimEnd()}\n\n${REPORTING_LINE_INSTRUCTIONS[agentKey]}\n`;
+  }
+
+  it('drops the appended reporting line and keeps the shipped one', () => {
+    const repaired = repairInstructionBundle('technical-lead', damage('technical-lead'));
+
+    expect(repaired.match(/^##\s+Reporting[- ]line\s*$/gim) ?? []).toHaveLength(1);
+    expect(repaired).toContain(LEGACY_REPORTING_LINE_MARKER);
+    expect(repaired).not.toContain(REPORTING_LINE_MARKER);
+  });
+
+  it('leaves an undamaged bundle byte-identical', () => {
+    const shipped = MANAGED_AGENT_INSTRUCTIONS['technical-lead'];
+    expect(repairInstructionBundle('technical-lead', shipped)).toBe(shipped);
+  });
+
+  it('heals a damaged bundle through the normal reconcile path', () => {
+    const healed = heartbeatAwareInstructions('developer-1', damage('developer-1'));
+
+    expect(healed.match(/^##\s+Reporting[- ]line\s*$/gim) ?? []).toHaveLength(1);
+    expect(healed.match(/agent-scrum:commit:v1/g) ?? []).toHaveLength(1);
+    // Und der zweite Durchlauf aendert nichts mehr.
+    expect(heartbeatAwareInstructions('developer-1', healed)).toBe(healed);
   });
 });

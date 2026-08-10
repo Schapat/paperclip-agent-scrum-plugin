@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 
-import type { ProjectOnboarding } from "../../core/types";
+import type { ProjectOnboarding, TicketStall } from "../../core/types";
 import type { ProjectProgress } from "../../core/project-issue-projection";
 import { describeProjectWorkflow, type ProjectWorkflowActivity } from "./project-workflow";
 
@@ -20,6 +20,8 @@ interface ProjectOnboardingPanelProps {
   progress: ProjectProgress;
   latestEventSummary: string | null;
   canStartSprint: boolean;
+  /** Tickets, die nachweislich stehen — speist die Begruendung im Header. */
+  stalls?: TicketStall[];
   scopeHoldBusyId: string | null;
   onStart: (input: {
     projectId: string;
@@ -45,6 +47,7 @@ export function ProjectOnboardingPanel({
   progress,
   latestEventSummary,
   canStartSprint,
+  stalls,
   scopeHoldBusyId,
   onStart,
   onActivate,
@@ -59,7 +62,10 @@ export function ProjectOnboardingPanel({
   const [skipSprintPlanning, setSkipSprintPlanning] = useState(false);
   const [startingNextProject, setStartingNextProject] = useState(false);
   const planningNextFeature = onboarding.status === "completed";
-  const workflow = describeProjectWorkflow(onboarding, progress);
+  const workflow = describeProjectWorkflow(onboarding, progress, {
+    stalls,
+    phaseSince: onboarding.updatedAt,
+  });
 
   function submitStart(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
