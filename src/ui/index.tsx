@@ -28,6 +28,7 @@ import type {
   CeremonyRecord,
   CeremonyType,
   ProjectOnboarding,
+  LiveAgentRun,
   TaskStatus,
   TicketStall,
 } from "../core/types";
@@ -37,7 +38,11 @@ import type { GitHubCommitChangesResult } from "../core/github-repository";
 import { KanbanBoard } from "./components/KanbanBoard";
 import { AgentLog } from "./components/AgentLog";
 import { TicketDetailPanel } from "./components/TicketDetailPanel";
-import { ProjectOnboardingPanel, type ProjectOption } from "./components/ProjectOnboardingPanel";
+import {
+  ProjectOnboardingPanel,
+  type DeliveryBranchOptions,
+  type ProjectOption,
+} from "./components/ProjectOnboardingPanel";
 import { AgentScrumStyleSheet } from "./styles";
 
 // ---------------------------------------------------------------------------
@@ -57,6 +62,11 @@ interface BoardData {
   projectProgress: ProjectProgress;
   /** Tickets, die nachweislich stehen — leer heisst: nichts blockiert. */
   stalls: TicketStall[];
+  /** Agent-Runs, die der Host als laufend meldet. */
+  liveRuns: LiveAgentRun[];
+  /** Konnte der Host ueberhaupt befragt werden? Sonst ist `liveRuns` keine Aussage. */
+  liveRunsKnown: boolean;
+  deliveryBranchOptions: DeliveryBranchOptions;
 }
 
 interface LogData {
@@ -290,10 +300,10 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
     }
   }, [activateProjectOnboarding, refreshOnboarding]);
 
-  const handleStartProjectSprint = useCallback(async () => {
+  const handleStartProjectSprint = useCallback(async (input: { deliveryBranch: string }) => {
     setOnboardingBusy(true);
     try {
-      const result = (await startProjectSprint({})) as { started?: boolean; error?: string };
+      const result = (await startProjectSprint(input)) as { started?: boolean; error?: string };
       if (!result?.started) setNotice(result?.error ?? "Sprint could not start");
       else setNotice(null);
       refreshOnboarding();
@@ -503,6 +513,8 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
         latestEventSummary={lastCeremony?.summary ?? null}
         canStartSprint={data.canStartProjectSprint}
         stalls={data.stalls}
+        agentRunning={data.liveRunsKnown ? (data.liveRuns ?? []).length > 0 : undefined}
+        branchOptions={data.deliveryBranchOptions}
         scopeHoldBusyId={scopeHoldBusyId}
         onStart={handleStartProjectOnboarding}
         onActivate={handleActivateProjectOnboarding}

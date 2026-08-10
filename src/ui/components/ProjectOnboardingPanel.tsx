@@ -45,7 +45,7 @@ interface ProjectOnboardingPanelProps {
     skipSprintPlanning: boolean;
   }) => Promise<void>;
   onActivate: () => Promise<void>;
-  onStartSprint: () => Promise<void>;
+  onStartSprint: (input: { deliveryBranch: string }) => Promise<void>;
   onApproveScopeHold: (issueId: string) => Promise<void>;
   onStartScopeHoldFollowUp: (issueId: string) => Promise<void>;
   onDismissScopeHold: (issueId: string) => Promise<void>;
@@ -63,6 +63,8 @@ export function ProjectOnboardingPanel({
   latestEventSummary,
   canStartSprint,
   stalls,
+  agentRunning,
+  branchOptions,
   scopeHoldBusyId,
   onStart,
   onActivate,
@@ -76,11 +78,22 @@ export function ProjectOnboardingPanel({
   const [constraints, setConstraints] = useState("");
   const [skipSprintPlanning, setSkipSprintPlanning] = useState(false);
   const [startingNextProject, setStartingNextProject] = useState(false);
+  // `null` heisst "der Human hat noch nicht angefasst" — dann gilt die
+  // gespeicherte Wahl, sonst der Vorschlag.
+  const [branchChoice, setBranchChoice] = useState<string | null>(null);
+  const [customBranch, setCustomBranch] = useState("");
   const planningNextFeature = onboarding.status === "completed";
   const workflow = describeProjectWorkflow(onboarding, progress, {
     stalls,
     phaseSince: onboarding.updatedAt,
+    agentRunning,
+    refinementWaits: onboarding.refinementWaits,
   });
+  const suggestedBranch = branchOptions?.suggestion ?? "";
+  const storedBranch = branchOptions?.selected ?? onboarding.deliveryBranch ?? null;
+  const selectedBranch = branchChoice ?? storedBranch ?? NEW_BRANCH_OPTION;
+  const deliveryBranch =
+    selectedBranch === NEW_BRANCH_OPTION ? customBranch.trim() || suggestedBranch : selectedBranch;
 
   function submitStart(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -174,7 +187,7 @@ export function ProjectOnboardingPanel({
           run: onActivate,
         }
       : onboarding.status === "sprint_planning"
-        ? { label: "Start first sprint", run: onStartSprint }
+        ? { label: "Start first sprint", run: () => onStartSprint({ deliveryBranch }) }
       : onboarding.status === "completed" && canStart
         ? { label: "Plan next feature", run: startNextFeature }
       : null;
@@ -194,7 +207,7 @@ export function ProjectOnboardingPanel({
   const actionReady = backlogInProgress
     ? progress.totalTasks > 0
     : onboarding.status === "sprint_planning"
-      ? canStartSprint
+      ? canStartSprint && deliveryBranch.length > 0
       : true;
   const actionBlockedReason = backlogInProgress
     ? "The Product Owner has not created any stories yet."
@@ -345,6 +358,18 @@ export function ProjectOnboardingPanel({
           </p>
         )}
 
+        {sprintPlanning && (
+          <DeliveryBranchPicker
+            busy={busy}
+            options={branchOptions}
+            selected={selectedBranch}
+            customBranch={customBranch}
+            suggestion={suggestedBranch}
+            onSelect={setBranchChoice}
+            onCustomChange={setCustomBranch}
+          />
+        )}
+
         {action && (
           <div className="project-onboarding-actions">
             <button
@@ -360,6 +385,76 @@ export function ProjectOnboardingPanel({
         )}
       </div>
     </section>
+  );
+}
+
+interface DeliveryBranchPickerProps {
+  busy: boolean;
+  options?: DeliveryBranchOptions;
+  selected: string;
+  customBranch: string;
+  suggestion: string;
+  onSelect: (value: string) => void;
+  onCustomChange: (value: string) => void;
+}
+
+/**
+ * Die Branchentscheidung des Humans, vor dem Sprintstart.
+ *
+ * Ohne sie erfindet jeder Developer-Run seinen eigenen Feature-Branch: die
+ * Tickets eines Sprints liegen dann auf mehreren Branches, und der
+ * abschliessende Pull Request findet seine Commits nicht wieder.
+ */
+function DeliveryBranchPicker({
+  busy,
+  options,
+  selected,
+  customBranch,
+  suggestion,
+  onSelect,
+  onCustomChange,
+}: DeliveryBranchPickerProps) {
+  const branches = options?.branches ?? [];
+  const creatingBranch = selected === NEW_BRANCH_OPTION;
+
+  return (
+    <div className="project-onboarding-branch">
+      <label className="project-onboarding-field">
+        <span>Delivery branch</span>
+        <select
+          value={selected}
+          onChange={(event) => onSelect(event.target.value)}
+          disabled={busy}
+        >
+          <option value={NEW_BRANCH_OPTION}>Create a new branch…</option>
+          {branches.map((branch) => (
+            <option key={branch} value={branch}>
+              {branch}
+              {branch === options?.defaultBranch ? " (default)" : ""}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {creatingBranch && (
+        <label className="project-onboarding-field">
+          <span>Branch name</span>
+          <input
+            type="text"
+            value={customBranch}
+            placeholder={suggestion}
+            onChange={(event) => onCustomChange(event.target.value)}
+            disabled={busy}
+          />
+        </label>
+      )}
+
+      <p className="project-onboarding-branch-note">
+        {options?.error
+          ? options.error
+          : "Every ticket of this sprint is delivered on this branch — one pull request for the whole sprint, not one per ticket."}
+      </p>
+    </div>
   );
 }
 

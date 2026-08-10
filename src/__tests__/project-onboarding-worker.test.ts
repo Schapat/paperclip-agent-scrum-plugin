@@ -944,17 +944,28 @@ describe('project onboarding worker actions', () => {
       started: boolean;
       sprint: { id: string; status: string; taskIds: string[] };
       projectOnboarding: ProjectOnboarding;
-    }>('startProjectSprint', {}, { companyId: COMPANY_ID });
+    }>(
+      'startProjectSprint',
+      { deliveryBranch: 'feature/image slider' },
+      { companyId: COMPANY_ID }
+    );
 
     expect(sprint).toMatchObject({
       started: true,
-      sprint: { status: 'active', taskIds: [child.id] },
-      projectOnboarding: { status: 'active' },
+      // Der Human waehlt den Branch; Git bekommt ihn in einer Form, die es nimmt.
+      sprint: { status: 'active', taskIds: [child.id], deliveryBranch: 'feature/image-slider' },
+      projectOnboarding: { status: 'active', deliveryBranch: 'feature/image-slider' },
     });
     expect(await sprintHarness.ctx.issues.get(child.id, COMPANY_ID)).toMatchObject({
       status: 'todo',
       assigneeAgentId: developer?.id,
     });
+    // Der Branch steht im Ticket, nicht nur im Board — der Agent liest das Ticket.
+    const assignmentComments = await sprintHarness.ctx.issues.listComments(child.id, COMPANY_ID);
+    expect(
+      assignmentComments.some((comment) => comment.body.includes('feature/image-slider')),
+      'the delivery branch reaches the developer through the ticket'
+    ).toBe(true);
   });
 
   it('returns a ready ticket wrongly blocked under the Technical Lead to backlog during sprint planning', async () => {
@@ -1509,6 +1520,12 @@ describe('project onboarding worker actions', () => {
       );
       children.push(issue);
     }
+
+    const wakeups: string[] = [];
+    vi.spyOn(batchHarness.ctx.issues, 'requestWakeup').mockImplementation(async (issueId) => {
+      wakeups.push(issueId as string);
+      return { queued: true, runId: 'run-1' };
+    });
     await batchHarness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
 
     const beforeBatch = await batchHarness.getData<BoardData>('board', { companyId: COMPANY_ID });
@@ -1586,6 +1603,92 @@ describe('project onboarding worker actions', () => {
         assigneeAgentId: null,
       });
     }
+    expect(wakeups.filter((issueId) => children.some((child) => child.id === issueId))).toEqual([
+      children[0].id,
+    ]);
+  });
+
+  it('requeues all remaining stories in one batch after a partial refinement', async () => {
+    const batchHarness = createTestHarness({ manifest, config: { enableTeam: true } });
+    batchHarness.seed({ projects: [project()], projectWorkspaces: [workspace()] });
+    await plugin.definition.setup(batchHarness.ctx);
+
+    const kickoff = await batchHarness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(batchHarness, kickoff.rootIssueId);
+    await batchHarness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+
+    const children: Array<{ id: string; title: string }> = [];
+    for (const title of ['Slider markup', 'Slider controls', 'Slider captions']) {
+      const issue = await batchHarness.ctx.issues.create({
+        companyId: COMPANY_ID,
+        projectId: PROJECT_ID,
+        parentId: kickoff.rootIssueId,
+        title,
+        status: 'backlog',
+      });
+      await batchHarness.emit(
+        'issue.created',
+        { issueId: issue.id },
+        { companyId: COMPANY_ID, entityId: issue.id, entityType: 'issue' }
+      );
+      children.push(issue);
+    }
+
+    const wakeups: string[] = [];
+    vi.spyOn(batchHarness.ctx.issues, 'requestWakeup').mockImplementation(async (issueId) => {
+      wakeups.push(issueId as string);
+      return { queued: true, runId: `run-${wakeups.length}` };
+    });
+
+    await batchHarness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+    const beforePartialResult = await batchHarness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const technicalLead = beforePartialResult.agents.find((agent) => agent.role === 'technical_lead');
+
+    await batchHarness.ctx.issues.update(
+      children[0].id,
+      { status: 'in_progress', assigneeAgentId: technicalLead?.id },
+      COMPANY_ID
+    );
+    await batchHarness.emit(
+      'issue.updated',
+      { issueId: children[0].id },
+      { companyId: COMPANY_ID, entityId: children[0].id, entityType: 'issue', actorId: technicalLead?.id }
+    );
+    const partialRefinement = await batchHarness.ctx.issues.createComment(
+      children[0].id,
+      `## Technical refinement\n\n<!-- ${REFINEMENT_MARKER} {"storyPoints":3,"acceptanceCriteria":["Slider markup is accessible"],"technicalNotes":null,"risks":[]} -->`,
+      COMPANY_ID,
+      { authorAgentId: technicalLead?.id }
+    );
+    await batchHarness.emit(
+      'issue.comment.created',
+      { issueId: children[0].id },
+      {
+        companyId: COMPANY_ID,
+        entityId: partialRefinement.id,
+        entityType: 'issue_comment',
+        actorId: technicalLead?.id,
+      }
+    );
+
+    expect(wakeups.filter((issueId) => children.some((child) => child.id === issueId))).toEqual([
+      children[0].id,
+      children[1].id,
+    ]);
+    await expect(batchHarness.ctx.issues.get(children[0].id, COMPANY_ID)).resolves.toMatchObject({
+      status: 'backlog',
+      assigneeAgentId: null,
+    });
+    await expect(batchHarness.ctx.issues.get(children[1].id, COMPANY_ID)).resolves.toMatchObject({
+      status: 'todo',
+      assigneeAgentId: technicalLead?.id,
+    });
+    const recoveryComments = await batchHarness.ctx.issues.listComments(children[1].id, COMPANY_ID);
+    expect(recoveryComments.at(-1)?.body).toContain(children[2].id);
   });
 
   it('includes unfinished previously requested stories in a recovery batch', async () => {
@@ -2259,6 +2362,23 @@ describe('project onboarding worker actions', () => {
 
     expect(wakeups, 'the blocked ticket must not be woken').not.toContain(dependent.id);
     expect(wakeups, 'the unblocked ticket still gets refined').toContain(blocker.id);
+
+    // Eine Schaetzung braucht den Blocker nicht. Das blockierte Ticket reist
+    // deshalb als Zusatzauftrag auf dem Weckruf des freien Tickets mit, statt
+    // bis zu dessen Abschluss ungeschaetzt liegen zu bleiben.
+    const carrierComments = await harness.ctx.issues.listComments(blocker.id, COMPANY_ID);
+    const carriedBrief = carrierComments.find((comment) =>
+      comment.body.includes('Refinement-Batch')
+    );
+    expect(carriedBrief?.body, 'the blocked ticket travels on the free ticket\'s brief').toContain(
+      dependent.id
+    );
+    expect(carriedBrief?.body).toContain('Translate the header');
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    expect(board.projectOnboarding.refinementWaits).toMatchObject([
+      { taskId: dependent.id, carriedBy: blocker.id },
+    ]);
   });
 
   it('routes project reviews to QA by default and to the Product Owner for an explicit decision', async () => {

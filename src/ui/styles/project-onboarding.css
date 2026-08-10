@@ -51,6 +51,7 @@
 }
 
 .project-onboarding-field select,
+.project-onboarding-field input,
 .project-onboarding-field textarea {
   width: 100%;
   border: 1px solid var(--color-surface);
@@ -60,9 +61,32 @@
   font: inherit;
 }
 
-.project-onboarding-field select {
+.project-onboarding-field select,
+.project-onboarding-field input {
   min-height: 36px;
   padding: 0 var(--spacing-sm);
+}
+
+/*
+  Die Branchwahl gehoert unmittelbar vor den Sprintstart: sie ist die letzte
+  Entscheidung, die der Human trifft, bevor die Agents liefern.
+*/
+.project-onboarding-branch {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm);
+  border: 1px solid var(--color-surface);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+}
+
+.project-onboarding-branch-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  line-height: 1.45;
 }
 
 .project-onboarding-field textarea {

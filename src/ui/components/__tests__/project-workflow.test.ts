@@ -124,3 +124,74 @@ describe('who holds the turn', () => {
     expect(workflow.detail).not.toContain('just now');
   });
 });
+
+/**
+ * Der Header behauptete "Technical Lead is refining backlog stories", waehrend
+ * der Technical Lead nachweislich untaetig war — die Aussage kam allein aus dem
+ * Phasenstatus. Ein laufender Agent ist eine Beobachtung, keine Ableitung.
+ */
+describe('claims about a working agent', () => {
+  const refining = { unrefinedTasks: 1 };
+
+  it('does not claim a running agent when the host reports no run', () => {
+    const workflow = describeProjectWorkflow(onboarding('sprint_planning'), refining, {
+      agentRunning: false,
+      phaseSince: '2026-08-10T16:24:00.000Z',
+      now: Date.parse('2026-08-10T16:47:00.000Z'),
+    });
+
+    expect(workflow.waitingOn).toBe('none');
+    expect(workflow.title).toContain('no agent run');
+    expect(workflow.detail).toContain('Waiting for 23 min');
+    expect(workflow.detail).not.toContain('Running for');
+  });
+
+  it('keeps the phase claim when the host cannot be asked', () => {
+    const workflow = describeProjectWorkflow(onboarding('sprint_planning'), refining, {
+      phaseSince: '2026-08-10T16:24:00.000Z',
+      now: Date.parse('2026-08-10T16:47:00.000Z'),
+    });
+
+    expect(workflow.waitingOn).toBe('agent');
+    expect(workflow.detail).toContain('Running for 23 min');
+  });
+
+  it('names the blocker instead of pretending someone is refining', () => {
+    const workflow = describeProjectWorkflow(onboarding('sprint_planning'), refining, {
+      agentRunning: false,
+      refinementWaits: [
+        {
+          taskId: 'task-18',
+          blockedBy: ['TESAA-17'],
+          carriedBy: null,
+          since: '2026-08-10T16:24:00.000Z',
+        },
+      ],
+      phaseSince: '2026-08-10T16:24:00.000Z',
+      now: Date.parse('2026-08-10T16:47:00.000Z'),
+    });
+
+    expect(workflow.title).toContain('queued');
+    expect(workflow.detail).toContain('blocked by TESAA-17');
+    // Warten auf eine Lieferreihenfolge ist erklaert — und damit kein Alarm.
+    expect(workflow.attentionRequired).toBe(false);
+  });
+
+  it('says when a blocked story rides along with the running refinement', () => {
+    const workflow = describeProjectWorkflow(onboarding('sprint_planning'), refining, {
+      agentRunning: true,
+      refinementWaits: [
+        {
+          taskId: 'task-18',
+          blockedBy: ['TESAA-17'],
+          carriedBy: 'task-17',
+          since: '2026-08-10T16:24:00.000Z',
+        },
+      ],
+      now: Date.parse('2026-08-10T16:47:00.000Z'),
+    });
+
+    expect(workflow.waitingOn).toBe('agent');
+    expect(workflow.detail).toContain('alongside the ticket it is working on');
+  });
+});

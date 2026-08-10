@@ -513,6 +513,15 @@ const plugin = definePlugin({
     let branchOptionsCache: { at: number; value: DeliveryBranchOptions } | null = null;
 
     /**
+     * Liefert der Host einen lesbaren Orchestrierungs-Snapshot?
+     *
+     * Der Unterschied zwischen "kein Lauf" und "keine Information" entscheidet,
+     * ob die Ansicht "no agent run" schreiben darf. Ohne ihn wuerde ein
+     * fehlendes Recht als untaetiger Agent erscheinen.
+     */
+    let orchestrationReadable = false;
+
+    /**
      * Liefert die waehlbaren Lieferbranches.
      *
      * Der GitHub-Aufruf haengt an einer Ansicht, die alle 20 Sekunden pollt —
@@ -1826,7 +1835,10 @@ const plugin = definePlugin({
 
       const candidates = new Set(refinementCandidates().map((task) => task.id));
       const requested = onboarding.refinementRequestedTaskIds ?? [];
-      const next = requested.filter((taskId) => candidates.has(taskId));
+      const restartRemainingBatch =
+        !refinementBatchSubmissionInFlight &&
+        requested.some((taskId) => state.tasks.some((task) => task.id === taskId && task.refined));
+      const next = restartRemainingBatch ? [] : requested.filter((taskId) => candidates.has(taskId));
       // Ein verfeinertes Ticket wartet auf nichts mehr. Ohne diese Bereinigung
       // meldete der Header die Wartelage weiter, obwohl die Schaetzung laengst
       // im Ticket steht.
@@ -1850,6 +1862,7 @@ const plugin = definePlugin({
     };
 
     let projectRefinementPromise: Promise<ProjectRefinementResult> | null = null;
+    let refinementBatchSubmissionInFlight = false;
     /**
      * True, solange die Refinement-Routine auf diesem Aufrufpfad laeuft.
      *
@@ -2323,6 +2336,8 @@ const plugin = definePlugin({
           companyId,
           includeSubtree: true,
         });
+        // Ab hier ist "kein laufender Run" eine Aussage und keine Luecke.
+        orchestrationReadable = true;
         const knownTaskIds = new Set(state.tasks.map((task) => task.id));
         const recoveryChanged = await recoverTimedOutAgentRuns(summary, knownTaskIds);
         // Der Kickoff ist kein Kanban-Ticket, traegt aber die Analyse- und
@@ -2363,6 +2378,7 @@ const plugin = definePlugin({
         // Fehlt die Capability oder antwortet der Host nicht, bleibt die
         // ereignisbasierte Erfassung die Grundlage. Das ist weniger, aber nicht
         // falsch — deshalb nur eine Warnung.
+        orchestrationReadable = false;
         ctx.logger.warn("Could not read host orchestration summary", { error: String(error) });
         return false;
       }
@@ -3454,6 +3470,7 @@ const plugin = definePlugin({
         projectProgress: projectProgress(projectTasks),
         stalls: state.stalls ?? [],
         liveRuns: state.liveRuns ?? [],
+        liveRunsKnown: orchestrationReadable,
         deliveryBranchOptions: await deliveryBranchOptions(),
       };
     });
@@ -4308,6 +4325,7 @@ const plugin = definePlugin({
           if (!auth.ok) return { error: auth.error };
         }
 
+        refinementBatchSubmissionInFlight = true;
         try {
           for (const entry of parsed.value.refinements) {
             await createIssueComment(
@@ -4318,14 +4336,31 @@ const plugin = definePlugin({
             );
             clearStall(entry.issueId);
           }
+
+          for (const entry of parsed.value.refinements) {
+            const issue = await ctx.issues.get(entry.issueId, runCtx.companyId);
+            if (!issue) throw new Error(`Could not load refined ticket ${entry.issueId}.`);
+
+            const returned = await returnRefinedTechnicalLeadIssueToBacklog(issue);
+            syncProjectOnboardingIssue(
+              state.tasks,
+              state.projectOnboarding,
+              await withHostComments(returned),
+              runCtx.agentId,
+              state.agents
+            );
+          }
+
+          reconcileProjectRefinementRequests();
+          await save();
+          return {
+            content: `Batch refinement recorded for ${parsed.value.refinements.length} tickets. Every ticket is now eligible for sprint planning.`,
+          };
         } catch (error) {
           return { error: `Could not record the refinement batch: ${String(error)}` };
+        } finally {
+          refinementBatchSubmissionInFlight = false;
         }
-
-        await save();
-        return {
-          content: `Batch refinement recorded for ${parsed.value.refinements.length} tickets. Every ticket is now eligible for sprint planning.`,
-        };
       }
     );
 
