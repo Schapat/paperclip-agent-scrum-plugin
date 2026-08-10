@@ -4,7 +4,9 @@ import {
   commitComment,
   qaVerdictComment,
   refinementComment,
+  reviewSubmissionComment,
   validateCommit,
+  validateReviewSubmission,
   validateQaVerdict,
   validateRefinement,
 } from '../agent-tools';
@@ -161,5 +163,65 @@ describe('commit tool input', () => {
 
     expect(projection.commits).toHaveLength(1);
     expect(projection.commits[0]).toMatchObject({ sha: 'a1b2c3d4e5f6' });
+  });
+});
+
+/**
+ * Die Uebergabe an QA.
+ *
+ * Ein Developer patchte den Status selbst nach `in_review`, der Host lehnte ab
+ * ("no review path"), und der Agent baute sich daraufhin eine Confirmation, die
+ * auf einen menschlichen Klick wartete statt auf QA. Das Ticket stand still,
+ * obwohl die Arbeit fertig war.
+ */
+describe('review submission tool input', () => {
+  it('requires a summary QA can act on', () => {
+    expect(validateReviewSubmission({})).toMatchObject({ ok: false });
+    expect(validateReviewSubmission({ summary: '   ' })).toMatchObject({ ok: false });
+  });
+
+  it('rejects a commit that does not match its own URL', () => {
+    expect(
+      validateReviewSubmission({
+        summary: 'Fixed the lint errors.',
+        commit: {
+          sha: 'a1b2c3d4e5f6',
+          url: 'https://github.com/example/site/commit/deadbeef',
+          message: 'fix: lint',
+        },
+      })
+    ).toMatchObject({ ok: false });
+  });
+
+  it('carries the commit evidence the done gate later demands', () => {
+    const parsed = validateReviewSubmission({
+      summary: 'Escaped the quotes and replaced img with Image.',
+      testNotes: 'Run npm run lint.',
+      commit: {
+        sha: '1e8e7490657ee5802eaaff9b9e9581c41a8055df',
+        url: 'https://github.com/Schapat/Wiebusch-Website/commit/1e8e7490657ee5802eaaff9b9e9581c41a8055df',
+        message: 'fix(lint): resolve ESLint errors',
+      },
+    });
+    if (!parsed.ok) throw new Error(parsed.error);
+
+    const projection = projectIssueProjection({
+      issueId: 'issue-1',
+      description: null,
+      comments: [comment(reviewSubmissionComment(parsed.value), DEVELOPER.id)],
+      agents: [DEVELOPER],
+    });
+
+    expect(projection.commits).toHaveLength(1);
+    expect(projection.commits[0].sha).toBe('1e8e7490657ee5802eaaff9b9e9581c41a8055df');
+  });
+
+  it('routes to the Product Owner only when a product decision is declared', () => {
+    const plain = validateReviewSubmission({ summary: 'Done.' });
+    const decision = validateReviewSubmission({ summary: 'Done.', productDecisionRequired: true });
+    if (!plain.ok || !decision.ok) throw new Error('expected both to validate');
+
+    expect(reviewSubmissionComment(plain.value)).not.toContain('po-decision-required');
+    expect(reviewSubmissionComment(decision.value)).toContain('po-decision-required');
   });
 });

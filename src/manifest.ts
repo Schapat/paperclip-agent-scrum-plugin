@@ -41,6 +41,9 @@ const manifest: PaperclipPluginManifestV1 = {
     // Der Kickoff-Teilbaum ist genau der Liefer-Scope. Ihn in einem Aufruf zu
     // lesen ersetzt ein projektweites Listing samt anschliessendem Filtern.
     "issue.subtree.read",
+    // Ein Ticket, das auf einen Board-Dialog wartet, ist sonst nicht von einem
+    // Ticket zu unterscheiden, das QA gerade prueft.
+    "issue.interactions.read",
     // Ein stehendes Ticket ist von einem laufenden nur unterscheidbar, wenn der
     // Host nach Runs, Freigaben und Budget-Sperren gefragt werden kann. Aus
     // Events allein laesst sich das nicht rekonstruieren: was waehrend eines
@@ -164,6 +167,39 @@ const manifest: PaperclipPluginManifestV1 = {
             },
           },
           notes: { type: "string", description: "What failed and what the developer should fix." },
+        },
+      },
+    },
+    {
+      name: "submit_for_review",
+      displayName: "Hand a ticket to QA",
+      description:
+        "Hand a finished ticket to QA: records the review summary and the delivered commit, moves the ticket to review, and assigns the QA Engineer. Use this instead of patching the issue status yourself — an agent-authored status change to in_review is rejected by the host, because it leaves nobody owning the next action. Only the assigned Developer may call it.",
+      parametersSchema: {
+        type: "object",
+        required: ["issueId", "summary"],
+        properties: {
+          issueId: { type: "string", description: "UUID of the finished ticket." },
+          summary: {
+            type: "string",
+            description: "What was implemented, per acceptance criterion.",
+          },
+          testNotes: { type: "string", description: "How QA should verify it." },
+          commit: {
+            type: "object",
+            description: "The pushed commit delivering this ticket. Required for GitHub-backed projects.",
+            required: ["sha", "url", "message"],
+            properties: {
+              sha: { type: "string" },
+              url: { type: "string" },
+              message: { type: "string" },
+            },
+          },
+          productDecisionRequired: {
+            type: "boolean",
+            description:
+              "Set only when a product decision blocks completion. Routes the review to the Product Owner instead of QA.",
+          },
         },
       },
     },

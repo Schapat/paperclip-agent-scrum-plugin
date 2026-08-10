@@ -13,11 +13,70 @@
  */
 
 import { COMMIT_MARKER, REFINEMENT_MARKER } from './project-issue-projection';
-import { QA_REVIEW_APPROVED_MARKER, QA_REVIEW_REJECTED_MARKER } from './review-routing';
+import {
+  PRODUCT_DECISION_REQUIRED_MARKER,
+  QA_REVIEW_APPROVED_MARKER,
+  QA_REVIEW_REJECTED_MARKER,
+} from './review-routing';
 
 export const SUBMIT_REFINEMENT_TOOL = 'submit_refinement';
 export const SUBMIT_QA_VERDICT_TOOL = 'submit_qa_verdict';
 export const RECORD_COMMIT_TOOL = 'record_commit';
+export const SUBMIT_FOR_REVIEW_TOOL = 'submit_for_review';
+
+export interface ReviewSubmissionInput {
+  summary: string;
+  commit: CommitInput | null;
+  testNotes: string | null;
+  productDecisionRequired: boolean;
+}
+
+/**
+ * Prueft eine Uebergabe an das Review.
+ *
+ * Der Commit-Nachweis ist Teil derselben Uebergabe, nicht ein zweiter Schritt:
+ * ein Ticket ohne ihn faellt in der Done-Pruefung ohnehin wieder zurueck.
+ */
+export function validateReviewSubmission(input: unknown): ToolValidation<ReviewSubmissionInput> {
+  const record = asRecord(input);
+  const summary = typeof record.summary === 'string' ? record.summary.trim() : '';
+  if (!summary) {
+    return { ok: false, error: 'summary must describe what was implemented.' };
+  }
+
+  let commit: CommitInput | null = null;
+  if (record.commit !== undefined && record.commit !== null) {
+    const parsed = validateCommit(record.commit);
+    if (!parsed.ok) return { ok: false, error: parsed.error };
+    commit = parsed.value;
+  }
+
+  return {
+    ok: true,
+    value: {
+      summary,
+      commit,
+      testNotes: typeof record.testNotes === 'string' && record.testNotes.trim()
+        ? record.testNotes.trim()
+        : null,
+      productDecisionRequired: record.productDecisionRequired === true,
+    },
+  };
+}
+
+/** Baut den Ready-for-Review-Kommentar samt Commit-Nachweis. */
+export function reviewSubmissionComment(input: ReviewSubmissionInput): string {
+  return [
+    '## Ready for Review',
+    input.summary,
+    input.testNotes ? `### Test notes for QA\n\n${input.testNotes}` : null,
+    input.commit ? `### Delivered commit\n\n\`${input.commit.sha}\` ${input.commit.message}` : null,
+    input.commit ? `<!-- ${COMMIT_MARKER} ${JSON.stringify(input.commit)} -->` : null,
+    input.productDecisionRequired ? PRODUCT_DECISION_REQUIRED_MARKER : null,
+  ]
+    .filter((part): part is string => Boolean(part))
+    .join('\n\n');
+}
 
 export interface RefinementInput {
   storyPoints: number;

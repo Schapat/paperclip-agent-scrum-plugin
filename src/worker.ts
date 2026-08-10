@@ -67,12 +67,15 @@ import {
 } from "./core/review-routing";
 import {
   RECORD_COMMIT_TOOL,
+  SUBMIT_FOR_REVIEW_TOOL,
   SUBMIT_QA_VERDICT_TOOL,
   SUBMIT_REFINEMENT_TOOL,
   commitComment,
   qaVerdictComment,
   refinementComment,
+  reviewSubmissionComment,
   validateCommit,
+  validateReviewSubmission,
   validateQaVerdict,
   validateRefinement,
 } from "./core/agent-tools";
@@ -2009,6 +2012,51 @@ const plugin = definePlugin({
     }
 
     /**
+     * Findet Tickets, die auf einen menschlichen Board-Dialog warten.
+     *
+     * Der Host verlangt fuer einen agentengeschriebenen Wechsel nach
+     * `in_review` einen Review-Pfad. Ein Agent, der sich selbst hilft, baut
+     * dafuer eine `request_confirmation` mit `board_only` — und das Ticket
+     * wartet danach auf einen Klick, den niemand erwartet. Der
+     * Orchestrierungs-Snapshot kennt Freigaben, aber keine Interactions;
+     * deshalb wird hier gezielt nachgesehen.
+     */
+    async function detectPendingInteractionStalls(): Promise<boolean> {
+      const rootIssueId = state.projectOnboarding?.rootIssueId;
+      if (!companyId || !rootIssueId) return false;
+
+      const reviewTasks = state.tasks.filter(
+        (task) => task.parentId === rootIssueId && task.column === "in_review"
+      );
+      if (reviewTasks.length === 0) return false;
+
+      let changed = false;
+      for (const task of reviewTasks) {
+        try {
+          const interactions = await ctx.issues.listInteractions(task.id, companyId);
+          const blocking = interactions.find(
+            (interaction) => (interaction as { status?: string }).status === "pending"
+          );
+          if (!blocking) continue;
+
+          recordStall(
+            task.id,
+            "A board confirmation is pending. QA cannot take this review until it is resolved.",
+            "awaiting_approval"
+          );
+          changed = true;
+        } catch (error) {
+          ctx.logger.warn("Could not inspect issue interactions", {
+            issueId: task.id,
+            error: String(error),
+          });
+          return changed;
+        }
+      }
+      return changed;
+    }
+
+    /**
      * Wann der teure Voll-Abgleich zuletzt lief.
      *
      * Das Board pollt alle paar Sekunden. Der Voll-Abgleich liest jedes Issue
@@ -2150,6 +2198,7 @@ const plugin = definePlugin({
       // Nur im Schreibfenster: die Abfrage kostet einen Host-Aufruf und der
       // Stillstandszustand aendert sich nicht im Sekundentakt.
       const stallsChanged = route ? await refreshOrchestrationStalls() : false;
+      const interactionStalls = route ? await detectPendingInteractionStalls() : false;
       const learned = route && !projectCompleted ? await maybeRunProjectRetrospective() : false;
       if (
         changed ||
@@ -2157,6 +2206,7 @@ const plugin = definePlugin({
         refinementRequestsChanged ||
         agentActivityChanged ||
         stallsChanged ||
+        interactionStalls ||
         learned
       ) {
         if (changed) state.metrics = recalculateMetrics(state);
@@ -3766,6 +3816,71 @@ const plugin = definePlugin({
           content: parsed.value.approved
             ? 'Approval recorded. Agent Scrum completes the ticket once commit evidence is present.'
             : 'Change request recorded. Agent Scrum returns the ticket to a developer.',
+        };
+      }
+    );
+
+    /**
+     * Uebergibt ein fertiges Ticket an QA — in einem Schritt.
+     *
+     * Der Host lehnt einen agentengeschriebenen Wechsel nach `in_review` ab:
+     * er liesse das Ticket ohne jemanden zurueck, der die naechste Handlung
+     * besitzt. Ein Developer hat sich daraufhin selbst eine
+     * `request_confirmation` gebaut — die auf einen *menschlichen* Klick
+     * wartet, nicht auf QA. Damit stand das Ticket still, obwohl alles fertig
+     * war.
+     *
+     * Das Plugin darf den Wechsel vornehmen, weil es dabei zugleich QA
+     * zuweist und weckt: die naechste Handlung hat einen Besitzer.
+     */
+    ctx.tools.register(
+      SUBMIT_FOR_REVIEW_TOOL,
+      {
+        displayName: 'Hand a ticket to QA',
+        description:
+          'Record the review summary and delivered commit, move the ticket to review, and assign QA.',
+        parametersSchema: toolSchema(SUBMIT_FOR_REVIEW_TOOL),
+      },
+      async (params, runCtx) => {
+        const record = params as Record<string, unknown>;
+        const auth = await authorizeToolCall(runCtx, record.issueId, 'developer');
+        if (!auth.ok) return { error: auth.error };
+
+        const parsed = validateReviewSubmission(record);
+        if (!parsed.ok) return { error: parsed.error };
+
+        const qa = state.agents.find((agent) => agent.role === 'qa_engineer');
+        const productOwner = state.agents.find((agent) => agent.role === 'product_owner');
+        const reviewer = parsed.value.productDecisionRequired ? productOwner : qa;
+        if (!reviewer) return { error: 'No reviewer is available for this project.' };
+
+        try {
+          await createIssueComment(
+            auth.issueId,
+            reviewSubmissionComment(parsed.value),
+            runCtx.companyId,
+            { authorAgentId: runCtx.agentId }
+          );
+          await ctx.issues.update(
+            auth.issueId,
+            { status: 'in_review', assigneeAgentId: reviewer.id },
+            runCtx.companyId
+          );
+        } catch (error) {
+          return { error: `Could not hand the ticket to review: ${String(error)}` };
+        }
+
+        await requestIssueWakeup(
+          auth.issueId,
+          parsed.value.productDecisionRequired
+            ? 'project_review_product_decision'
+            : 'project_review_qa'
+        );
+        clearStall(auth.issueId);
+        await save();
+
+        return {
+          content: `Ticket handed to ${reviewer.name}. Do not change the status yourself — Agent Scrum owns the review routing from here.`,
         };
       }
     );

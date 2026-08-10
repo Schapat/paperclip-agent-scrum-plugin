@@ -84,10 +84,22 @@ Gib dein Review-Ergebnis ueber \`submit_qa_verdict\` ab. Liste jedes Akzeptanzkr
 - Die handgeschriebene Checkliste mit dem QA-Freigabemarker bleibt gueltig, falls das Tool nicht verfuegbar ist.`,
   'developer-1': `${STRUCTURED_INPUT_MARKER}
 
-Melde deinen Liefer-Commit ueber \`record_commit\`, nachdem du auf den Feature-Branch gepusht hast. Das Tool prueft, dass SHA und GitHub-URL zusammenpassen; der handgeschriebene Commit-Nachweis aus dem Abschnitt oben bleibt als Rueckfallweg gueltig.`,
+**Uebergib ein fertiges Ticket ausschliesslich ueber \`submit_for_review\`.** Setze den Status nicht selbst: Ein agentengeschriebener Wechsel nach \`in_review\` wird vom Host abgelehnt, weil danach niemand die naechste Handlung besitzt. Baue dafuer auch keine eigene Confirmation — die wartet auf einen menschlichen Klick statt auf QA und legt das Ticket still.
+
+\`submit_for_review\` erledigt Review-Kommentar, Commit-Nachweis, Statuswechsel, QA-Zuweisung und Weckruf in einem Aufruf. Uebergib \`commit\` gleich mit; ein Ticket ohne Nachweis faellt in der Done-Pruefung ohnehin zurueck. \`record_commit\` bleibt fuer einen nachgereichten Commit.
+
+**Pruefe einmal, nicht fuenfmal.** Fuehre die im Ticket genannten Verify-Kommandos am Ende *einmal* aus und fange die Ausgabe vollstaendig ab (\`2>&1 | tail -40\`), statt denselben Lauf fuer Kopf und Ende zu wiederholen. Ein Lint- oder Build-Lauf kostet oft mehr Zeit als die Aenderung selbst.
+
+**Bleib im Ticket-Scope.** Ein Fehler, der laut Zuweisungskommentar zu einem anderen Ticket gehoert, wird nicht hier behoben und nicht hier diskutiert — nenne ihn einmal im Review-Kommentar.`,
   'developer-2': `${STRUCTURED_INPUT_MARKER}
 
-Melde deinen Liefer-Commit ueber \`record_commit\`, nachdem du auf den Feature-Branch gepusht hast. Das Tool prueft, dass SHA und GitHub-URL zusammenpassen; der handgeschriebene Commit-Nachweis aus dem Abschnitt oben bleibt als Rueckfallweg gueltig.`,
+**Uebergib ein fertiges Ticket ausschliesslich ueber \`submit_for_review\`.** Setze den Status nicht selbst: Ein agentengeschriebener Wechsel nach \`in_review\` wird vom Host abgelehnt, weil danach niemand die naechste Handlung besitzt. Baue dafuer auch keine eigene Confirmation — die wartet auf einen menschlichen Klick statt auf QA und legt das Ticket still.
+
+\`submit_for_review\` erledigt Review-Kommentar, Commit-Nachweis, Statuswechsel, QA-Zuweisung und Weckruf in einem Aufruf. Uebergib \`commit\` gleich mit; ein Ticket ohne Nachweis faellt in der Done-Pruefung ohnehin zurueck. \`record_commit\` bleibt fuer einen nachgereichten Commit.
+
+**Pruefe einmal, nicht fuenfmal.** Fuehre die im Ticket genannten Verify-Kommandos am Ende *einmal* aus und fange die Ausgabe vollstaendig ab (\`2>&1 | tail -40\`), statt denselben Lauf fuer Kopf und Ende zu wiederholen. Ein Lint- oder Build-Lauf kostet oft mehr Zeit als die Aenderung selbst.
+
+**Bleib im Ticket-Scope.** Ein Fehler, der laut Zuweisungskommentar zu einem anderen Ticket gehoert, wird nicht hier behoben und nicht hier diskutiert — nenne ihn einmal im Review-Kommentar.`,
   'product-owner': null,
   'scrum-master': null,
 };
