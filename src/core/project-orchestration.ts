@@ -124,13 +124,24 @@ export function stallsFromOrchestration(
  */
 export function mergeStalls(
   existing: readonly TicketStall[],
-  observed: readonly TicketStall[]
+  observed: readonly TicketStall[],
+  /**
+   * Tickets, die sich nachweislich bewegt haben.
+   *
+   * Ein erledigtes Ticket kann nicht stehen. Ohne diese Bereinigung meldete
+   * ein fertiges Projekt weiter "blocked — human approval required", weil der
+   * Stillstand von vorhin nie jemand zurueckgenommen hat.
+   */
+  settledTaskIds: ReadonlySet<string> = new Set()
 ): TicketStall[] {
   const hostOwned = new Set<TicketStall['kind']>(['run_failed', 'awaiting_approval', 'budget']);
   const observedIds = new Set(observed.map((stall) => stall.taskId));
 
   const kept = existing.filter(
-    (stall) => !hostOwned.has(stall.kind) && !observedIds.has(stall.taskId)
+    (stall) =>
+      !hostOwned.has(stall.kind) &&
+      !observedIds.has(stall.taskId) &&
+      !settledTaskIds.has(stall.taskId)
   );
-  return [...kept, ...observed];
+  return [...kept, ...observed.filter((stall) => !settledTaskIds.has(stall.taskId))];
 }

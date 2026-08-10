@@ -616,10 +616,16 @@ const plugin = definePlugin({
           idempotencyKey: `agent-scrum:${issueId}:${reason}:${attempt}`,
         });
         if (!wakeup.queued) {
-          // Ein nicht eingereihter Weckruf heisst: dieses Ticket bewegt sich
-          // nicht mehr. Das ist ein Stillstand, keine Randnotiz.
-          recordStall(issueId, `Wake-up "${reason}" was not queued by the host.`);
-          ctx.logger.error("Issue wake-up was not queued", { issueId, reason, attempt });
+          // `queued: false` heisst nicht "fehlgeschlagen". Der Host meldet es
+          // auch, wenn fuer dieses Issue bereits ein Lauf eingereiht ist — der
+          // haeufigste Fall, wenn der Worker kurz hintereinander weckt. Das als
+          // Stillstand zu melden hat gesunde Boards Sekunden nach dem Start als
+          // "blocked" ausgewiesen.
+          ctx.logger.info("Issue wake-up was not queued; a run is likely already pending", {
+            issueId,
+            reason,
+            attempt,
+          });
         } else {
           clearStall(issueId);
         }
@@ -2005,7 +2011,11 @@ const plugin = definePlugin({
           summary,
           new Set(state.tasks.map((task) => task.id))
         );
-        const merged = mergeStalls(state.stalls ?? [], observed);
+        // Erledigte und stornierte Tickets koennen nicht stehen.
+        const settled = new Set(
+          state.tasks.filter((task) => task.column === "done").map((task) => task.id)
+        );
+        const merged = mergeStalls(state.stalls ?? [], observed, settled);
         if (JSON.stringify(merged) === JSON.stringify(state.stalls ?? [])) return false;
 
         state.stalls = merged;
