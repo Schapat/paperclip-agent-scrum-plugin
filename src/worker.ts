@@ -2485,7 +2485,10 @@ const plugin = definePlugin({
         const refined = new Set(
           state.tasks.filter((task) => task.refined).map((task) => task.id)
         );
-        const merged = mergeStalls(state.stalls ?? [], observed, settled, refined);
+        const merged = mergeStalls(state.stalls ?? [], observed, settled, refined, {
+          issueId: rootIssueId,
+          phaseChangedAt: state.projectOnboarding?.updatedAt ?? new Date(0).toISOString(),
+        });
         annotateTimeoutRecoveryStalls(merged, summary, knownTaskIds);
         if (
           !recoveryChanged &&

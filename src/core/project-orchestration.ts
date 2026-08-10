@@ -205,7 +205,18 @@ export function mergeStalls(
    * Kommentar nachgereichter Marker laeuft nicht durch das Tool. Das Board
    * meldete danach "blocked" auf einem sprintreifen Backlog.
    */
-  refinedTaskIds: ReadonlySet<string> = new Set()
+  refinedTaskIds: ReadonlySet<string> = new Set(),
+  /**
+   * Der Kickoff und der Zeitpunkt seines letzten Phasenwechsels.
+   *
+   * Ein Stillstand am Kickoff — etwa ein Weckruf, der nicht eingereiht wurde —
+   * gehoert zu der Phase, in der er entstand. Ist die Phase weitergezogen,
+   * beschreibt er nichts mehr. Er kann sich aber auch nicht selbst
+   * zuruecknehmen: der Kickoff ist kein Kanban-Ticket und faellt damit aus
+   * jeder Ticket-Bereinigung heraus. Das Board meldete deshalb "blocked" wegen
+   * eines abgebrochenen Versuchs von vor acht Minuten.
+   */
+  kickoff: { issueId: string; phaseChangedAt: string } | null = null
 ): TicketStall[] {
   const hostOwned = new Set<TicketStall['kind']>([
     'run_failed',
@@ -219,7 +230,10 @@ export function mergeStalls(
   // erledigt, unabhaengig davon, auf welchem Weg sie kam.
   const obsolete = (stall: TicketStall) =>
     settledTaskIds.has(stall.taskId) ||
-    (stall.kind === 'refinement_invalid' && refinedTaskIds.has(stall.taskId));
+    (stall.kind === 'refinement_invalid' && refinedTaskIds.has(stall.taskId)) ||
+    (kickoff !== null &&
+      stall.taskId === kickoff.issueId &&
+      stall.detectedAt.localeCompare(kickoff.phaseChangedAt) < 0);
 
   const kept = existing.filter(
     (stall) => !hostOwned.has(stall.kind) && !observedIds.has(stall.taskId) && !obsolete(stall)

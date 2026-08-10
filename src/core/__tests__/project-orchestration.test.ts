@@ -138,3 +138,47 @@ describe('stalls that the board has outgrown', () => {
     expect(mergeStalls([], [approval], new Set(), new Set(['ticket-1']))).toEqual([approval]);
   });
 });
+
+/**
+ * Der Kickoff ist kein Kanban-Ticket und faellt damit aus jeder
+ * Ticket-Bereinigung heraus. Ein Weckruf-Fehler von vor zwei Phasen hielt das
+ * Board deshalb dauerhaft auf "blocked".
+ */
+describe('a stall on the kickoff issue', () => {
+  const failedWakeup = {
+    taskId: 'kickoff-1',
+    kind: 'wakeup_failed' as const,
+    reason: 'Wake-up "project_onboarding_sprint_planning" failed.',
+    detectedAt: '2026-08-10T12:00:00.000Z',
+    retriedAt: null,
+  };
+
+  it('is void once the workflow has moved on', () => {
+    expect(
+      mergeStalls([failedWakeup], [], new Set(), new Set(), {
+        issueId: 'kickoff-1',
+        phaseChangedAt: '2026-08-10T12:05:00.000Z',
+      })
+    ).toEqual([]);
+  });
+
+  it('stays while the phase is the one it was recorded in', () => {
+    expect(
+      mergeStalls([failedWakeup], [], new Set(), new Set(), {
+        issueId: 'kickoff-1',
+        phaseChangedAt: '2026-08-10T11:50:00.000Z',
+      })
+    ).toEqual([failedWakeup]);
+  });
+
+  it('leaves a ticket stall alone', () => {
+    const ticketStall = { ...failedWakeup, taskId: 'ticket-1' };
+
+    expect(
+      mergeStalls([ticketStall], [], new Set(), new Set(), {
+        issueId: 'kickoff-1',
+        phaseChangedAt: '2026-08-10T12:05:00.000Z',
+      })
+    ).toEqual([ticketStall]);
+  });
+});
