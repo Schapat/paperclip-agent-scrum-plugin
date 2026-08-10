@@ -2381,6 +2381,146 @@ describe('project onboarding worker actions', () => {
     ]);
   });
 
+  it('takes a delivery ticket back off the Scrum Master watchdog', async () => {
+    const kickoff = await startApprovedDelivery(harness);
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const scrumMaster = board.agents.find((agent) => agent.role === 'scrum_master');
+    const developer = board.agents.find((agent) => agent.role === 'developer');
+    const child = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Migrate the dev script to the webpack flag',
+      status: 'backlog',
+    });
+    await harness.emit(
+      'issue.created',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
+    );
+
+    // Der 30-Minuten-Watchdog checkt das Ticket aus und meldet es fertig.
+    await harness.ctx.issues.update(
+      child.id,
+      { status: 'done', assigneeAgentId: scrumMaster?.id },
+      COMPANY_ID
+    );
+    await harness.emit(
+      'issue.updated',
+      { issueId: child.id },
+      {
+        companyId: COMPANY_ID,
+        entityId: child.id,
+        entityType: 'issue',
+        actorId: scrumMaster?.id,
+      }
+    );
+
+    // Zurueck auf den zuletzt gespiegelten Stand — und ohne dass das
+    // Commit-Nachweis-Gate daraus einen Developer-Auftrag macht.
+    const after = await harness.ctx.issues.get(child.id, COMPANY_ID);
+    expect(after).toMatchObject({ status: 'backlog', assigneeAgentId: null });
+    expect(after?.assigneeAgentId).not.toBe(developer?.id);
+
+    const comments = await harness.ctx.issues.listComments(child.id, COMPANY_ID);
+    expect(
+      comments.some((comment) => comment.body.includes('The Scrum Master does not deliver')),
+      'the watchdog learns why its change was reverted'
+    ).toBe(true);
+  });
+
+  it('reverts a Scrum Master claim mid-sprint without losing the assigned developer', async () => {
+    const kickoff = await startApprovedDelivery(harness);
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const scrumMaster = board.agents.find((agent) => agent.role === 'scrum_master');
+    const developer = board.agents.find((agent) => agent.role === 'developer');
+    const child = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Build the header toggle',
+      status: 'in_progress',
+      assigneeAgentId: developer?.id,
+    });
+    await harness.emit(
+      'issue.created',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
+    );
+
+    await harness.ctx.issues.update(
+      child.id,
+      { status: 'in_review', assigneeAgentId: scrumMaster?.id },
+      COMPANY_ID
+    );
+    await harness.emit(
+      'issue.updated',
+      { issueId: child.id },
+      {
+        companyId: COMPANY_ID,
+        entityId: child.id,
+        entityType: 'issue',
+        actorId: scrumMaster?.id,
+      }
+    );
+
+    // Das Ticket gehoert weiter dem Developer, der es angefangen hat.
+    expect(await harness.ctx.issues.get(child.id, COMPANY_ID)).toMatchObject({
+      status: 'in_progress',
+      assigneeAgentId: developer?.id,
+    });
+  });
+
+  it('leaves a Scrum Master comment on a delivery ticket alone', async () => {
+    const kickoff = await startApprovedDelivery(harness);
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const scrumMaster = board.agents.find((agent) => agent.role === 'scrum_master');
+    const developer = board.agents.find((agent) => agent.role === 'developer');
+    const child = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Build the footer',
+      status: 'in_progress',
+      assigneeAgentId: developer?.id,
+    });
+    await harness.emit(
+      'issue.created',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
+    );
+
+    // Dokumentieren und eskalieren bleibt seine Aufgabe.
+    await harness.ctx.issues.createComment(
+      child.id,
+      'Impediment: the staging environment is down.',
+      COMPANY_ID,
+      { authorAgentId: scrumMaster?.id }
+    );
+    await harness.emit(
+      'issue.comment.created',
+      { issueId: child.id },
+      {
+        companyId: COMPANY_ID,
+        entityId: child.id,
+        entityType: 'issue',
+        actorId: scrumMaster?.id,
+      }
+    );
+
+    expect(await harness.ctx.issues.get(child.id, COMPANY_ID)).toMatchObject({
+      status: 'in_progress',
+      assigneeAgentId: developer?.id,
+    });
+    const comments = await harness.ctx.issues.listComments(child.id, COMPANY_ID);
+    expect(comments.some((comment) => comment.body.includes('The Scrum Master does not deliver'))).toBe(
+      false
+    );
+  });
+
   it('routes project reviews to QA by default and to the Product Owner for an explicit decision', async () => {
     const kickoff = await startApprovedDelivery(harness);
 

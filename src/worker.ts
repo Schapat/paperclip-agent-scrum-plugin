@@ -1557,15 +1557,94 @@ const plugin = definePlugin({
      * gestartet, die das Sprint-Gate verhindern sollte. Sie gilt jetzt nur noch
      * fuer freigegebene Lieferung; davor greift ausschliesslich die Rueckholung.
      */
+    /**
+     * Nimmt zurueck, was der Scrum Master an einem Lieferticket veraendert hat.
+     *
+     * Der Scrum Master ist der einzige zeitgesteuerte Watchdog: er laeuft alle
+     * 30 Minuten, auch wenn ihm nichts zugewiesen ist. Genau dabei hat er ein
+     * frisch verfeinertes Ticket ausgecheckt, implementiert und auf `done`
+     * gesetzt — waehrend das Board noch "Sprint planning" zeigte.
+     *
+     * Seine Instruktion verbietet das bereits ("beanspruche keine
+     * Delivery-Arbeit"), aber eine Prosaregel ist keine Durchsetzung. Der
+     * Rueckbau haengt deshalb am Urheber, nicht an der Phase: auch im laufenden
+     * Sprint gehoert ein Ticket dem zugewiesenen Developer, nicht dem
+     * Watchdog. Rueckfallpunkt ist der zuletzt gespiegelte Board-Zustand — er
+     * ist noch nicht ueberschrieben, weil die Spiegelung erst nach dem Routing
+     * laeuft.
+     */
+    async function revertScrumMasterDeliveryClaim(
+      issue: Issue,
+      actorId: string | null
+    ): Promise<Issue> {
+      if (!companyId || !isProjectOnboardingChildIssue(issue)) return issue;
+
+      const scrumMaster = state.agents.find((agent) => agent.role === "scrum_master");
+      if (!scrumMaster) return issue;
+
+      // Zwei Spuren: der Watchdog hat das Ticket geaendert, oder er steht als
+      // Bearbeiter darauf. Die zweite faengt auch den Fall ab, in dem der
+      // Worker das Ereignis verpasst hat und es erst beim Abgleich sieht.
+      const authored = actorId === scrumMaster.id;
+      const selfAssigned = issue.assigneeAgentId === scrumMaster.id;
+      if (!authored && !selfAssigned) return issue;
+
+      const known = state.tasks.find((task) => task.id === issue.id);
+      const previousColumn = known?.column ?? "backlog";
+      const previousAssignee =
+        known?.assignedAgentId && known.assignedAgentId !== scrumMaster.id
+          ? known.assignedAgentId
+          : null;
+      // Ein Kommentar des Scrum Masters ist erlaubt und aendert nichts.
+      if (issue.status === previousColumn && issue.assigneeAgentId === previousAssignee) {
+        return issue;
+      }
+
+      try {
+        const restored = await ctx.issues.update(
+          issue.id,
+          { status: previousColumn, assigneeAgentId: previousAssignee },
+          companyId
+        );
+        await postIssueNotice(
+          issue.id,
+          "scrum-master-delivery-claim",
+          [
+            "## The Scrum Master does not deliver",
+            `Agent Scrum reverted this ticket to \`${previousColumn}\`: the Scrum Master moved or claimed it, and the Scrum Master is a process watchdog, not a delivery role.`,
+            "Document the impediment, wake the responsible role, or escalate to the human — but do not take over a ticket.",
+          ].join("\n\n")
+        );
+        ctx.logger.warn("Reverted a Scrum Master delivery claim", {
+          issueId: issue.id,
+          claimedStatus: issue.status,
+          restoredStatus: previousColumn,
+          restoredAssignee: previousAssignee,
+        });
+        return restored;
+      } catch (error) {
+        ctx.logger.warn("Could not revert the Scrum Master delivery claim", {
+          issueId: issue.id,
+          error: String(error),
+        });
+        return issue;
+      }
+    }
+
     async function routeProjectIssue(issue: Issue, actorId: string | null): Promise<Issue> {
+      // Zuerst, in jeder Phase: der Watchdog liefert nicht. Stuende diese
+      // Pruefung weiter unten, haette das Commit-Nachweis-Gate den vom Scrum
+      // Master auf `done` gesetzten Ticket schon einen Developer zugewiesen.
+      const owned = await revertScrumMasterDeliveryClaim(issue, actorId);
+
       if (!canRouteDelivery(state.projectOnboarding)) {
         // Das Refinement laeuft auch vor dem Sprint — es ist die Vorbedingung
         // dafuer, dass der Human ihn ueberhaupt starten kann.
-        const refined = await returnRefinedTechnicalLeadIssueToBacklog(issue);
+        const refined = await returnRefinedTechnicalLeadIssueToBacklog(owned);
         return returnPreSprintDeliveryToBacklog(refined);
       }
 
-      let current = await routeProjectCompletionToQa(issue, actorId);
+      let current = await routeProjectCompletionToQa(owned, actorId);
       current = await completeFinalQaProjectReview(current);
       current = await routeProjectReworkToDeveloper(current);
       current = await returnRefinedTechnicalLeadIssueToBacklog(current);
