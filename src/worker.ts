@@ -1248,14 +1248,31 @@ const plugin = definePlugin({
     /** Restores ready work that was incorrectly assigned to the Technical Lead before sprint approval. */
     async function returnMisassignedSprintPlanningIssueToBacklog(issue: Issue): Promise<Issue> {
       const onboarding = state.projectOnboarding;
-      if (
-        !companyId ||
-        onboarding?.status !== "sprint_planning" ||
-        !isProjectOnboardingChildIssue(issue) ||
-        issue.status !== "blocked"
-      ) {
+      if (!companyId || onboarding?.status !== "sprint_planning" || !isProjectOnboardingChildIssue(issue)) {
         return issue;
       }
+
+      // Vor dem Sprintstart gehoert ein fertig verfeinertes Ticket ins Backlog.
+      // Ein herrenloses TODO waere hier doppelt falsch: die Sprint-Planung darf
+      // noch niemanden zuweisen, und die Uebernahme laeuft erst im aktiven
+      // Sprint — das Ticket bliebe also ohne Besitzer liegen.
+      if (issue.status === "todo" && issue.assigneeAgentId === null) {
+        try {
+          const returned = await ctx.issues.update(issue.id, { status: "backlog" }, companyId);
+          ctx.logger.info("Returned an unowned sprint-planning ticket to backlog", {
+            issueId: returned.id,
+          });
+          return returned;
+        } catch (error) {
+          ctx.logger.warn("Could not return an unowned sprint-planning ticket", {
+            issueId: issue.id,
+            error: String(error),
+          });
+          return issue;
+        }
+      }
+
+      if (issue.status !== "blocked") return issue;
 
       const technicalLead = state.agents.find((agent) => agent.role === "technical_lead");
       if (!technicalLead || issue.assigneeAgentId !== technicalLead.id) return issue;
@@ -1531,6 +1548,42 @@ const plugin = definePlugin({
       );
     }
 
+    /**
+     * Haelt Tickets zurueck, die der Host gar nicht wecken wuerde.
+     *
+     * Der Product Owner verknuepft Stories mit Abhaengigkeiten. Ein Weckruf auf
+     * ein blockiertes Issue lehnt der Host mit "Issue is blocked by unresolved
+     * blockers" ab — der Worker hat das als Stillstand vermerkt, das Ticket nie
+     * verfeinert, und damit blieb der Sprint dauerhaft nicht startbar. Die
+     * Abhaengigkeit ist aber kein Fehler, sondern eine Reihenfolge.
+     */
+    async function withoutBlockedCandidates(tasks: ScrumTask[]): Promise<ScrumTask[]> {
+      if (!companyId || tasks.length === 0) return tasks;
+
+      const open: ScrumTask[] = [];
+      for (const task of tasks) {
+        try {
+          const relations = await ctx.issues.relations.get(task.id, companyId);
+          const blocked = relations.blockedBy.some((blocker) => blocker.status !== "done");
+          if (blocked) {
+            // Auf eine Abhaengigkeit zu warten ist kein Stillstand, sondern
+            // Reihenfolge. Ein frueher vermerkter Weckruf-Fehler an diesem
+            // Ticket war genau dieser Fall und wird zurueckgenommen.
+            clearStall(task.id);
+            ctx.logger.info("Refinement deferred until blockers clear", { issueId: task.id });
+            continue;
+          }
+        } catch (error) {
+          ctx.logger.warn("Could not read blocker relations; refining anyway", {
+            issueId: task.id,
+            error: String(error),
+          });
+        }
+        open.push(task);
+      }
+      return open;
+    }
+
     function reconcileProjectRefinementRequests(): boolean {
       const onboarding = state.projectOnboarding;
       if (!onboarding) return false;
@@ -1646,7 +1699,7 @@ const plugin = definePlugin({
         };
       }
 
-      const candidates = refinementCandidates();
+      const candidates = await withoutBlockedCandidates(refinementCandidates());
 
       // Erschoepfte Tickets werden gemeldet, nicht verschwiegen. Der Technical
       // Lead liefert hier dauerhaft kein verwertbares Refinement; das ist eine

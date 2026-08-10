@@ -1761,6 +1761,57 @@ describe('project onboarding worker actions', () => {
     expect(adopted?.assigneeAgentId, 'an unassigned TODO must be adopted, not stepped over').not.toBeNull();
   });
 
+
+  /**
+   * Der Product Owner verknuepft Stories mit Abhaengigkeiten. Ein Weckruf auf
+   * ein blockiertes Issue lehnt der Host ab ("Issue is blocked by unresolved
+   * blockers"); der Worker vermerkte das als Stillstand, verfeinerte das Ticket
+   * nie und liess den Sprint dauerhaft nicht startbar werden.
+   */
+  it('defers refinement for a ticket that is blocked by another', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+
+    const blocker = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'i18n infrastructure',
+      status: 'backlog',
+    });
+    const dependent = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Translate the header',
+      status: 'backlog',
+    });
+    for (const issue of [blocker, dependent]) {
+      await harness.emit(
+        'issue.created',
+        { issueId: issue.id },
+        { companyId: COMPANY_ID, entityId: issue.id, entityType: 'issue' }
+      );
+    }
+    await harness.ctx.issues.relations.setBlockedBy(dependent.id, [blocker.id], COMPANY_ID);
+
+    const wakeups: string[] = [];
+    vi.spyOn(harness.ctx.issues, 'requestWakeup').mockImplementation(async (issueId) => {
+      wakeups.push(issueId as string);
+      return { queued: true, runId: 'run-1' };
+    });
+
+    await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+    expect(wakeups, 'the blocked ticket must not be woken').not.toContain(dependent.id);
+    expect(wakeups, 'the unblocked ticket still gets refined').toContain(blocker.id);
+  });
+
   it('routes project reviews to QA by default and to the Product Owner for an explicit decision', async () => {
     const kickoff = await harness.performAction<{ rootIssueId: string }>(
       'startProjectOnboarding',
