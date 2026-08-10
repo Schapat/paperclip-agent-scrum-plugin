@@ -62,6 +62,7 @@ interface BoardData {
   currentSprint: { id: string; status: string; taskIds: string[] } | null;
   canStartProjectOnboarding: boolean;
   canStartProjectSprint: boolean;
+  projectProgress: { unrefinedTasks: number; totalTasks: number };
   stalls: TicketStall[];
 }
 
@@ -1630,6 +1631,75 @@ describe('project onboarding worker actions', () => {
     const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
     expect(board.projectOnboarding.status).toBe('active');
     expect(board.ceremonies.some((ceremony) => ceremony.type === 'sprint_retrospective')).toBe(true);
+  });
+
+
+  /**
+   * Der Sprint darf erst startbar sein, wenn das technische Refinement fertig
+   * ist. Vorher genuegte eine einzelne fertige Story — der Knopf stand bereit,
+   * waehrend der Technical Lead noch an den uebrigen arbeitete.
+   */
+  it('offers the first sprint only once every story is refined', async () => {
+    // Eigener Harness: die Standard-Fixture liefert direkt aus, dieser Fall
+    // braucht die Sprint-Schranke.
+    const harness = createTestHarness({ manifest, config: { enableTeam: true } });
+    harness.seed({ projects: [project()], projectWorkspaces: [workspace()] });
+    await plugin.definition.setup(harness.ctx);
+
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+
+    const children = [];
+    for (const title of ['Slider markup', 'Slider controls']) {
+      const issue = await harness.ctx.issues.create({
+        companyId: COMPANY_ID,
+        projectId: PROJECT_ID,
+        parentId: kickoff.rootIssueId,
+        title,
+        status: 'backlog',
+      });
+      await harness.emit(
+        'issue.created',
+        { issueId: issue.id },
+        { companyId: COMPANY_ID, entityId: issue.id, entityType: 'issue' }
+      );
+      children.push(issue);
+    }
+    await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const technicalLead = board.agents.find((agent) => agent.role === 'technical_lead');
+
+    async function refine(issueId: string, points: number) {
+      const comment = await harness.ctx.issues.createComment(
+        issueId,
+        `<!-- ${REFINEMENT_MARKER} {"storyPoints":${points},"acceptanceCriteria":["Works"]} -->`,
+        COMPANY_ID,
+        { authorAgentId: technicalLead?.id }
+      );
+      await harness.emit(
+        'issue.comment.created',
+        { issueId },
+        { companyId: COMPANY_ID, entityId: comment.id, entityType: 'issue_comment' }
+      );
+    }
+
+    await refine(children[0].id, 3);
+    const halfway = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    expect(halfway.projectOnboarding.status).toBe('sprint_planning');
+    expect(halfway.projectProgress.unrefinedTasks).toBe(1);
+    expect(halfway.canStartProjectSprint).toBe(false);
+
+    await refine(children[1].id, 5);
+    const ready = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    expect(ready.projectOnboarding.status).toBe('sprint_planning');
+    expect(ready.projectProgress.unrefinedTasks).toBe(0);
+    expect(ready.canStartProjectSprint).toBe(true);
   });
 
   it('routes project reviews to QA by default and to the Product Owner for an explicit decision', async () => {

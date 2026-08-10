@@ -444,15 +444,27 @@ const plugin = definePlugin({
       });
     }
 
+    /**
+     * Darf der Mensch den ersten Sprint starten?
+     *
+     * Erst wenn das technische Refinement *abgeschlossen* ist — nicht schon,
+     * wenn eine einzelne Story fertig ist. Vorher genuegte ein `some()`: der
+     * Knopf stand bereit, waehrend der Technical Lead noch an den uebrigen
+     * Stories arbeitete, und ein Sprintstart haette sie ungeschaetzt
+     * zurueckgelassen.
+     */
     function canStartProjectSprint(): boolean {
       const onboarding = state.projectOnboarding;
-      return Boolean(
-        onboarding?.status === "sprint_planning" &&
-          onboarding.rootIssueId &&
-          state.tasks.some(
-            (task) => task.parentId === onboarding.rootIssueId && task.column === "backlog" && isReady(task)
-          )
+      if (onboarding?.status !== "sprint_planning" || !onboarding.rootIssueId) return false;
+
+      const projectTasks = state.tasks.filter((task) => task.parentId === onboarding.rootIssueId);
+      if (projectTasks.length === 0) return false;
+
+      const everythingRefined = projectTasks.every((task) => task.refined);
+      const hasPlannableWork = projectTasks.some(
+        (task) => task.column === "backlog" && isReady(task)
       );
+      return everythingRefined && hasPlannableWork;
     }
 
     /**

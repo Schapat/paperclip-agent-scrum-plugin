@@ -158,7 +158,7 @@ export function ProjectOnboardingPanel({
           label: onboarding.requiresSprint ? "Approve backlog for sprint planning" : "Approve backlog",
           run: onActivate,
         }
-      : onboarding.status === "sprint_planning" && canStartSprint
+      : onboarding.status === "sprint_planning"
         ? { label: "Start first sprint", run: onStartSprint }
       : onboarding.status === "completed" && canStart
         ? { label: "Plan next feature", run: startNextFeature }
@@ -166,6 +166,9 @@ export function ProjectOnboardingPanel({
   // Der stärkste Beleg dafuer, dass der Product Owner arbeitet, ist die Zahl
   // der Stories, die waehrenddessen entsteht — nicht ein Satz darueber.
   const backlogInProgress = onboarding.status === "backlog_in_progress";
+  // Der Sprint startet erst, wenn das Refinement fertig ist. Fehlt noch etwas,
+  // gehoert der Grund sichtbar hin — nicht ein fehlender Knopf.
+  const refinementPending = onboarding.status === "sprint_planning" && progress.unrefinedTasks > 0;
   const backlogProgressNote = backlogInProgress
     ? progress.totalTasks > 0
       ? `${progress.totalTasks} ${progress.totalTasks === 1 ? "story" : "stories"} created so far`
@@ -173,7 +176,18 @@ export function ProjectOnboardingPanel({
     : null;
   // Solange keine Story existiert, gibt es nichts zu genehmigen. Der Knopf war
   // trotzdem die auffaelligste Schaltflaeche der Ansicht.
-  const actionReady = !backlogInProgress || progress.totalTasks > 0;
+  const actionReady = backlogInProgress
+    ? progress.totalTasks > 0
+    : onboarding.status === "sprint_planning"
+      ? canStartSprint
+      : true;
+  const actionBlockedReason = backlogInProgress
+    ? "The Product Owner has not created any stories yet."
+    : refinementPending
+      ? `${progress.unrefinedTasks} ${progress.unrefinedTasks === 1 ? "story is" : "stories are"} still waiting for the Technical Lead's estimate and acceptance criteria.`
+      : onboarding.status === "sprint_planning" && !canStartSprint
+        ? "No refined backlog ticket is ready for the sprint yet."
+        : null;
   const analysisInProgress = onboarding.status === "analysis_in_progress";
   const analysisReady = onboarding.status === "analysis_ready";
   const sprintPlanning = onboarding.status === "sprint_planning";
@@ -217,11 +231,12 @@ export function ProjectOnboardingPanel({
           progressNote={backlogProgressNote}
         />
 
-        {workflow.waitingOn !== "agent" && (
-          <p className={`project-onboarding-stage is-${onboarding.status}`}>
-            {stageLabel(onboarding.status, hostControlled, workflow.phase)}
-          </p>
-        )}
+        {/*
+          Die Stage-Zeile wiederholte in jedem Zustand nur die Ueberschrift des
+          Trackers — und widersprach ihr, sobald beide unterschiedlich
+          herleiteten ("waits for human approval" waehrend der Technical Lead
+          noch verfeinerte). Der Tracker ist die einzige Quelle.
+        */}
 
         {progress.totalTasks > 0 && (
           <p className="project-onboarding-progress-summary">
@@ -322,7 +337,7 @@ export function ProjectOnboardingPanel({
               type="button"
               disabled={busy || !actionReady}
               onClick={() => void action.run()}
-              title={actionReady ? undefined : "The Product Owner has not created any stories yet."}
+              title={actionReady ? undefined : actionBlockedReason ?? undefined}
             >
               {busy ? "Working…" : action.label}
             </button>
@@ -396,32 +411,3 @@ function ProjectWorkflowTracker({
   );
 }
 
-function stageLabel(
-  status: ProjectOnboarding["status"],
-  hostControlled: boolean,
-  phase: ProjectWorkflowActivity["phase"],
-): string {
-  // Der Sprint-Planning-Status deckt zwei Lagen ab: der Technical Lead
-  // verfeinert noch, oder alles wartet auf eine Freigabe. Sie pauschal als
-  // Wartezustand zu beschriften widerspricht dem Tracker direkt darueber.
-  if (status === "sprint_planning" && phase === "technical_refinement") {
-    return "Technical Lead is refining the backlog";
-  }
-
-  switch (status) {
-    case "analysis_in_progress":
-      return "Technical analysis in progress";
-    case "analysis_ready":
-      return "Technical analysis ready for approval";
-    case "backlog_in_progress":
-      return "Product Owner is preparing the first backlog";
-    case "sprint_planning":
-      return "Sprint planning waits for human approval";
-    case "active":
-      return hostControlled ? "Paperclip delivery active" : "Delivery enabled";
-    case "completed":
-      return "Project request complete — ready for the next feature";
-    default:
-      return "Project request not started";
-  }
-}
