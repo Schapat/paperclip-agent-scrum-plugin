@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  BOUNDED_PROCESS_EXECUTION_MARKER,
   EVENT_ROUTING_MARKER,
   FEATURE_BRANCH_DELIVERY_MARKER,
   GITHUB_COMMIT_EVIDENCE_MARKER,
@@ -73,6 +74,16 @@ describe('managed agent instruction upgrades', () => {
     expect(heartbeatAwareInstructions('developer-1', upgraded)).toBe(upgraded);
   });
 
+  it('adds a bounded-process rule to existing developer instructions exactly once', () => {
+    const upgraded = heartbeatAwareInstructions('developer-1', '# Existing developer guidance\n');
+
+    expect(upgraded).toContain(BOUNDED_PROCESS_EXECUTION_MARKER);
+    expect(upgraded).toContain('Verwende keine Hintergrund- oder Jobsteuerung wie `&`, `$!`, `%1`');
+    expect(upgraded).toContain('`nohup`, `disown`, `setsid`, `screen` oder `tmux`');
+    expect(upgraded).toContain('`npm run dev`, `next dev`, `vite` oder einen anderen Dauerprozess');
+    expect(heartbeatAwareInstructions('developer-1', upgraded)).toBe(upgraded);
+  });
+
   it('uses one feature branch and one feature pull request instead of ticket pull requests', () => {
     const developerInstructions = MANAGED_AGENT_INSTRUCTIONS['developer-1'];
     const upgraded = heartbeatAwareInstructions('developer-1', '# Existing developer guidance\n');
@@ -106,6 +117,9 @@ describe('managed instruction bundles are stable across reconciliations', () => 
     for (const agentKey of agentKeys) {
       const first = heartbeatAwareInstructions(agentKey, null);
       const second = heartbeatAwareInstructions(agentKey, first);
+      expect(first, `${agentKey} is missing the bounded-process rule`).toContain(
+        BOUNDED_PROCESS_EXECUTION_MARKER
+      );
       expect(second, `${agentKey} bundle grew on the second reconcile`).toBe(first);
     }
   });

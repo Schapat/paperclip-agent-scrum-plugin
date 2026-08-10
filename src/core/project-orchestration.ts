@@ -16,8 +16,10 @@ import type { TicketStall } from './types';
 /** Die Teilmenge der Host-Orchestrierung, die das Board auswertet. */
 export interface OrchestrationSnapshot {
   runs: Array<{
+    id: string;
     issueId: string | null;
     status: string;
+    startedAt: string | null;
     error: string | null;
     finishedAt: string | null;
     createdAt: string;
@@ -46,6 +48,45 @@ export interface OrchestrationSnapshot {
 const DEAD_RUN_STATUSES = new Set(['failed', 'cancelled', 'error', 'timed_out']);
 /** Run-Zustaende, die bedeuten: es arbeitet noch jemand daran. */
 const LIVE_RUN_STATUSES = new Set(['queued', 'running', 'pending', 'in_progress']);
+/** Nach dieser Zeit braucht ein noch laufender Agent-Run Aufmerksamkeit. */
+export const LIVE_RUN_STALL_AFTER_MS = 10 * 60 * 1000;
+
+/**
+ * Liefert pro bekanntem Ticket nur den juengsten Host-Run.
+ *
+ * Aeltere Fehler duerfen ein zwischenzeitlich erfolgreiches oder erneut
+ * gestartetes Ticket nicht weiter als Stillstand erscheinen lassen.
+ */
+function latestRunsByIssue(
+  snapshot: OrchestrationSnapshot,
+  knownTaskIds: ReadonlySet<string>
+): Map<string, OrchestrationSnapshot['runs'][number]> {
+  const latestRuns = new Map<string, OrchestrationSnapshot['runs'][number]>();
+
+  for (const run of snapshot.runs) {
+    if (!run.issueId || !knownTaskIds.has(run.issueId)) continue;
+    const previous = latestRuns.get(run.issueId);
+    if (
+      !previous ||
+      previous.createdAt.localeCompare(run.createdAt) < 0 ||
+      (previous.createdAt === run.createdAt && previous.id.localeCompare(run.id) < 0)
+    ) {
+      latestRuns.set(run.issueId, run);
+    }
+  }
+
+  return latestRuns;
+}
+
+/** Liefert Timeouts, fuer die ein neuer, begrenzter Versuch sinnvoll ist. */
+export function timedOutRunsAwaitingRecovery(
+  snapshot: OrchestrationSnapshot,
+  knownTaskIds: ReadonlySet<string>
+): OrchestrationSnapshot['runs'] {
+  return [...latestRunsByIssue(snapshot, knownTaskIds).values()].filter(
+    (run) => run.status === 'timed_out'
+  );
+}
 
 /**
  * Leitet aus einem Host-Snapshot ab, welche Tickets stehen.
@@ -86,24 +127,28 @@ export function stallsFromOrchestration(
     );
   }
 
-  // Ein toter Run zaehlt nur, solange kein neuerer Run dasselbe Ticket wieder
-  // aufgenommen hat — sonst meldet das Board einen Fehler, der laengst
-  // wiederholt wurde.
-  const latestLiveRun = new Map<string, string>();
-  for (const run of snapshot.runs) {
-    if (!run.issueId || !LIVE_RUN_STATUSES.has(run.status)) continue;
-    const known = latestLiveRun.get(run.issueId);
-    if (!known || known.localeCompare(run.createdAt) < 0) latestLiveRun.set(run.issueId, run.createdAt);
+  const latestRuns = latestRunsByIssue(snapshot, knownTaskIds);
+  const nowMs = Date.parse(now);
+  if (Number.isFinite(nowMs)) {
+    for (const [issueId, run] of latestRuns) {
+      if (!LIVE_RUN_STATUSES.has(run.status)) continue;
+      const startedAtMs = Date.parse(run.startedAt ?? run.createdAt);
+      if (!Number.isFinite(startedAtMs) || nowMs - startedAtMs < LIVE_RUN_STALL_AFTER_MS) continue;
+
+      add(
+        issueId,
+        'run_stalled',
+        'The agent run exceeded its 10-minute execution budget without finishing.',
+        run.startedAt ?? run.createdAt
+      );
+    }
   }
 
-  for (const run of snapshot.runs) {
-    if (!run.issueId || !DEAD_RUN_STATUSES.has(run.status)) continue;
-
-    const revivedAt = latestLiveRun.get(run.issueId);
-    if (revivedAt && revivedAt.localeCompare(run.createdAt) > 0) continue;
+  for (const [issueId, run] of latestRuns) {
+    if (!DEAD_RUN_STATUSES.has(run.status)) continue;
 
     add(
-      run.issueId,
+      issueId,
       'run_failed',
       run.error
         ? `The agent run ended without a result: ${run.error}`
@@ -134,7 +179,12 @@ export function mergeStalls(
    */
   settledTaskIds: ReadonlySet<string> = new Set()
 ): TicketStall[] {
-  const hostOwned = new Set<TicketStall['kind']>(['run_failed', 'awaiting_approval', 'budget']);
+  const hostOwned = new Set<TicketStall['kind']>([
+    'run_failed',
+    'run_stalled',
+    'awaiting_approval',
+    'budget',
+  ]);
   const observedIds = new Set(observed.map((stall) => stall.taskId));
 
   const kept = existing.filter(

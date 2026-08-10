@@ -139,6 +139,33 @@ describe('project onboarding', () => {
     expect(migrateState({}).projectOnboarding?.status).toBe('active');
   });
 
+  it('preserves only valid timeout-recovery budgets across a worker restart', () => {
+    const migrated = migrateState(
+      {
+        timeoutRecoveries: {
+          'ticket-1': {
+            sourceRunId: 'run-timeout',
+            sourceRunCreatedAt: '2026-08-10T12:00:00.000Z',
+            attemptedAt: '2026-08-10T12:10:15.000Z',
+            queued: true,
+            recoveryRunId: 'run-recovery',
+          },
+          malformed: { sourceRunId: 'missing-required-fields' },
+        },
+      } as unknown as Parameters<typeof migrateState>[0]
+    );
+
+    expect(migrated.timeoutRecoveries).toEqual({
+      'ticket-1': {
+        sourceRunId: 'run-timeout',
+        sourceRunCreatedAt: '2026-08-10T12:00:00.000Z',
+        attemptedAt: '2026-08-10T12:10:15.000Z',
+        queued: true,
+        recoveryRunId: 'run-recovery',
+      },
+    });
+  });
+
   it('allows a new project request on a legacy board only when it is empty', () => {
     const legacy = migrateState({}).projectOnboarding;
 

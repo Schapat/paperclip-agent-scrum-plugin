@@ -536,6 +536,12 @@ export interface WorkerState {
    */
   agentInstructions: Record<string, string>;
   /**
+   * Der erste Timeout eines Tickets bekommt genau einen automatischen
+   * Wiederanlauf. Das Budget bleibt ueber Worker-Neustarts erhalten, damit ein
+   * wiederholt haengender Agent keine Endlosschleife ausloest.
+   */
+  timeoutRecoveries?: Record<string, TimeoutRecovery>;
+  /**
    * Tickets, die nachweislich stehen.
    *
    * Ein Ticket steht nicht, weil es lange dauert, sondern weil etwas
@@ -546,12 +552,27 @@ export interface WorkerState {
   stalls?: TicketStall[];
 }
 
+/** Persistierter Wiederanlauf nach einem nativen Adapter-Timeout. */
+export interface TimeoutRecovery {
+  sourceRunId: string;
+  sourceRunCreatedAt: string;
+  attemptedAt: string;
+  queued: boolean;
+  recoveryRunId: string | null;
+}
+
 /** Grund und Zeitpunkt, warum ein Ticket nicht weiterlaeuft. */
 export interface TicketStall {
   taskId: string;
   reason: string;
   /** Kategorie fuer die Board-Darstellung. */
-  kind: 'run_failed' | 'wakeup_failed' | 'awaiting_approval' | 'budget' | 'refinement_invalid';
+  kind:
+    | 'run_failed'
+    | 'run_stalled'
+    | 'wakeup_failed'
+    | 'awaiting_approval'
+    | 'budget'
+    | 'refinement_invalid';
   detectedAt: string;
   /** Gesetzt, sobald der Worker selbst einen Wiederanlauf versucht hat. */
   retriedAt?: string | null;

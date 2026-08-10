@@ -25,6 +25,7 @@ export const HUMAN_SCOPE_GUARD_MARKER = '## Human Scope Guard';
 export const SPRINT_AUTONOMY_MARKER = '## Approved Sprint Autonomy';
 export const GITHUB_COMMIT_EVIDENCE_MARKER = '## GitHub Commit Evidence';
 export const FEATURE_BRANCH_DELIVERY_MARKER = '## Feature Branch Delivery';
+export const BOUNDED_PROCESS_EXECUTION_MARKER = '## Bounded process execution';
 export const REPORTING_LINE_MARKER = '<!-- agent-scrum:reporting-line -->';
 export const STRUCTURED_INPUT_MARKER = '## Structured Input';
 /**
@@ -59,6 +60,17 @@ Für jedes projektgebundene Ticket mit GitHub-Repository muss der Ready-for-Revi
 <!-- agent-scrum:commit:v1 {"sha":"{full-sha}","url":"https://github.com/{owner}/{repo}/commit/{full-sha}","message":"{commit message}"} -->
 
 Ohne diesen Nachweis darf QA das Ticket nicht auf Done lassen.`;
+
+const BOUNDED_PROCESS_EXECUTION = `${BOUNDED_PROCESS_EXECUTION_MARKER}
+
+Ein Agent-Run darf keine langlebigen Prozesse hinterlassen oder auf deren
+manuellen Abbruch warten. Starte daher keinen Dev-Server, Watcher, Test-Watcher,
+Log-Follow oder vergleichbaren Dauerprozess direkt innerhalb eines Runs.
+
+- Verwende keine Hintergrund- oder Jobsteuerung wie \`&\`, \`$!\`, \`%1\`, \`jobs\`, \`nohup\`, \`disown\`, \`setsid\`, \`screen\` oder \`tmux\`. Auch \`sleep\` darf keinen Server nebenher betreiben oder ein Timeout nachbilden.
+- Nutze für die Verifikation zuerst einmalige Befehle wie Tests, Lint, Build oder einen vorhandenen Smoke-Test.
+- Ist ein Server-Smoketest zwingend nötig, darf er nur über einen Prozess-Supervisor laufen, der bei Ablauf einer festen Frist die gesamte Prozessgruppe terminiert und auf deren Ende wartet. Auf macOS ist \`timeout\` nicht standardmäßig verfügbar; setze seine Existenz nicht voraus.
+- Gibt es keinen nachweislich begrenzten Testweg, dokumentiere diese Verifikationsgrenze im Ticket, statt \`npm run dev\`, \`next dev\`, \`vite\` oder einen anderen Dauerprozess zu starten.`;
 
 /**
  * Der Tool-Weg je Rolle.
@@ -241,16 +253,20 @@ export function heartbeatAwareInstructions(agentKey: TeamAgentKey, existing: str
     ? withScopeGuard
     : `${withScopeGuard.trimEnd()}\n\n${SPRINT_AUTONOMY}\n`;
 
+  const withBoundedProcessExecution = withSprintAutonomy.includes(BOUNDED_PROCESS_EXECUTION_MARKER)
+    ? withSprintAutonomy
+    : `${withSprintAutonomy.trimEnd()}\n\n${BOUNDED_PROCESS_EXECUTION}\n`;
+
   // Die ausgelieferten Developer-Bundles fuehren dieselbe Regel bereits als
   // "### GitHub Commit-Nachweis". Nur den Marker zu pruefen haengt sie ein
   // zweites Mal an — mit abweichendem Wortlaut zur selben Pflicht.
   const hasCommitEvidence =
-    withSprintAutonomy.includes(GITHUB_COMMIT_EVIDENCE_MARKER) ||
-    withSprintAutonomy.includes('agent-scrum:commit:v1');
+    withBoundedProcessExecution.includes(GITHUB_COMMIT_EVIDENCE_MARKER) ||
+    withBoundedProcessExecution.includes('agent-scrum:commit:v1');
   const withCommitEvidence =
     (agentKey === 'developer-1' || agentKey === 'developer-2') && !hasCommitEvidence
-      ? `${withSprintAutonomy.trimEnd()}\n\n${GITHUB_COMMIT_EVIDENCE}\n`
-      : withSprintAutonomy;
+      ? `${withBoundedProcessExecution.trimEnd()}\n\n${GITHUB_COMMIT_EVIDENCE}\n`
+      : withBoundedProcessExecution;
 
   const withFeatureBranchDelivery =
     (agentKey === 'developer-1' || agentKey === 'developer-2' || agentKey === 'qa-engineer') &&

@@ -7,14 +7,41 @@
  * ersten Zeremonie-Lauf werfen.
  */
 
-import type { ProjectOnboarding, ScrumTask, WorkerState } from '../types';
+import type { ProjectOnboarding, ScrumTask, TimeoutRecovery, WorkerState } from '../types';
 import { normalizeScrumTask } from '../factories';
 import { createInitialProjectOnboarding } from '../project-onboarding';
 
 /**
  * Aktuelle Schema-Version des persistierten States.
  */
-export const STATE_SCHEMA_VERSION = 7;
+export const STATE_SCHEMA_VERSION = 8;
+
+function normalizeTimeoutRecoveries(value: unknown): Record<string, TimeoutRecovery> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {};
+
+  const recoveries: Record<string, TimeoutRecovery> = {};
+  for (const [taskId, candidate] of Object.entries(value)) {
+    if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) continue;
+    const recovery = candidate as Partial<TimeoutRecovery>;
+    if (
+      typeof recovery.sourceRunId !== 'string' ||
+      typeof recovery.sourceRunCreatedAt !== 'string' ||
+      typeof recovery.attemptedAt !== 'string' ||
+      typeof recovery.queued !== 'boolean'
+    ) {
+      continue;
+    }
+
+    recoveries[taskId] = {
+      sourceRunId: recovery.sourceRunId,
+      sourceRunCreatedAt: recovery.sourceRunCreatedAt,
+      attemptedAt: recovery.attemptedAt,
+      queued: recovery.queued,
+      recoveryRunId: typeof recovery.recoveryRunId === 'string' ? recovery.recoveryRunId : null,
+    };
+  }
+  return recoveries;
+}
 
 /**
  * Stellt einen geladenen State auf das aktuelle Schema um.
@@ -71,6 +98,7 @@ export function migrateState(raw: Partial<WorkerState>): Partial<WorkerState> {
     skills: raw.skills ?? [],
     proposedStories: raw.proposedStories ?? [],
     agentInstructions: raw.agentInstructions ?? {},
+    timeoutRecoveries: normalizeTimeoutRecoveries(raw.timeoutRecoveries),
   };
 }
 

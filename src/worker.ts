@@ -79,7 +79,12 @@ import {
   validateQaVerdict,
   validateRefinement,
 } from "./core/agent-tools";
-import { mergeStalls, stallsFromOrchestration } from "./core/project-orchestration";
+import {
+  mergeStalls,
+  stallsFromOrchestration,
+  timedOutRunsAwaitingRecovery,
+  type OrchestrationSnapshot,
+} from "./core/project-orchestration";
 import { migrateState } from "./core/storage";
 import { recalculateMetrics, createInitialMetrics, onStatusChange } from "./core/hooks";
 import { collectDecisions, recordDecision, sendMessage } from "./core/communication";
@@ -108,6 +113,7 @@ import {
   describeReportingLine,
   detectReportingDrift,
   expectedSuperiorId,
+  scrumRunTimeoutAdapterConfigPatch,
   withScrumHeartbeatRuntimeConfig,
   type ReportingDrift,
 } from "./team";
@@ -142,6 +148,7 @@ function createEmptyState(): WorkerState {
     skills: [],
     proposedStories: [],
     agentInstructions: {},
+    timeoutRecoveries: {},
     stalls: [],
   };
 }
@@ -2060,16 +2067,19 @@ const plugin = definePlugin({
           companyId,
           includeSubtree: true,
         });
+        const knownTaskIds = new Set(state.tasks.map((task) => task.id));
+        const recoveryChanged = await recoverTimedOutAgentRuns(summary, knownTaskIds);
         const observed = stallsFromOrchestration(
           summary,
-          new Set(state.tasks.map((task) => task.id))
+          knownTaskIds
         );
         // Erledigte und stornierte Tickets koennen nicht stehen.
         const settled = new Set(
           state.tasks.filter((task) => task.column === "done").map((task) => task.id)
         );
         const merged = mergeStalls(state.stalls ?? [], observed, settled);
-        if (JSON.stringify(merged) === JSON.stringify(state.stalls ?? [])) return false;
+        annotateTimeoutRecoveryStalls(merged, summary, knownTaskIds);
+        if (!recoveryChanged && JSON.stringify(merged) === JSON.stringify(state.stalls ?? [])) return false;
 
         state.stalls = merged;
         if (observed.length > 0) {
@@ -2085,6 +2095,84 @@ const plugin = definePlugin({
         // falsch — deshalb nur eine Warnung.
         ctx.logger.warn("Could not read host orchestration summary", { error: String(error) });
         return false;
+      }
+    }
+
+    /**
+     * Setzt nach einem nativen Adapter-Timeout genau einen ticketgebundenen
+     * Ersatzlauf ab. Ein Board-Cancel ist bewusst ausgeschlossen: Der Host
+     * behandelt ihn als menschlichen Stop und darf ihn nicht wieder aufnehmen.
+     */
+    async function recoverTimedOutAgentRuns(
+      summary: OrchestrationSnapshot,
+      knownTaskIds: ReadonlySet<string>
+    ): Promise<boolean> {
+      const recoveries = (state.timeoutRecoveries ??= {});
+      let changed = false;
+
+      for (const taskId of Object.keys(recoveries)) {
+        const recovery = recoveries[taskId];
+        const completed = summary.runs.some(
+          (run) =>
+            run.issueId === taskId &&
+            run.status === "succeeded" &&
+            run.createdAt.localeCompare(recovery.sourceRunCreatedAt) > 0
+        );
+        if (!knownTaskIds.has(taskId) || completed) {
+          delete recoveries[taskId];
+          changed = true;
+        }
+      }
+
+      for (const run of timedOutRunsAwaitingRecovery(summary, knownTaskIds)) {
+        if (!run.issueId || recoveries[run.issueId]) continue;
+
+        const attemptedAt = new Date().toISOString();
+        const wakeup = await requestIssueWakeup(run.issueId, "project_run_timeout_recovery");
+        recoveries[run.issueId] = {
+          sourceRunId: run.id,
+          sourceRunCreatedAt: run.createdAt,
+          attemptedAt,
+          queued: wakeup.queued,
+          recoveryRunId: wakeup.runId ?? null,
+        };
+        changed = true;
+        ctx.logger.warn("Recorded the single automatic recovery attempt after a managed run timeout", {
+          issueId: run.issueId,
+          sourceRunId: run.id,
+          queued: wakeup.queued,
+          recoveryRunId: wakeup.runId ?? null,
+        });
+      }
+
+      return changed;
+    }
+
+    /** Beschreibt Recovery-Status im Board, ohne sein dauerhaftes Budget dort zu speichern. */
+    function annotateTimeoutRecoveryStalls(
+      stalls: TicketStall[],
+      summary: OrchestrationSnapshot,
+      knownTaskIds: ReadonlySet<string>
+    ): void {
+      const timedOutRuns = new Map(
+        timedOutRunsAwaitingRecovery(summary, knownTaskIds)
+          .filter((run): run is typeof run & { issueId: string } => Boolean(run.issueId))
+          .map((run) => [run.issueId, run])
+      );
+
+      for (const stall of stalls) {
+        const recovery = state.timeoutRecoveries?.[stall.taskId];
+        const timedOutRun = timedOutRuns.get(stall.taskId);
+        if (!recovery || !timedOutRun || stall.kind !== "run_failed") continue;
+
+        stall.retriedAt = recovery.attemptedAt;
+        if (timedOutRun.id === recovery.sourceRunId) {
+          stall.reason = recovery.queued
+            ? "The managed run timed out. One controlled recovery run was queued."
+            : "The managed run timed out and its single recovery wake-up could not be queued.";
+        } else {
+          stall.reason = "The controlled recovery run also timed out. Automatic recovery is exhausted.";
+        }
       }
     }
 
@@ -2669,6 +2757,7 @@ const plugin = definePlugin({
       if (token) headers.authorization = `Bearer ${token}`;
 
       let heartbeatUpdates = 0;
+      let timeoutUpdates = 0;
       let instructionUpdates = 0;
       for (const member of TEAM) {
         const target = resolved.get(member.agentKey);
@@ -2683,7 +2772,27 @@ const plugin = definePlugin({
             });
             continue;
           }
-          const current = await currentResponse.json() as { runtimeConfig?: unknown };
+          const current = await currentResponse.json() as {
+            adapterType?: unknown;
+            adapterConfig?: unknown;
+            runtimeConfig?: unknown;
+          };
+          const adapterConfig = scrumRunTimeoutAdapterConfigPatch(asRecord(current.adapterConfig));
+          if (adapterConfig) {
+            const adapterResponse = await fetch(`${baseUrl}/api/agents/${target.agentId}`, {
+              method: "PATCH",
+              headers,
+              body: JSON.stringify({ adapterConfig }),
+            });
+            if (!adapterResponse.ok) {
+              ctx.logger.warn("Could not apply managed agent run timeout", {
+                agent: member.displayName,
+                status: adapterResponse.status,
+              });
+            } else {
+              timeoutUpdates += 1;
+            }
+          }
           const runtimeConfig = withScrumHeartbeatRuntimeConfig(
             member.agentKey,
             asRecord(current.runtimeConfig)
@@ -2737,9 +2846,10 @@ const plugin = definePlugin({
         }
       }
 
-      if (heartbeatUpdates > 0 || instructionUpdates > 0) {
+      if (heartbeatUpdates > 0 || timeoutUpdates > 0 || instructionUpdates > 0) {
         ctx.logger.info("Managed agent runtime policy applied", {
           heartbeatUpdates,
+          timeoutUpdates,
           instructionUpdates,
         });
       }
@@ -3012,6 +3122,7 @@ const plugin = definePlugin({
       if (!issueId || !state.stalls?.some((entry) => entry.taskId === issueId)) return;
 
       clearStall(issueId);
+      if (state.timeoutRecoveries?.[issueId]) delete state.timeoutRecoveries[issueId];
       await save();
     });
 

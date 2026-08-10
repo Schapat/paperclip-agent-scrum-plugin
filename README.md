@@ -54,7 +54,13 @@ the turn at each step:
 
 A failed agent run, a pending approval, a budget incident, an unreadable
 estimate — each is reported against the ticket it holds up, with how long it
-has been stuck. A ticket that is merely slow is not reported as stuck.
+has been stuck. Managed agent runs are bounded to ten minutes: the plugin
+prevents development servers and watchers in its managed instructions, and the
+host enforces the adapter wall-clock limit. For local process-backed adapters,
+the host terminates the whole process group after the grace period. One timed
+out ticket gets one controlled retry; a second timeout remains visible for a
+person instead of creating a retry loop. A board-initiated cancellation is
+always final and is never retried automatically.
 
 ![A blocked ticket](docs/media/05-blocked.png)
 
@@ -204,9 +210,12 @@ direction when the alternative is populating someone's company uninvited.
 New Scrum agents use the locally registered **Kiro CLI** adapter (`kiro_local`)
 with the `claude-opus-4.5` model. The Paperclip host therefore needs the
 `paperclip-kiro-adapter` installed and `kiro-cli` available and authenticated on
-its `PATH` before a team is activated. These are creation defaults: the plugin
-does not overwrite an existing agent's adapter or model during a later
-reconciliation.
+its `PATH` before a team is activated. Kiro and Claude Opus 4.5 are creation
+defaults, not a requirement for the run-safety policy. Every managed agent run
+receives a ten-minute wall-clock timeout and a 15-second graceful-stop window
+through the host's generic adapter configuration. The plugin reconciles these
+two timeout fields onto existing managed agents with a partial configuration
+patch; it does not replace their model, credentials, or other adapter settings.
 
 ### Plugin settings
 
@@ -780,11 +789,12 @@ Stated plainly, because the alternative is a README that lies:
   local tickets still live in plugin state. Direct child issues of a project
   kickoff are projected from Paperclip; their status, assignment, comments,
   decisions, refinement, and planning transitions are host-backed.
-- **Agent output is checked, not supervised.** The plugin now observes
-  `agent.run.failed`, `agent.run.cancelled`, `approval.created` and
-  `budget.incident.opened`, and reports the affected ticket as stalled on the
-  board. It cannot tell a *slow* agent from a productive one — only a run that
-  ended without a result from one that is still going.
+- **The plugin cannot intercept an individual Kiro shell-tool call.** The host
+  currently exposes no plugin hook that can reject a command before Kiro runs
+  it. Managed instructions explicitly prohibit development servers, watchers,
+  background jobs, and common detachment workarounds; the host-level timeout is
+  the hard fallback. A timeout receives one controlled retry, while an explicit
+  board cancellation remains final.
 - **Ceremony summaries and agent messages are in German.** The code, README and
   comments are English; the operational text the agents read is not yet.
 - **Hierarchy setup needs a reachable API.** The plugin sets the reporting line
@@ -800,10 +810,10 @@ Stated plainly, because the alternative is a README that lies:
   The board read is bounded — one issue listing plus one comment read per issue
   per request, with host writes throttled to at most once a minute — but that is
   a design bound, not a measurement.
-- **A stalled ticket is reported, not repaired.** Refinement retries itself up
-  to three times, then asks for a human decision. Every other stall kind
-  (failed run, waiting approval, budget incident) is surfaced on the board and
-  left to a person.
+- **Recovery stays deliberately bounded.** Refinement retries itself up to
+  three times. A managed Kiro timeout gets exactly one ticket-bound retry; a
+  second timeout, any other failed run, a pending approval, or a budget
+  incident is surfaced for a person instead of being retried indefinitely.
 
 ---
 

@@ -1,8 +1,18 @@
-import { createTestHarness, type PluginWorkspace, type Project } from '@paperclipai/plugin-sdk';
+import {
+  createTestHarness,
+  type PluginIssueOrchestrationSummary,
+  type PluginWorkspace,
+  type Project,
+} from '@paperclipai/plugin-sdk';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import manifest from '../manifest';
 import plugin from '../worker';
+import {
+  SCRUM_AGENT_RUN_GRACE_SEC,
+  SCRUM_AGENT_RUN_TIMEOUT_SEC,
+  TEAM,
+} from '../team';
 import {
   createInitialProjectOnboarding,
   TECHNICAL_ANALYSIS_CHANGES_REQUESTED_MARKER,
@@ -557,6 +567,147 @@ describe('project onboarding worker actions', () => {
         },
       },
     });
+  });
+
+  it('migrates timeout settings into existing managed agents without replacing their adapter configuration', async () => {
+    const migrationHarness = createTestHarness({
+      manifest,
+      config: { enableTeam: true, apiBaseUrl: 'http://paperclip.test' },
+    });
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+
+      if (/^http:\/\/paperclip\.test\/api\/agents\/[^/]+\/instructions-bundle\/file/.test(url)) {
+        return method === 'GET' ? jsonResponse({ content: null }) : jsonResponse({});
+      }
+      if (/^http:\/\/paperclip\.test\/api\/agents\/[^/]+$/.test(url)) {
+        return method === 'GET'
+          ? jsonResponse({
+              adapterType: 'claude_local',
+              adapterConfig: {
+                model: 'operator-selected-model',
+                env: { KIRO_API_KEY: '***REDACTED***' },
+              },
+              runtimeConfig: {},
+            })
+          : jsonResponse({});
+      }
+      throw new Error(`Unexpected managed-agent migration request: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await plugin.definition.setup(migrationHarness.ctx);
+    await migrationHarness.getData<BoardData>('board', { companyId: COMPANY_ID });
+
+    const adapterPatches = fetchMock.mock.calls
+      .filter(([input, init]) =>
+        /^http:\/\/paperclip\.test\/api\/agents\/[^/]+$/.test(String(input)) &&
+        init?.method === 'PATCH' &&
+        typeof init.body === 'string' &&
+        Object.prototype.hasOwnProperty.call(JSON.parse(init.body), 'adapterConfig')
+      )
+      .map(([, init]) => JSON.parse(String(init?.body)) as { adapterConfig: Record<string, unknown> });
+
+    expect(adapterPatches).toHaveLength(TEAM.length);
+    for (const patch of adapterPatches) {
+      expect(patch.adapterConfig).toEqual({
+        timeoutSec: SCRUM_AGENT_RUN_TIMEOUT_SEC,
+        graceSec: SCRUM_AGENT_RUN_GRACE_SEC,
+      });
+    }
+  });
+
+  it('queues exactly one controlled recovery after a managed run times out', async () => {
+    const guardHarness = createTestHarness({
+      manifest,
+      config: {
+        enableTeam: false,
+        apiBaseUrl: 'http://paperclip.test',
+      },
+    });
+    const rootIssueId = 'issue-kickoff';
+    const task = createScrumTask({
+      id: 'issue-ticket-1',
+      title: 'Bound the agent run',
+      description: 'Prevent indefinite process execution.',
+      column: 'in_progress',
+      parentId: rootIssueId,
+    });
+    await guardHarness.ctx.state.set(
+      { scopeKind: 'company', scopeId: COMPANY_ID, stateKey: 'board' },
+      {
+        projectOnboarding: onboardingFor(PROJECT_ID, 'BMW Website', rootIssueId),
+        tasks: [task],
+      }
+    );
+    await plugin.definition.setup(guardHarness.ctx);
+
+    // Bind the worker to this company without changing the stored board state.
+    await guardHarness.emit('agent.run.failed', { issueId: 'unrelated-issue' }, { companyId: COMPANY_ID });
+
+    const summary: PluginIssueOrchestrationSummary = {
+      issueId: rootIssueId,
+      companyId: COMPANY_ID,
+      subtreeIssueIds: [rootIssueId, task.id],
+      relations: {},
+      approvals: [],
+      runs: [
+        {
+          id: 'run-over-budget',
+          issueId: task.id,
+          agentId: 'agent-developer-1',
+          status: 'timed_out',
+          invocationSource: 'assignment',
+          triggerDetail: null,
+          startedAt: '2000-01-01T00:00:00.000Z',
+          finishedAt: '2000-01-01T00:10:15.000Z',
+          error: 'Timed out after 600s',
+          createdAt: '2000-01-01T00:00:00.000Z',
+        },
+      ],
+      costs: {
+        costCents: 0,
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        billingCode: null,
+      },
+      openBudgetIncidents: [],
+      invocationBlocks: [],
+    };
+    vi.spyOn(guardHarness.ctx.issues.summaries, 'getOrchestration').mockResolvedValue(summary);
+    const requestWakeupSpy = vi.spyOn(guardHarness.ctx.issues, 'requestWakeup');
+
+    await guardHarness.runJob('reconcile-stalled-work');
+    summary.runs = [
+      {
+        ...summary.runs[0],
+        id: 'run-recovery-timeout',
+        startedAt: '2000-01-01T00:11:00.000Z',
+        finishedAt: '2000-01-01T00:21:15.000Z',
+        createdAt: '2000-01-01T00:11:00.000Z',
+      },
+    ];
+    await guardHarness.runJob('reconcile-stalled-work');
+
+    expect(requestWakeupSpy).toHaveBeenCalledTimes(1);
+    expect(requestWakeupSpy).toHaveBeenCalledWith(
+      task.id,
+      COMPANY_ID,
+      expect.objectContaining({ reason: 'project_run_timeout_recovery' })
+    );
+    const stored = guardHarness.getState({ scopeKind: 'company', scopeId: COMPANY_ID, stateKey: 'board' }) as WorkerState;
+    expect(stored).toMatchObject({
+      timeoutRecoveries: {
+        [task.id]: expect.objectContaining({ sourceRunId: 'run-over-budget' }),
+      },
+    });
+    expect(stored.stalls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ taskId: task.id, kind: 'run_failed' }),
+      ])
+    );
   });
 
   it('publishes active retrospective skills to Paperclip and assigns them to matching agents', async () => {

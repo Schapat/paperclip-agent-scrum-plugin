@@ -58,3 +58,5 @@
 | FE-012 | Feature | Kiro CLI mit Claude Opus 4.5 als Standard fuer neue Scrum-Agenten und Reporting-Line explizit machen | Erledigt | 2026-08-10 |
 | OP-007 | Betrieb | Plugin-Bundle neu bauen und Kiro- sowie Reporting-Line-Aenderung nach main veroeffentlichen | Erledigt | 2026-08-10 |
 | OP-008 | Betrieb | Lokale Paperclip-Plugin-Installation auf Kiro- und Reporting-Line-Stand aktualisieren | Erledigt | 2026-08-10 |
+| DF-037 | Defekt | Langlebige Shell-Prozesse duerfen Agent-Runs nicht unbemerkt blockieren | Erledigt | 2026-08-10 |
+| DF-038 | Defekt | Run-Timeout darf nicht an den Kiro-Default gebunden sein | Erledigt | 2026-08-10 |
