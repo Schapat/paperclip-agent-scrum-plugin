@@ -54,9 +54,35 @@ export interface TeamMember {
 export const KIRO_CLI_ADAPTER_TYPE = "kiro_local";
 /** Model identifier accepted by Kiro CLI for Claude Opus 4.5. */
 export const KIRO_CLI_OPUS_45_MODEL = "claude-opus-4.5";
+/** Every managed run is forcibly bounded before it can hold a ticket indefinitely. */
+export const SCRUM_AGENT_RUN_TIMEOUT_SEC = 10 * 60;
+/** Give a graceful adapter shutdown a brief window before the host escalates it. */
+export const SCRUM_AGENT_RUN_GRACE_SEC = 15;
 export const KIRO_CLI_OPUS_45_ADAPTER_CONFIG: Record<string, unknown> = {
   model: KIRO_CLI_OPUS_45_MODEL,
+  timeoutSec: SCRUM_AGENT_RUN_TIMEOUT_SEC,
+  graceSec: SCRUM_AGENT_RUN_GRACE_SEC,
 };
+
+/**
+ * Builds the safe, partial adapter-config migration for existing managed agents.
+ *
+ * Paperclip merges this PATCH server-side, so secrets, model choices, and
+ * adapter-specific settings that a user already configured stay untouched.
+ */
+export function scrumRunTimeoutAdapterConfigPatch(
+  adapterConfig: Record<string, unknown> | null | undefined
+): Record<string, number> | null {
+  const current = adapterConfig ?? {};
+  const timeoutMatches = current.timeoutSec === SCRUM_AGENT_RUN_TIMEOUT_SEC;
+  const graceMatches = current.graceSec === SCRUM_AGENT_RUN_GRACE_SEC;
+  if (timeoutMatches && graceMatches) return null;
+
+  return {
+    timeoutSec: SCRUM_AGENT_RUN_TIMEOUT_SEC,
+    graceSec: SCRUM_AGENT_RUN_GRACE_SEC,
+  };
+}
 
 /**
  * The Scrum Master is the sole timer-driven watchdog. Event handling in the

@@ -41,7 +41,10 @@ export function describeStall(stall: TicketStall, now = Date.now()): string {
 
   switch (stall.kind) {
     case 'run_failed':
+      if (stall.retriedAt) return `${stall.reason}${suffix}`;
       return `An agent run did not finish${suffix}. Retry the ticket.`;
+    case 'run_stalled':
+      return `An agent run exceeded its execution budget${suffix}. Stop any server or watcher, then retry the ticket.`;
     case 'wakeup_failed':
       return `The responsible agent could not be woken${suffix}.`;
     case 'awaiting_approval':

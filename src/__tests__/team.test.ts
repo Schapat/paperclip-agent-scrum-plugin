@@ -12,11 +12,14 @@ import {
   KIRO_CLI_ADAPTER_TYPE,
   KIRO_CLI_OPUS_45_MODEL,
   SCRUM_MASTER_WATCHDOG_RUNTIME_CONFIG,
+  SCRUM_AGENT_RUN_GRACE_SEC,
+  SCRUM_AGENT_RUN_TIMEOUT_SEC,
   SCRUM_ON_DEMAND_RUNTIME_CONFIG,
   TEAM,
   describeReportingLine,
   detectReportingDrift,
   expectedSuperiorId,
+  scrumRunTimeoutAdapterConfigPatch,
   teamMember,
   withScrumHeartbeatRuntimeConfig,
   type TeamAgentKey,
@@ -36,9 +39,16 @@ describe("team definition", () => {
   });
 
   it("initializes every Scrum role with Kiro CLI and Claude Opus 4.5", () => {
+    expect(SCRUM_AGENT_RUN_TIMEOUT_SEC).toBe(10 * 60);
+    expect(SCRUM_AGENT_RUN_GRACE_SEC).toBe(15);
+
     for (const member of TEAM) {
       expect(member.adapterType).toBe(KIRO_CLI_ADAPTER_TYPE);
-      expect(member.adapterConfig).toEqual({ model: KIRO_CLI_OPUS_45_MODEL });
+      expect(member.adapterConfig).toEqual({
+        model: KIRO_CLI_OPUS_45_MODEL,
+        timeoutSec: SCRUM_AGENT_RUN_TIMEOUT_SEC,
+        graceSec: SCRUM_AGENT_RUN_GRACE_SEC,
+      });
     }
   });
 
@@ -48,7 +58,11 @@ describe("team definition", () => {
     expect(managedAgents).toHaveLength(TEAM.length);
     for (const agent of managedAgents) {
       expect(agent.adapterType).toBe(KIRO_CLI_ADAPTER_TYPE);
-      expect(agent.adapterConfig).toEqual({ model: KIRO_CLI_OPUS_45_MODEL });
+      expect(agent.adapterConfig).toEqual({
+        model: KIRO_CLI_OPUS_45_MODEL,
+        timeoutSec: SCRUM_AGENT_RUN_TIMEOUT_SEC,
+        graceSec: SCRUM_AGENT_RUN_GRACE_SEC,
+      });
     }
   });
 
@@ -123,6 +137,24 @@ describe("team definition", () => {
         cooldownSec: 30,
       },
     });
+  });
+
+  it("builds a partial managed-agent timeout patch without copying model or custom adapter fields", () => {
+    expect(
+      scrumRunTimeoutAdapterConfigPatch({
+        model: "operator-selected-model",
+        env: { KIRO_API_KEY: "***REDACTED***" },
+      })
+    ).toEqual({
+      timeoutSec: SCRUM_AGENT_RUN_TIMEOUT_SEC,
+      graceSec: SCRUM_AGENT_RUN_GRACE_SEC,
+    });
+    expect(
+      scrumRunTimeoutAdapterConfigPatch({
+        timeoutSec: SCRUM_AGENT_RUN_TIMEOUT_SEC,
+        graceSec: SCRUM_AGENT_RUN_GRACE_SEC,
+      })
+    ).toBeNull();
   });
 
   it("has developers report to the Technical Lead", () => {

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { createInitialProjectOnboarding } from '../../../core/project-onboarding';
 import type { ProjectOnboarding } from '../../../core/types';
-import { describeProjectWorkflow } from '../project-workflow';
+import { describeProjectWorkflow, describeStall } from '../project-workflow';
 
 function onboarding(status: ProjectOnboarding['status']): ProjectOnboarding {
   return {
@@ -90,6 +90,28 @@ describe('who holds the turn', () => {
 
     expect(workflow.waitingOn).toBe('human');
     expect(workflow.attentionRequired).toBe(true);
+  });
+
+  it('explains whether a timed-out run is already recovering or exhausted', () => {
+    expect(
+      describeStall({
+        taskId: 'task-1',
+        kind: 'run_failed',
+        reason: 'The managed run timed out. One controlled recovery run was queued.',
+        detectedAt: '2026-08-10T12:00:00.000Z',
+        retriedAt: '2026-08-10T12:10:15.000Z',
+      }, Date.parse('2026-08-10T12:11:00.000Z'))
+    ).toContain('One controlled recovery run was queued.');
+
+    expect(
+      describeStall({
+        taskId: 'task-1',
+        kind: 'run_failed',
+        reason: 'The controlled recovery run also timed out. Automatic recovery is exhausted.',
+        detectedAt: '2026-08-10T12:00:00.000Z',
+        retriedAt: '2026-08-10T12:20:15.000Z',
+      }, Date.parse('2026-08-10T12:21:00.000Z'))
+    ).toContain('Automatic recovery is exhausted.');
   });
 
   it('never phrases a fresh phase as "running for just now"', () => {

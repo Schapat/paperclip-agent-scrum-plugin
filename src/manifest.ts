@@ -235,8 +235,8 @@ const manifest: PaperclipPluginManifestV1 = {
       jobKey: "reconcile-stalled-work",
       displayName: "Detect stalled delivery",
       description:
-        "Reads the host's orchestration view and reports tickets whose agent run failed, whose approval is pending, or which a budget incident stopped.",
-      schedule: "*/10 * * * *",
+        "Reads the host's orchestration view, schedules one controlled retry after a managed timeout, and reports tickets whose delivery needs attention.",
+      schedule: "* * * * *",
     },
   ],
 
@@ -293,7 +293,7 @@ const manifest: PaperclipPluginManifestV1 = {
         default: "http://127.0.0.1:3100",
         title: "Paperclip API base URL",
         description:
-          "Used to maintain reporting lines, heartbeat configuration, and managed instructions for existing Scrum agents.",
+          "Used to maintain reporting lines, agent runtime settings, and instructions.",
       },
       apiToken: {
         type: "string",
