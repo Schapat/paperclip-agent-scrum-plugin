@@ -111,7 +111,7 @@ export function syncProjectOnboardingIssue(
     return { handled: true, changed: false, action: 'unchanged', taskId: issue.id };
   }
 
-  const hostFields = toHostFields(issue, agents);
+  const hostFields = toHostFields(issue, agents, onboarding.refinementVoidedCommentIds);
   if (existingIndex === -1) {
     tasks.push(
       createScrumTask({
@@ -243,7 +243,8 @@ interface HostTaskFields {
 
 function toHostFields(
   issue: ProjectIssueSnapshot,
-  agents: Array<Pick<ScrumAgent, 'id' | 'name' | 'role'>>
+  agents: Array<Pick<ScrumAgent, 'id' | 'name' | 'role'>>,
+  voidedRefinementCommentIds: readonly string[] = []
 ): HostTaskFields {
   if (issue.status === 'cancelled') {
     throw new Error('Cancelled issues cannot be materialized as Scrum tasks.');
@@ -254,6 +255,7 @@ function toHostFields(
     description: issue.description,
     comments: issue.comments ?? [],
     agents,
+    voidedRefinementCommentIds,
   });
 
   return {

@@ -476,3 +476,41 @@ button.project-onboarding-kickoff:focus-visible {
     animation: none;
   }
 }
+
+/*
+  Der Rueckweg im Ablauf steht unter den Vorwaerts-Aktionen und traegt eine
+  Warnfarbe: er beendet einen laufenden Sprint.
+*/
+.project-onboarding-reset {
+  display: grid;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm);
+  border: 1px dashed var(--color-surface);
+  border-radius: var(--radius-sm);
+}
+
+.project-onboarding-reset-note {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.project-onboarding-reset-note strong {
+  color: var(--color-text);
+}
+
+.project-onboarding-reset-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.project-onboarding-reset-confirm {
+  color: var(--color-text);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}

@@ -36,6 +36,7 @@ import type {
 import { createDefaultSettings } from "./core/types";
 import { createCeremonyRecord, createId, createScrumTask } from "./core/factories";
 import {
+  canResetProjectWorkflow,
   canStartNewProjectOnboarding,
   canRouteDelivery,
   canRunAutomaticDelivery,
@@ -47,10 +48,12 @@ import {
   isTechnicalAnalysisComplete,
   normalizeBranchName,
   parseProjectOnboardingInput,
+  resetProjectOnboarding,
   startProjectOnboarding,
   suggestDeliveryBranch,
   TECHNICAL_ANALYSIS_CHANGES_REQUESTED_MARKER,
   transitionProjectOnboarding,
+  type ProjectWorkflowResetTarget,
 } from "./core/project-onboarding";
 import {
   projectIssueDetailTask,
@@ -77,6 +80,13 @@ import {
   isPluginAuthoredNotice,
   reviewOwnerForProjectIssue,
 } from "./core/review-routing";
+import {
+  GET_WATCHDOG_AGENDA_TOOL,
+  SUBMIT_WATCHDOG_REPORT_TOOL,
+  validateWatchdogReport,
+  watchdogAgenda,
+  watchdogReportSummary,
+} from "./core/watchdog";
 import {
   RECORD_COMMIT_TOOL,
   SUBMIT_FOR_REVIEW_TOOL,
@@ -1155,6 +1165,7 @@ const plugin = definePlugin({
           description: issue.description ?? "",
           comments,
           agents: state.agents,
+          voidedRefinementCommentIds: state.projectOnboarding?.refinementVoidedCommentIds,
         });
         const commits = projection.commits;
         if (commits.length === 0) {
@@ -1285,6 +1296,7 @@ const plugin = definePlugin({
           description: issue.description ?? "",
           comments,
           agents: state.agents,
+          voidedRefinementCommentIds: state.projectOnboarding?.refinementVoidedCommentIds,
         });
         const hasCommitEvidence = projection.commits.length > 0;
         const criteriaVerified = projection.refinement.acceptanceCriteria.every((criterion) => criterion.met);
@@ -1442,6 +1454,7 @@ const plugin = definePlugin({
           description: issue.description ?? "",
           comments,
           agents: state.agents,
+          voidedRefinementCommentIds: state.projectOnboarding?.refinementVoidedCommentIds,
         });
         const refinement = projection.refinement;
         const readyForSprint =
@@ -1501,6 +1514,7 @@ const plugin = definePlugin({
           description: issue.description ?? "",
           comments,
           agents: state.agents,
+          voidedRefinementCommentIds: state.projectOnboarding?.refinementVoidedCommentIds,
         });
         if (!projection.refinement.refined) {
           // Ein vorhandener, aber unlesbarer Marker ist eine andere Lage als
@@ -3871,17 +3885,17 @@ const plugin = definePlugin({
         };
       }
 
-      // Der Branch ist eine Entscheidung des Humans, kein Vorschlag an die
-      // Agents: ohne ihn erfindet sich jeder Developer-Run seinen eigenen.
+      // Der Branch ist optional: waehlt der Human keinen, bleibt es beim
+      // bisherigen Verhalten des Teams. Waehlt er einen, gilt er fuer alle
+      // Tickets des Sprints. Was nicht passieren darf: dass das Board ihm
+      // ungefragt einen erfindet und die Agents auf einen Branch schickt, den
+      // niemand entschieden hat.
       const requestedBranch = params.deliveryBranch ?? onboarding.deliveryBranch ?? null;
-      if (requestedBranch !== null && !normalizeBranchName(requestedBranch)) {
+      const hasBranchRequest = typeof requestedBranch === "string" && requestedBranch.trim() !== "";
+      if (hasBranchRequest && !normalizeBranchName(requestedBranch)) {
         return { started: false, error: "That is not a usable Git branch name." };
       }
-      // Der Sprint scheitert nicht an einer fehlenden Angabe: die Ansicht waehlt
-      // den Vorschlag vor, ein Aufruf ohne Angabe bekommt ihn hier.
-      const deliveryBranch =
-        normalizeBranchName(requestedBranch) ??
-        suggestDeliveryBranch(onboarding, state.completedSprints.length + 1);
+      const deliveryBranch = hasBranchRequest ? normalizeBranchName(requestedBranch) : null;
 
       const sprint = createProjectSprint({
         onboarding: { ...onboarding, deliveryBranch },
@@ -3902,8 +3916,12 @@ const plugin = definePlugin({
           [
             `## ${sprint.name} started`,
             "The human approved the first sprint. Agent Scrum will plan refined backlog issues through the Paperclip workflow.",
-            `**Delivery branch:** \`${deliveryBranch}\` — every ticket of this sprint is delivered on this branch. Do not open a branch per ticket.`,
-          ].join("\n\n"),
+            deliveryBranch
+              ? `**Delivery branch:** \`${deliveryBranch}\` — every ticket of this sprint is delivered on this branch. Do not open a branch per ticket.`
+              : null,
+          ]
+            .filter((part): part is string => part !== null)
+            .join("\n\n"),
           companyId
         );
       } catch (error) {
@@ -3918,6 +3936,150 @@ const plugin = definePlugin({
         started: true,
         sprint: state.currentSprint,
         projectOnboarding: state.projectOnboarding,
+      };
+    });
+
+    /**
+     * Stellt den Projektablauf auf eine fruehere Stufe zurueck.
+     *
+     * Ein Sprint, der auf falschen Stories oder falschen Schaetzungen laeuft,
+     * war bisher nicht zurueckzuholen: die Statusuebergaenge laufen nur
+     * vorwaerts, und die alten Refinement-Marker haetten jede Story sofort
+     * wieder als sprintreif ausgewiesen. Der Reset raeumt beides — er beendet
+     * den Sprint, holt jedes Ticket unbesetzt ins Backlog und entwertet die
+     * bisherigen Schaetzungen ueber einen Zeitstempel, ohne einen einzigen
+     * Kommentar zu loeschen.
+     */
+    registerCompanyAction("resetProjectWorkflow", async (params) => {
+      if (!companyId) return { reset: false, error: "No company context." };
+
+      const target: ProjectWorkflowResetTarget =
+        params.target === "stories" ? "stories" : "refinement";
+      const onboarding = state.projectOnboarding;
+      if (!onboarding?.rootIssueId || !canResetProjectWorkflow(onboarding)) {
+        return {
+          reset: false,
+          error: "There is no running project workflow to reset.",
+        };
+      }
+      const rootIssueId = onboarding.rootIssueId;
+
+      await syncOnboardingProjectIssues();
+      const projectTasks = state.tasks.filter((task) => task.parentId === rootIssueId);
+      const returnedTaskIds: string[] = [];
+      // Genau der Kommentar, der die aktuelle Schaetzung traegt, wird entwertet
+      // — nicht ein Zeitfenster. Ein neuer Marker zaehlt dadurch sofort, auch
+      // wenn er in derselben Millisekunde entsteht.
+      const voidedCommentIds: string[] = [];
+      for (const task of projectTasks) {
+        try {
+          const comments = await readComments(task.id);
+          const sourceCommentId = projectIssueProjection({
+            issueId: task.id,
+            description: task.description,
+            comments,
+            agents: state.agents,
+            voidedRefinementCommentIds: onboarding.refinementVoidedCommentIds,
+          }).refinement.sourceCommentId;
+          if (sourceCommentId) voidedCommentIds.push(sourceCommentId);
+
+          const returned = await ctx.issues.update(
+            task.id,
+            { status: "backlog", assigneeAgentId: null },
+            companyId
+          );
+          syncProjectOnboardingIssue(state.tasks, onboarding, await withHostComments(returned), null, state.agents);
+          returnedTaskIds.push(task.id);
+        } catch (error) {
+          ctx.logger.warn("Could not return a project ticket during the workflow reset", {
+            issueId: task.id,
+            error: String(error),
+          });
+        }
+      }
+
+      // Ein abgebrochener Sprint ist kein abgeschlossener: er wandert nicht in
+      // die Historie, aus der die Velocity gerechnet wird.
+      const cancelledSprint = state.currentSprint?.name ?? null;
+      state.currentSprint = null;
+      state.projectOnboarding = resetProjectOnboarding(onboarding, target, voidedCommentIds);
+      for (const task of state.tasks) {
+        if (task.parentId !== rootIssueId) continue;
+        task.sprintId = null;
+        task.refined = false;
+        task.storyPoints = 0;
+        task.acceptanceCriteria = [];
+      }
+      state.metrics = recalculateMetrics(state);
+      state.ceremonies.push(
+        createCeremonyRecord(
+          "sprint_planning",
+          null,
+          target === "stories"
+            ? `Human reset the workflow to Product Owner story work for ${returnedTaskIds.length} ticket(s).`
+            : `Human reset the workflow to technical refinement for ${returnedTaskIds.length} ticket(s).`,
+          { taskIds: returnedTaskIds }
+        )
+      );
+      await save();
+
+      try {
+        await createIssueComment(
+          rootIssueId,
+          [
+            `## Workflow reset to ${target === "stories" ? "story work" : "technical refinement"}`,
+            cancelledSprint
+              ? `The human cancelled **${cancelledSprint}** and returned every ticket to the backlog.`
+              : "The human returned every ticket to the backlog.",
+            "Earlier estimates and acceptance criteria no longer count. The comments stay on the tickets as history; sprint planning waits for a fresh refinement.",
+            target === "stories"
+              ? "Product Owner: revise the stories first — split, drop, or rewrite them to match the current request."
+              : "Technical Lead: estimate the existing stories again.",
+          ].join("\n\n"),
+          companyId
+        );
+      } catch (error) {
+        ctx.logger.warn("Could not record the workflow reset", {
+          issueId: rootIssueId,
+          error: String(error),
+        });
+      }
+
+      // Die naechste Stufe faengt selbst wieder an zu laufen: Stories ueber den
+      // Product Owner, Schaetzungen ueber den Technical Lead.
+      let wakeup: { queued: boolean; error?: string | null } = { queued: false };
+      let refinement: ProjectRefinementResult | null = null;
+      if (target === "stories") {
+        const productOwner = state.agents.find((agent) => agent.role === "product_owner");
+        if (productOwner) {
+          await ctx.issues.update(
+            rootIssueId,
+            {
+              description: createBacklogDiscoveryPrompt(state.projectOnboarding),
+              status: "todo",
+              assigneeAgentId: productOwner.id,
+            },
+            companyId
+          );
+          wakeup = await requestIssueWakeup(rootIssueId, "project_onboarding_backlog_reset");
+        }
+      } else {
+        refinement = await requestProjectRefinement("automatic", true);
+      }
+
+      ctx.logger.info("Project workflow reset", {
+        target,
+        cancelledSprint,
+        taskIds: returnedTaskIds,
+      });
+      return {
+        reset: true,
+        target,
+        cancelledSprint,
+        taskIds: returnedTaskIds,
+        projectOnboarding: state.projectOnboarding,
+        wakeup,
+        refinement,
       };
     });
 
@@ -4326,6 +4488,126 @@ const plugin = definePlugin({
         .filter((task) => requested.has(task.id))
         .map((task) => task.id);
     }
+
+    /** Nur der Scrum Master fuehrt einen Watchdog-Lauf. */
+    function authorizeWatchdogCall(
+      runCtx: ToolRunContext
+    ): { ok: true } | { ok: false; error: string } {
+      const agent = state.agents.find((entry) => entry.id === runCtx.agentId);
+      if (!agent || agent.role !== 'scrum_master') {
+        return { ok: false, error: 'Only the Scrum Master may use this tool.' };
+      }
+      return { ok: true };
+    }
+
+    ctx.tools.register(
+      GET_WATCHDOG_AGENDA_TOOL,
+      {
+        displayName: 'Read the watchdog agenda',
+        description:
+          'Return the impediments a Scrum Master watchdog run has to look at. An empty agenda ends the run.',
+        parametersSchema: toolSchema(GET_WATCHDOG_AGENDA_TOOL),
+      },
+      async (_params, runCtx) => {
+        const auth = authorizeWatchdogCall(runCtx);
+        if (!auth.ok) return { error: auth.error };
+
+        const agenda = watchdogAgenda(state);
+        if (agenda.clear) {
+          return {
+            content: [
+              'Agenda: empty.',
+              `Nothing on this board is stuck (${agenda.checkedTasks} ticket(s) checked).`,
+              'Your run ends here. Call submit_watchdog_report with clear=true and stop. Do not look for other work.',
+            ].join('\n\n'),
+          };
+        }
+
+        const lines = agenda.items.map((item) => {
+          const label = item.identifier ?? item.taskId ?? 'board';
+          const title = item.title ? ` — ${item.title}` : '';
+          return `- [${item.kind}] ${label}${title}\n  ${item.detail}\n  Responsible: ${item.owner}${item.taskId ? `\n  taskId: ${item.taskId}` : ''}`;
+        });
+
+        return {
+          content: [
+            `Agenda: ${agenda.items.length} item(s).`,
+            lines.join('\n'),
+            'Read the named tickets, then call submit_watchdog_report exactly once with one finding per item. Do not change any ticket status or assignee, and do not implement anything — the board wakes the responsible role from your report.',
+          ].join('\n\n'),
+        };
+      }
+    );
+
+    ctx.tools.register(
+      SUBMIT_WATCHDOG_REPORT_TOOL,
+      {
+        displayName: 'Submit the watchdog report',
+        description:
+          'The single final act of a watchdog run: report impediments so the board can wake the responsible role.',
+        parametersSchema: toolSchema(SUBMIT_WATCHDOG_REPORT_TOOL),
+      },
+      async (params, runCtx) => {
+        const auth = authorizeWatchdogCall(runCtx);
+        if (!auth.ok) return { error: auth.error };
+
+        const parsed = validateWatchdogReport(params);
+        if (!parsed.ok) return { error: parsed.error };
+
+        const rootIssueId = state.projectOnboarding?.rootIssueId ?? null;
+        const findings = parsed.value.findings.filter(
+          (finding) =>
+            !finding.taskId ||
+            state.tasks.some((task) => task.id === finding.taskId && task.parentId === rootIssueId)
+        );
+
+        state.ceremonies.push(
+          createCeremonyRecord(
+            'impediment_resolution',
+            state.currentSprint?.id ?? null,
+            watchdogReportSummary({ ...parsed.value, findings }),
+            { taskIds: findings.flatMap((finding) => (finding.taskId ? [finding.taskId] : [])) }
+          )
+        );
+        await save();
+
+        // Wecken ist Sache des Boards: der Watchdog benennt nur, was steht. So
+        // bleibt die Zustaendigkeit dort, wo sie nachvollziehbar ist.
+        const woken: string[] = [];
+        for (const finding of findings) {
+          if (!finding.taskId) continue;
+          try {
+            await postIssueNotice(
+              finding.taskId,
+              'watchdog-finding',
+              [
+                '## Scrum Master watchdog',
+                finding.note,
+                'Reported by the process watchdog. The responsible role owns the next step; the watchdog does not take the ticket over.',
+              ].join('\n\n')
+            );
+            const wakeup = await requestIssueWakeup(finding.taskId, 'project_watchdog_finding');
+            if (wakeup.queued) woken.push(finding.taskId);
+          } catch (error) {
+            ctx.logger.warn('Could not act on a watchdog finding', {
+              issueId: finding.taskId,
+              error: String(error),
+            });
+          }
+        }
+
+        ctx.logger.info('Watchdog report recorded', {
+          clear: parsed.value.clear,
+          findings: findings.length,
+          woken: woken.length,
+        });
+        return {
+          content: parsed.value.clear
+            ? 'Report recorded: nothing is stuck. Your run is complete.'
+            : `Report recorded for ${findings.length} impediment(s); the board woke ${woken.length} responsible agent(s). Your run is complete.`,
+        };
+      }
+    );
 
     ctx.tools.register(
       SUBMIT_REFINEMENT_TOOL,

@@ -29,6 +29,7 @@ export const BOUNDED_PROCESS_EXECUTION_MARKER = '## Bounded process execution';
 export const REPORTING_LINE_MARKER = '<!-- agent-scrum:reporting-line -->';
 export const STRUCTURED_INPUT_MARKER = '## Structured Input';
 export const PROJECT_REFINEMENT_RUN_MARKER = '## Batch project refinement v4';
+export const WATCHDOG_PROTOCOL_MARKER = '## Watchdog protocol v1';
 /**
  * Fruehere Schreibweise desselben Markers.
  *
@@ -128,6 +129,31 @@ Diese Regel hat Vorrang vor allen frueheren Issue-bound-Refinement-Regeln und vo
 - Ohne Batch-Abschnitt verfeinerst du das direkt zugewiesene Ticket ueber \`submit_refinement\`.
 - Aendere weder Status noch Zuweisung; der Plugin-Worker fuehrt gueltig verfeinerte Tickets anschliessend ins Backlog zurueck.
 - Fuer andere, nicht im Batch genannte Tickets bleibt die Backlog-Pruefung unveraendert.`;
+
+/**
+ * Der Watchdog-Lauf als Auftrag statt als offenes Board.
+ *
+ * Ein Verbotssatz allein hat nicht gereicht: der zeitgesteuerte Lauf hat sich
+ * ein Ticket gegriffen, es implementiert und auf `done` gesetzt. Ein Agent, der
+ * alle 30 Minuten garantiert startet und nichts zugewiesen bekommt, braucht
+ * eine Aufgabe mit Anfang und Ende — sonst sucht er sich eine.
+ */
+const WATCHDOG_PROTOCOL = `${WATCHDOG_PROTOCOL_MARKER}
+
+Diese Regel hat Vorrang vor allen frueheren Anweisungen zu Timer-Laeufen und Board-Pruefungen.
+
+Ein zeitgesteuerter Lauf besteht aus genau drei Schritten:
+
+1. Rufe \`get_watchdog_agenda\` auf. Die Agenda ist dein vollstaendiger Auftrag — was nicht darin steht, ist nicht deine Aufgabe.
+2. Ist die Agenda leer: rufe \`submit_watchdog_report\` mit \`clear: true\` auf und beende den Lauf. Suche keine Ersatzarbeit.
+3. Andernfalls lies die genannten Tickets und rufe \`submit_watchdog_report\` genau einmal auf — ein Befund je Agenda-Punkt, jeder mit einem Satz, was zu tun ist und von wem.
+
+Verbindliche Grenzen fuer jeden Lauf:
+
+- Du aenderst an keinem Ticket Status oder Zuweisung. Ein solcher Wechsel wird vom Board zurueckgenommen, und dein Lauf war umsonst.
+- Du implementierst nichts, checkst nichts aus und schreibst keinen Code — auch nicht "schnell", auch nicht, wenn ein Ticket fertig verfeinert dasteht und niemand daran arbeitet.
+- Das Wecken der zustaendigen Rolle uebernimmt das Board aus deinem Bericht. Du benennst, wer dran ist; du uebernimmst nicht.
+- Nach \`submit_watchdog_report\` ist der Lauf zu Ende.`;
 
 const FEATURE_BRANCH_DELIVERY = `${FEATURE_BRANCH_DELIVERY_MARKER}
 
@@ -298,8 +324,15 @@ export function heartbeatAwareInstructions(agentKey: TeamAgentKey, existing: str
       ? `${withStructuredInput.trimEnd()}\n\n${PROJECT_REFINEMENT_RUN}\n`
       : withStructuredInput;
 
-  if (agentKey !== 'qa-engineer' || withProjectRefinementRun.includes(QA_REWORK_HANDOFF_MARKER)) {
-    return withProjectRefinementRun;
+  // Der Watchdog ist die einzige Rolle mit Timer — und damit die einzige, die
+  // ohne Auftrag startet.
+  const withWatchdogProtocol =
+    agentKey === 'scrum-master' && !withProjectRefinementRun.includes(WATCHDOG_PROTOCOL_MARKER)
+      ? `${withProjectRefinementRun.trimEnd()}\n\n${WATCHDOG_PROTOCOL}\n`
+      : withProjectRefinementRun;
+
+  if (agentKey !== 'qa-engineer' || withWatchdogProtocol.includes(QA_REWORK_HANDOFF_MARKER)) {
+    return withWatchdogProtocol;
   }
-  return `${withProjectRefinementRun.trimEnd()}\n\n${QA_REWORK_HANDOFF}\n`;
+  return `${withWatchdogProtocol.trimEnd()}\n\n${QA_REWORK_HANDOFF}\n`;
 }

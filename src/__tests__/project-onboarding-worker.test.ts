@@ -114,6 +114,61 @@ async function startApprovedDelivery(
   return kickoff;
 }
 
+/**
+ * Builds a board that is waiting at the sprint gate with one refined story.
+ *
+ * The default fixture skips sprint planning, so anything that exercises the
+ * gate itself — starting a sprint, resetting the workflow — needs its own
+ * harness with `requireProjectSprint` left at its default.
+ */
+async function startSprintReadyBoard(title = 'Slider markup'): Promise<{
+  harness: ReturnType<typeof createTestHarness>;
+  rootIssueId: string;
+  childId: string;
+}> {
+  const harness = createTestHarness({ manifest, config: { enableTeam: true } });
+  harness.seed({ projects: [project()], projectWorkspaces: [workspace()] });
+  await plugin.definition.setup(harness.ctx);
+
+  const kickoff = await harness.performAction<{ rootIssueId: string }>(
+    'startProjectOnboarding',
+    { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+    { companyId: COMPANY_ID }
+  );
+  await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+  await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+
+  const child = await harness.ctx.issues.create({
+    companyId: COMPANY_ID,
+    projectId: PROJECT_ID,
+    parentId: kickoff.rootIssueId,
+    title,
+    status: 'backlog',
+  });
+  await harness.emit(
+    'issue.created',
+    { issueId: child.id },
+    { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
+  );
+  await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+  const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+  const technicalLead = board.agents.find((agent) => agent.role === 'technical_lead');
+  const comment = await harness.ctx.issues.createComment(
+    child.id,
+    `<!-- ${REFINEMENT_MARKER} {"storyPoints":3,"acceptanceCriteria":["Works"]} -->`,
+    COMPANY_ID,
+    { authorAgentId: technicalLead?.id }
+  );
+  await harness.emit(
+    'issue.comment.created',
+    { issueId: child.id },
+    { companyId: COMPANY_ID, entityId: comment.id, entityType: 'issue_comment' }
+  );
+
+  return { harness, rootIssueId: kickoff.rootIssueId, childId: child.id };
+}
+
 async function recordDeveloperCommit(
   harness: ReturnType<typeof createTestHarness>,
   issueId: string,
@@ -2254,6 +2309,160 @@ describe('project onboarding worker actions', () => {
     expect(ready.canStartProjectSprint).toBe(true);
   });
 
+
+  it('starts a sprint without a delivery branch when the human picks none', async () => {
+    const { harness, childId } = await startSprintReadyBoard();
+
+    const sprint = await harness.performAction<{
+      started: boolean;
+      sprint: { deliveryBranch: string | null };
+      projectOnboarding: ProjectOnboarding;
+    }>('startProjectSprint', {}, { companyId: COMPANY_ID });
+
+    // Der Branch ist optional — und das Board erfindet keinen.
+    expect(sprint).toMatchObject({
+      started: true,
+      sprint: { deliveryBranch: null },
+      projectOnboarding: { status: 'active', deliveryBranch: null },
+    });
+    const comments = await harness.ctx.issues.listComments(childId, COMPANY_ID);
+    expect(comments.some((comment) => comment.body.includes('Delivery branch'))).toBe(false);
+  });
+
+  /**
+   * Stories → Refinement → Sprint lief bisher nur vorwaerts. Ein Sprint auf
+   * falscher Grundlage liess sich nicht zurueckholen: die Uebergaenge gehen
+   * nur in eine Richtung, und die alten Refinement-Marker haetten jede Story
+   * sofort wieder als sprintreif ausgewiesen.
+   */
+  describe('resetting the workflow', () => {
+    it('cancels the sprint and sends every ticket back for refinement', async () => {
+      const { harness, childId } = await startSprintReadyBoard();
+      await harness.performAction('startProjectSprint', {}, { companyId: COMPANY_ID });
+
+      const running = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+      expect(running.projectOnboarding.status).toBe('active');
+      expect(running.currentSprint).not.toBeNull();
+      expect(running.tasks.find((task) => task.id === childId)?.refined).toBe(true);
+
+      const reset = await harness.performAction<{ reset: boolean; target: string }>(
+        'resetProjectWorkflow',
+        { target: 'refinement' },
+        { companyId: COMPANY_ID }
+      );
+      expect(reset).toMatchObject({ reset: true, target: 'refinement' });
+
+      const after = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+      expect(after.projectOnboarding.status).toBe('sprint_planning');
+      // Ein abgebrochener Sprint ist kein abgeschlossener.
+      expect(after.currentSprint).toBeNull();
+      expect(after.canStartProjectSprint).toBe(false);
+      expect(after.projectProgress.unrefinedTasks).toBe(1);
+
+      // Der Reset stoesst das Refinement direkt wieder an: das Ticket liegt
+      // beim Technical Lead, ohne Schaetzung.
+      const technicalLead = after.agents.find((agent) => agent.role === 'technical_lead');
+      const task = after.tasks.find((entry) => entry.id === childId);
+      expect(task).toMatchObject({ refined: false, storyPoints: 0 });
+      expect(await harness.ctx.issues.get(childId, COMPANY_ID)).toMatchObject({
+        status: 'todo',
+        assigneeAgentId: technicalLead?.id,
+      });
+    });
+
+    it('keeps the old refinement comment as history instead of deleting it', async () => {
+      const { harness, childId } = await startSprintReadyBoard();
+      const before = await harness.ctx.issues.listComments(childId, COMPANY_ID);
+      expect(before.some((comment) => comment.body.includes(REFINEMENT_MARKER))).toBe(true);
+
+      await harness.performAction(
+        'resetProjectWorkflow',
+        { target: 'refinement' },
+        { companyId: COMPANY_ID }
+      );
+
+      const after = await harness.ctx.issues.listComments(childId, COMPANY_ID);
+      expect(
+        after.some((comment) => comment.body.includes(REFINEMENT_MARKER)),
+        'the estimate stops counting, but it stays readable'
+      ).toBe(true);
+    });
+
+    it('hands the backlog back to the Product Owner when the stories are wrong', async () => {
+      const { harness, rootIssueId, childId } = await startSprintReadyBoard();
+
+      const reset = await harness.performAction<{ reset: boolean }>(
+        'resetProjectWorkflow',
+        { target: 'stories' },
+        { companyId: COMPANY_ID }
+      );
+      expect(reset.reset).toBe(true);
+
+      const after = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+      expect(after.projectOnboarding.status).toBe('backlog_in_progress');
+      expect(after.tasks.find((task) => task.id === childId)?.refined).toBe(false);
+
+      // Der Kickoff traegt wieder den Story-Auftrag und gehoert dem PO.
+      const productOwner = after.agents.find((agent) => agent.role === 'product_owner');
+      expect(await harness.ctx.issues.get(rootIssueId, COMPANY_ID)).toMatchObject({
+        status: 'todo',
+        assigneeAgentId: productOwner?.id,
+      });
+    });
+
+    it('re-estimates after a reset instead of reusing the stale marker', async () => {
+      const { harness, childId } = await startSprintReadyBoard();
+      await harness.performAction(
+        'resetProjectWorkflow',
+        { target: 'refinement' },
+        { companyId: COMPANY_ID }
+      );
+
+      const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+      const technicalLead = board.agents.find((agent) => agent.role === 'technical_lead');
+      const comment = await harness.ctx.issues.createComment(
+        childId,
+        `<!-- ${REFINEMENT_MARKER} {"storyPoints":8,"acceptanceCriteria":["Reworked"]} -->`,
+        COMPANY_ID,
+        { authorAgentId: technicalLead?.id }
+      );
+      await harness.emit(
+        'issue.comment.created',
+        { issueId: childId },
+        { companyId: COMPANY_ID, entityId: comment.id, entityType: 'issue_comment' }
+      );
+
+      const after = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+      expect(after.tasks.find((task) => task.id === childId)).toMatchObject({
+        refined: true,
+        storyPoints: 8,
+      });
+      expect(after.canStartProjectSprint).toBe(true);
+    });
+
+    it('refuses to reset a workflow that has not produced stories yet', async () => {
+      const harness = createTestHarness({ manifest, config: { enableTeam: true } });
+      harness.seed({ projects: [project()], projectWorkspaces: [workspace()] });
+      await plugin.definition.setup(harness.ctx);
+      await harness.performAction(
+        'startProjectOnboarding',
+        { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+        { companyId: COMPANY_ID }
+      );
+
+      expect(
+        await harness.performAction('resetProjectWorkflow', { target: 'stories' }, { companyId: COMPANY_ID })
+      ).toMatchObject({ reset: false });
+    });
+  });
+
+  it('rejects a branch name that Git would not take', async () => {
+    const { harness } = await startSprintReadyBoard();
+
+    expect(
+      await harness.performAction('startProjectSprint', { deliveryBranch: '..' }, { companyId: COMPANY_ID })
+    ).toMatchObject({ started: false });
+  });
 
   /**
    * Nach dem ersten fertigen Ticket blieb der Fluss stehen.

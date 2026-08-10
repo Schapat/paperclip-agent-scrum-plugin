@@ -9,6 +9,7 @@ import {
   MANAGED_AGENT_INSTRUCTIONS,
   LEGACY_REPORTING_LINE_MARKER,
   PROJECT_REFINEMENT_RUN_MARKER,
+  WATCHDOG_PROTOCOL_MARKER,
   REPORTING_LINE_INSTRUCTIONS,
   REPORTING_LINE_MARKER,
   SPRINT_AUTONOMY_MARKER,
@@ -113,6 +114,33 @@ describe('managed agent instruction upgrades', () => {
     expect(upgraded).toContain(PROJECT_REFINEMENT_RUN_MARKER);
     expect(upgraded).toContain('`submit_refinement` lehnt ein einzelnes Batch-Ticket ab');
     expect(heartbeatAwareInstructions('technical-lead', upgraded)).toBe(upgraded);
+  });
+
+  /**
+   * Der Watchdog ist die einzige Rolle mit Timer und damit die einzige, die
+   * ohne Auftrag startet. Ein Verbotssatz hat nicht gereicht — er braucht eine
+   * Aufgabe mit Anfang und Ende.
+   */
+  it('gives the Scrum Master a watchdog run with a beginning and an end', () => {
+    const upgraded = heartbeatAwareInstructions('scrum-master', '# Existing Scrum Master guidance\n');
+
+    expect(upgraded).toContain(WATCHDOG_PROTOCOL_MARKER);
+    expect(upgraded).toContain('`get_watchdog_agenda`');
+    expect(upgraded).toContain('`submit_watchdog_report`');
+    expect(upgraded).toContain('Suche keine Ersatzarbeit');
+    expect(upgraded).toContain('implementierst nichts');
+    // Die vorhandene Anleitung bleibt erhalten, und ein zweiter Durchlauf
+    // haengt den Abschnitt nicht erneut an.
+    expect(upgraded).toContain('# Existing Scrum Master guidance');
+    expect(heartbeatAwareInstructions('scrum-master', upgraded)).toBe(upgraded);
+  });
+
+  it('does not hand the watchdog protocol to a delivery role', () => {
+    for (const agentKey of ['developer-1', 'technical-lead', 'qa-engineer', 'product-owner'] as const) {
+      expect(heartbeatAwareInstructions(agentKey, '# Existing guidance\n')).not.toContain(
+        WATCHDOG_PROTOCOL_MARKER
+      );
+    }
   });
 
   it('uses one feature branch and one feature pull request instead of ticket pull requests', () => {

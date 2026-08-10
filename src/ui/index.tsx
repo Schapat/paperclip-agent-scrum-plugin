@@ -148,6 +148,7 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
   const rejectTechnicalAnalysis = usePluginAction("rejectTechnicalAnalysis");
   const activateProjectOnboarding = usePluginAction("activateProjectOnboarding");
   const startProjectSprint = usePluginAction("startProjectSprint");
+  const resetProjectWorkflow = usePluginAction("resetProjectWorkflow");
   const requestProjectRefinement = usePluginAction("requestProjectRefinement");
   const retryProjectRefinement = usePluginAction("retryProjectRefinement");
   const fetchTicketCommitChanges = usePluginAction("fetchTicketCommitChanges");
@@ -313,6 +314,23 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
       setOnboardingBusy(false);
     }
   }, [refreshOnboarding, startProjectSprint]);
+
+  const handleResetProjectWorkflow = useCallback(
+    async (input: { target: "stories" | "refinement" }) => {
+      setOnboardingBusy(true);
+      try {
+        const result = (await resetProjectWorkflow(input)) as { reset?: boolean; error?: string };
+        if (!result?.reset) setNotice(result?.error ?? "Workflow could not be reset");
+        else setNotice(null);
+        refreshOnboarding();
+      } catch (actionError) {
+        setNotice(actionError instanceof Error ? actionError.message : "Workflow could not be reset");
+      } finally {
+        setOnboardingBusy(false);
+      }
+    },
+    [refreshOnboarding, resetProjectWorkflow],
+  );
 
   const handleRequestProjectRefinement = useCallback(async () => {
     setRefinementBusy(true);
@@ -519,6 +537,7 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
         onStart={handleStartProjectOnboarding}
         onActivate={handleActivateProjectOnboarding}
         onStartSprint={handleStartProjectSprint}
+        onResetWorkflow={handleResetProjectWorkflow}
         onApproveScopeHold={handleApproveScopeHold}
         onStartScopeHoldFollowUp={handleStartScopeHoldFollowUp}
         onDismissScopeHold={handleDismissScopeHold}

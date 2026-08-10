@@ -503,6 +503,16 @@ export interface ProjectOnboarding {
   refinementAttempts?: ProjectRefinementAttempt[];
   /** Tickets, deren Refinement hinter einem offenen Blocker wartet. */
   refinementWaits?: ProjectRefinementWait[];
+  /** Zeitpunkt des letzten Workflow-Resets, fuer die Nachvollziehbarkeit. */
+  refinementResetAt?: string | null;
+  /**
+   * Refinement-Kommentare, die ein Workflow-Reset entwertet hat.
+   *
+   * Die Tickets gelten damit wieder als unverfeinert, ohne dass ein Kommentar
+   * verschwindet — die Schaetzung bleibt als Historie lesbar und zaehlt nur
+   * nicht mehr.
+   */
+  refinementVoidedCommentIds?: string[];
   /**
    * Der vom Human vor dem Sprintstart gewaehlte Lieferbranch.
    *

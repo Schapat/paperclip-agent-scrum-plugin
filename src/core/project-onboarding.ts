@@ -140,6 +140,55 @@ export function transitionProjectOnboarding(
   return { ...onboarding, status: nextStatus, updatedAt: now };
 }
 
+/** Die Stufe, auf die ein Human den Projektablauf zurueckstellen kann. */
+export type ProjectWorkflowResetTarget = 'stories' | 'refinement';
+
+/**
+ * Stellt den Ablauf auf eine fruehere Stufe zurueck.
+ *
+ * Ein Sprint, der auf der falschen Grundlage gestartet ist, laesst sich sonst
+ * nur abwarten: die Statusuebergaenge laufen bewusst nur vorwaerts. Der Reset
+ * ist die ausdrueckliche Ausnahme davon — er kommt vom Human, nicht von einem
+ * Agenten, und deshalb steht er neben `transitionProjectOnboarding` statt die
+ * erlaubten Uebergaenge aufzuweichen.
+ *
+ * `stories` gibt den Backlog an den Product Owner zurueck, `refinement` behaelt
+ * die Stories und laesst den Technical Lead neu schaetzen. Beide Ziele
+ * entwerten die bisherigen Schaetzungen: nach einem Reset ist keine davon mehr
+ * die Grundlage einer Sprintfreigabe.
+ */
+export function resetProjectOnboarding(
+  onboarding: ProjectOnboarding,
+  target: ProjectWorkflowResetTarget,
+  /** Die Refinement-Kommentare, die dieser Reset entwertet. */
+  voidedCommentIds: readonly string[] = [],
+  now = new Date().toISOString()
+): ProjectOnboarding {
+  return {
+    ...onboarding,
+    status: target === 'stories' ? 'backlog_in_progress' : 'sprint_planning',
+    refinementResetAt: now,
+    // Frueher entwertete Marker bleiben entwertet: ein zweiter Reset darf eine
+    // Schaetzung aus der ersten Runde nicht wieder gueltig machen.
+    refinementVoidedCommentIds: [
+      ...new Set([...(onboarding.refinementVoidedCommentIds ?? []), ...voidedCommentIds]),
+    ],
+    refinementRequestedTaskIds: [],
+    refinementAttempts: [],
+    refinementWaits: [],
+    updatedAt: now,
+  };
+}
+
+/** Aus welchen Phasen ein Reset ueberhaupt sinnvoll ist. */
+export function canResetProjectWorkflow(onboarding: ProjectOnboarding | undefined): boolean {
+  return (
+    onboarding?.status === 'backlog_in_progress' ||
+    onboarding?.status === 'sprint_planning' ||
+    onboarding?.status === 'active'
+  );
+}
+
 /** Bestehende Board-Automationen starten erst nach einer Backlog-Freigabe. */
 export function canRunAutomaticDelivery(onboarding: ProjectOnboarding): boolean {
   return onboarding.status === 'active';
