@@ -21,7 +21,7 @@ export function describeDuration(sinceIso: string, now = Date.now()): string | n
   if (!Number.isFinite(since)) return null;
 
   const minutes = Math.floor((now - since) / 60_000);
-  if (minutes < 1) return 'just now';
+  if (minutes < 1) return 'less than a minute';
   if (minutes < 60) return `${minutes} min`;
 
   const hours = Math.floor(minutes / 60);
@@ -69,6 +69,14 @@ export interface ProjectWorkflowActivity {
   nextStep: string;
   attentionRequired: boolean;
   ticketLinkLabel: string;
+  /**
+   * Wer gerade am Zug ist.
+   *
+   * Der Unterschied zwischen "ein Agent arbeitet" und "wir warten auf dich" ist
+   * die eigentliche Frage, die der Header beantworten muss — er stand bisher
+   * nur im Fliesstext.
+   */
+  waitingOn: 'agent' | 'human' | 'none';
 }
 
 export function describeProjectWorkflow(
@@ -122,6 +130,7 @@ function withEvidence(
     detail: `${running} ${describeStall(first, now)}${more}`,
     nextStep: 'Resolve the blocked ticket, then the board continues on its own.',
     attentionRequired: true,
+    waitingOn: 'human',
   };
 }
 
@@ -139,6 +148,7 @@ function describeBaseWorkflow(
         nextStep: 'Wait for the completed analysis.',
         attentionRequired: false,
         ticketLinkLabel: 'Open technical analysis',
+        waitingOn: 'agent',
       };
     case 'analysis_ready':
       return {
@@ -149,6 +159,7 @@ function describeBaseWorkflow(
         nextStep: 'Approve the analysis or request concrete changes.',
         attentionRequired: true,
         ticketLinkLabel: 'Open approval',
+        waitingOn: 'human',
       };
     case 'backlog_in_progress':
       return {
@@ -159,6 +170,7 @@ function describeBaseWorkflow(
         nextStep: 'Review and approve the backlog when it is ready.',
         attentionRequired: false,
         ticketLinkLabel: 'Open Product Owner backlog',
+        waitingOn: 'agent',
       };
     case 'sprint_planning':
       if (progress.unrefinedTasks > 0) {
@@ -170,6 +182,7 @@ function describeBaseWorkflow(
           nextStep: 'Wait for refinement to finish.',
           attentionRequired: false,
           ticketLinkLabel: 'Open technical refinement',
+        waitingOn: 'agent',
         };
       }
       return {
@@ -180,6 +193,7 @@ function describeBaseWorkflow(
         nextStep: 'Start the first sprint.',
         attentionRequired: true,
         ticketLinkLabel: 'Open sprint planning',
+        waitingOn: 'human',
       };
     case 'active':
       return {
@@ -192,6 +206,7 @@ function describeBaseWorkflow(
         nextStep: 'Watch the board; blocked work is reported here.',
         attentionRequired: false,
         ticketLinkLabel: 'Open project kickoff',
+        waitingOn: 'agent',
       };
     case 'completed':
       return {
@@ -202,6 +217,7 @@ function describeBaseWorkflow(
         nextStep: 'Plan the next feature when you are ready.',
         attentionRequired: false,
         ticketLinkLabel: 'Open project summary',
+        waitingOn: 'none',
       };
     default:
       return {
@@ -212,6 +228,7 @@ function describeBaseWorkflow(
         nextStep: 'Choose a project and describe the requested outcome.',
         attentionRequired: false,
         ticketLinkLabel: 'Open project request',
+        waitingOn: 'human',
       };
   }
 }

@@ -408,3 +408,47 @@ button.project-onboarding-kickoff:focus-visible {
     flex: 1 1 0;
   }
 }
+/*
+ * Laufende Agentenarbeit.
+ *
+ * Die Frage "arbeitet gerade jemand daran?" war nur aus dem Fliesstext zu
+ * beantworten. Ein ruhiger Puls und eine farbige Kante machen sie auf einen
+ * Blick lesbar, ohne die Ansicht in einen Alarmzustand zu versetzen.
+ */
+.project-onboarding-workflow.waiting-on-agent {
+  border-left: 2px solid var(--color-primary);
+}
+
+.project-onboarding-workflow.waiting-on-agent .project-onboarding-workflow-eyebrow {
+  color: var(--color-primary);
+}
+
+.project-onboarding-working-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  vertical-align: baseline;
+  animation: workingPulse 1.8s ease-in-out infinite;
+}
+
+@keyframes workingPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.82); }
+}
+
+/* Beobachteter Fortschritt statt einer Zusicherung. */
+.project-onboarding-workflow-evidence {
+  margin-top: 4px;
+  color: var(--color-text);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .project-onboarding-working-dot {
+    animation: none;
+  }
+}

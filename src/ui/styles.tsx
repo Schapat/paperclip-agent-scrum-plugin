@@ -30,7 +30,7 @@ const AGENT_SCRUM_STYLES = [
     "panelSlideIn",
     "spin",
   ]),
-  scopeStyles(onboardingStyles, "onboarding"),
+  scopeStyles(onboardingStyles, "onboarding", ["workingPulse"]),
   scopeStyles(settingsStyles, "settings", ["fadeIn", "slideUp"]),
 ].join("\n");
 
