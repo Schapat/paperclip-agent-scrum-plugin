@@ -6,6 +6,7 @@ import {
   GITHUB_COMMIT_EVIDENCE_MARKER,
   HEARTBEAT_QUEUE_MARKER,
   MANAGED_AGENT_INSTRUCTIONS,
+  REPORTING_LINE_MARKER,
   SPRINT_AUTONOMY_MARKER,
   heartbeatAwareInstructions,
 } from '../agent-instructions';
@@ -25,6 +26,20 @@ describe('managed agent instruction upgrades', () => {
     expect(upgraded).toContain(EVENT_ROUTING_MARKER);
     expect(upgraded).toContain(GITHUB_COMMIT_EVIDENCE_MARKER);
     expect(heartbeatAwareInstructions('developer-1', upgraded)).toBe(upgraded);
+  });
+
+  it('adds the intended reporting line without making the Product Owner or Scrum Master a manager', () => {
+    const productOwner = heartbeatAwareInstructions('product-owner', '# Custom Product Owner guidance\n');
+    const scrumMaster = heartbeatAwareInstructions('scrum-master', '# Custom Scrum Master guidance\n');
+    const technicalLead = heartbeatAwareInstructions('technical-lead', '# Custom Technical Lead guidance\n');
+    const developer = heartbeatAwareInstructions('developer-1', '# Custom developer guidance\n');
+
+    expect(productOwner).toContain(REPORTING_LINE_MARKER);
+    expect(productOwner).toContain('keine technische oder disziplinarische Vorgesetztenrolle');
+    expect(scrumMaster).toContain('keine Vorgesetztenrolle');
+    expect(technicalLead).toContain('Developer 1 und Developer 2 berichten');
+    expect(developer).toContain('an den Technical Lead');
+    expect(heartbeatAwareInstructions('technical-lead', technicalLead)).toBe(technicalLead);
   });
 
   it('overrides a legacy queue scan with event routing and adds the QA rework handoff', () => {

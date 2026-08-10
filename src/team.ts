@@ -36,6 +36,9 @@ export interface TeamMember {
   title: string;
   icon: string;
   capabilities: string;
+  /** Adapter selected when Paperclip creates this managed agent. */
+  adapterType: string;
+  adapterConfig: Record<string, unknown>;
   /** Host runtime configuration reconciled with the managed agent. */
   runtimeConfig: Record<string, unknown>;
   /**
@@ -46,6 +49,14 @@ export interface TeamMember {
    */
   reportsTo: TeamAgentKey | null;
 }
+
+/** Kiro CLI adapter installed on the local Paperclip host. */
+export const KIRO_CLI_ADAPTER_TYPE = "kiro_local";
+/** Model identifier accepted by Kiro CLI for Claude Opus 4.5. */
+export const KIRO_CLI_OPUS_45_MODEL = "claude-opus-4.5";
+export const KIRO_CLI_OPUS_45_ADAPTER_CONFIG: Record<string, unknown> = {
+  model: KIRO_CLI_OPUS_45_MODEL,
+};
 
 /**
  * The Scrum Master is the sole timer-driven watchdog. Event handling in the
@@ -120,6 +131,8 @@ export const TEAM: TeamMember[] = [
     icon: "clipboard-list",
     capabilities:
       "Product vision, backlog management, user story creation, prioritisation, business value assessment, ticket assignment",
+    adapterType: KIRO_CLI_ADAPTER_TYPE,
+    adapterConfig: KIRO_CLI_OPUS_45_ADAPTER_CONFIG,
     runtimeConfig: scrumRuntimeConfig("product-owner"),
     reportsTo: null,
   },
@@ -131,6 +144,8 @@ export const TEAM: TeamMember[] = [
     icon: "users",
     capabilities:
       "Scrum facilitation, impediment removal, flow optimisation, retrospectives, process improvement",
+    adapterType: KIRO_CLI_ADAPTER_TYPE,
+    adapterConfig: KIRO_CLI_OPUS_45_ADAPTER_CONFIG,
     runtimeConfig: scrumRuntimeConfig("scrum-master"),
     reportsTo: null,
   },
@@ -142,6 +157,8 @@ export const TEAM: TeamMember[] = [
     icon: "code",
     capabilities:
       "Software architecture, ticket refinement, story point estimation, subtask creation, implementation strategy",
+    adapterType: KIRO_CLI_ADAPTER_TYPE,
+    adapterConfig: KIRO_CLI_OPUS_45_ADAPTER_CONFIG,
     runtimeConfig: scrumRuntimeConfig("technical-lead"),
     reportsTo: null,
   },
@@ -153,6 +170,8 @@ export const TEAM: TeamMember[] = [
     icon: "bug",
     capabilities:
       "Quality assurance, acceptance criteria verification, test execution, code review, regression testing",
+    adapterType: KIRO_CLI_ADAPTER_TYPE,
+    adapterConfig: KIRO_CLI_OPUS_45_ADAPTER_CONFIG,
     runtimeConfig: scrumRuntimeConfig("qa-engineer"),
     reportsTo: null,
   },
@@ -163,6 +182,8 @@ export const TEAM: TeamMember[] = [
     title: "Developer",
     icon: "terminal",
     capabilities: "Feature development, bug fixing, unit tests, documentation, git",
+    adapterType: KIRO_CLI_ADAPTER_TYPE,
+    adapterConfig: KIRO_CLI_OPUS_45_ADAPTER_CONFIG,
     runtimeConfig: scrumRuntimeConfig("developer-1"),
     reportsTo: "technical-lead",
   },
@@ -173,6 +194,8 @@ export const TEAM: TeamMember[] = [
     title: "Developer",
     icon: "terminal",
     capabilities: "Feature development, bug fixing, unit tests, documentation, git",
+    adapterType: KIRO_CLI_ADAPTER_TYPE,
+    adapterConfig: KIRO_CLI_OPUS_45_ADAPTER_CONFIG,
     runtimeConfig: scrumRuntimeConfig("developer-2"),
     reportsTo: "technical-lead",
   },

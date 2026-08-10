@@ -137,6 +137,15 @@ Until this is on, the plugin runs, shows an empty board, and creates nothing.
 If the setting cannot be read it stays off — failing closed is the only safe
 direction when the alternative is populating someone's company uninvited.
 
+### Managed-agent runtime defaults
+
+New Scrum agents use the locally registered **Kiro CLI** adapter (`kiro_local`)
+with the `claude-opus-4.5` model. The Paperclip host therefore needs the
+`paperclip-kiro-adapter` installed and `kiro-cli` available and authenticated on
+its `PATH` before a team is activated. These are creation defaults: the plugin
+does not overwrite an existing agent's adapter or model during a later
+reconciliation.
+
 ### Plugin settings
 
 Settings are scoped to an organisation. Configure them in Paperclip's plugin
@@ -593,6 +602,14 @@ Company lead (CEO)
 Developers report to the Technical Lead; everyone else reports to the company
 lead. That mirrors how ceremonies actually escalate — the Tech Lead receives
 blocked tickets and refinement work and hands implementation down.
+
+The Product Owner owns product priority, the Scrum Master owns process, the
+Technical Lead owns engineering, and QA owns the independent quality gate. None
+of those four roles is a line manager for the other three. A separate Chief of
+Staff is not required for one Scrum team: the plugin neither creates nor invokes
+one. A host-level Company Lead (CEO) remains useful as an optional reporting
+root for a multi-team organisation; without one, the four lead roles remain top
+level and the Developers still report to the Technical Lead.
 
 **The plugin API cannot express this.** The managed-agent schema has no
 `reportsTo` field, the host's `declarationPatch` does not map one, and

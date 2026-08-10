@@ -25,6 +25,7 @@ export const HUMAN_SCOPE_GUARD_MARKER = '## Human Scope Guard';
 export const SPRINT_AUTONOMY_MARKER = '## Approved Sprint Autonomy';
 export const GITHUB_COMMIT_EVIDENCE_MARKER = '## GitHub Commit Evidence';
 export const FEATURE_BRANCH_DELIVERY_MARKER = '## Feature Branch Delivery';
+export const REPORTING_LINE_MARKER = '<!-- agent-scrum:reporting-line -->';
 
 const HUMAN_SCOPE_GUARD = `${HUMAN_SCOPE_GUARD_MARKER}
 
@@ -58,6 +59,39 @@ Diese Regel hat Vorrang vor frueheren Anweisungen zu Ticket-Branches oder Ticket
 - Der Ready-for-Review-Kommentar eines Tickets nennt den Feature-Branch und nur die Commits dieses Tickets; ein PR-Link gehoert dort nicht hinein.
 - QA schliesst ein Ticket erst nach der vollstaendigen Einzelpruefung seiner Akzeptanzkriterien ab. Das Done eines einzelnen Tickets erstellt, merged oder genehmigt keinen Pull Request.
 - Erst wenn alle Tickets eines Features durch QA abgeschlossen und ihre Commits auf dem Feature-Branch liegen, erstellt der fuer den Feature-Branch verantwortliche Developer genau einen Pull Request fuer das gesamte Feature.`;
+
+const REPORTING_LINE_INSTRUCTIONS: Record<TeamAgentKey, string> = {
+  'product-owner': `${REPORTING_LINE_MARKER}
+
+## Reporting Line
+
+Wenn ein Company Lead (CEO) existiert, berichtest du direkt an diese Rolle. Du verantwortest Produktvision, Backlog und Priorisierung, bist jedoch keine technische oder disziplinarische Vorgesetztenrolle fuer die anderen Scrum-Rollen.`,
+  'scrum-master': `${REPORTING_LINE_MARKER}
+
+## Reporting Line
+
+Wenn ein Company Lead (CEO) existiert, berichtest du direkt an diese Rolle. Du steuerst Prozess und Flow als unabhaengiger Facilitator; du uebernimmst keine Vorgesetztenrolle fuer Product Owner, Technical Lead, QA oder Developers.`,
+  'technical-lead': `${REPORTING_LINE_MARKER}
+
+## Reporting Line
+
+Wenn ein Company Lead (CEO) existiert, berichtest du direkt an diese Rolle. Developer 1 und Developer 2 berichten fuer technische Anleitung, Architektur und Eskalationen an dich. Product Owner, Scrum Master und QA bleiben deine fachlichen Peers.`,
+  'qa-engineer': `${REPORTING_LINE_MARKER}
+
+## Reporting Line
+
+Wenn ein Company Lead (CEO) existiert, berichtest du direkt an diese Rolle. Deine QA- und Done-Entscheidungen bleiben unabhaengig von Produktpriorisierung, Prozesssteuerung und Delivery-Druck.`,
+  'developer-1': `${REPORTING_LINE_MARKER}
+
+## Reporting Line
+
+Du berichtest fuer technische Anleitung, Architektur und technische Eskalationen an den Technical Lead. Product Owner, Scrum Master und QA sind fachliche Partner mit eigenen Entscheidungsrechten, keine direkten Vorgesetzten.`,
+  'developer-2': `${REPORTING_LINE_MARKER}
+
+## Reporting Line
+
+Du berichtest fuer technische Anleitung, Architektur und technische Eskalationen an den Technical Lead. Product Owner, Scrum Master und QA sind fachliche Partner mit eigenen Entscheidungsrechten, keine direkten Vorgesetzten.`,
+};
 
 /** Minimal append-only activation rules for existing operator-customized instructions. */
 export const EVENT_ROUTING_INSTRUCTIONS: Record<TeamAgentKey, string> = {
@@ -98,9 +132,12 @@ export function heartbeatAwareInstructions(agentKey: TeamAgentKey, existing: str
   const source = !existing || !existing.trim()
     ? MANAGED_AGENT_INSTRUCTIONS[agentKey]
     : existing;
-  const withEventRouting = source.includes(EVENT_ROUTING_MARKER)
+  const withReportingLine = source.includes(REPORTING_LINE_MARKER)
     ? source
-    : `${source.trimEnd()}\n\n${EVENT_ROUTING_INSTRUCTIONS[agentKey]}\n`;
+    : `${source.trimEnd()}\n\n${REPORTING_LINE_INSTRUCTIONS[agentKey]}\n`;
+  const withEventRouting = withReportingLine.includes(EVENT_ROUTING_MARKER)
+    ? withReportingLine
+    : `${withReportingLine.trimEnd()}\n\n${EVENT_ROUTING_INSTRUCTIONS[agentKey]}\n`;
 
   const withScopeGuard = withEventRouting.includes(HUMAN_SCOPE_GUARD_MARKER)
     ? withEventRouting

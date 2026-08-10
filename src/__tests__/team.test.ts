@@ -7,7 +7,10 @@
  */
 
 import { describe, it, expect } from "vitest";
+import manifest from "../manifest";
 import {
+  KIRO_CLI_ADAPTER_TYPE,
+  KIRO_CLI_OPUS_45_MODEL,
   SCRUM_MASTER_WATCHDOG_RUNTIME_CONFIG,
   SCRUM_ON_DEMAND_RUNTIME_CONFIG,
   TEAM,
@@ -30,6 +33,23 @@ describe("team definition", () => {
       "scrum_master",
       "technical_lead",
     ]);
+  });
+
+  it("initializes every Scrum role with Kiro CLI and Claude Opus 4.5", () => {
+    for (const member of TEAM) {
+      expect(member.adapterType).toBe(KIRO_CLI_ADAPTER_TYPE);
+      expect(member.adapterConfig).toEqual({ model: KIRO_CLI_OPUS_45_MODEL });
+    }
+  });
+
+  it("projects the Kiro defaults into each managed-agent declaration", () => {
+    const managedAgents = manifest.agents ?? [];
+
+    expect(managedAgents).toHaveLength(TEAM.length);
+    for (const agent of managedAgents) {
+      expect(agent.adapterType).toBe(KIRO_CLI_ADAPTER_TYPE);
+      expect(agent.adapterConfig).toEqual({ model: KIRO_CLI_OPUS_45_MODEL });
+    }
   });
 
   it("uses unique agent keys", () => {

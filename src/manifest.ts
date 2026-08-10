@@ -84,6 +84,8 @@ const manifest: PaperclipPluginManifestV1 = {
     title: member.title,
     icon: member.icon,
     capabilities: member.capabilities,
+    adapterType: member.adapterType,
+    adapterConfig: member.adapterConfig,
     runtimeConfig: member.runtimeConfig,
     status: "idle",
     instructions: {
