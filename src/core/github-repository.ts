@@ -103,6 +103,55 @@ export async function fetchGitHubCommitChanges(
   }
 }
 
+export type GitHubBranchesResult =
+  | { valid: true; branches: string[]; defaultBranch: string | null }
+  | { valid: false; error: string };
+
+/**
+ * Lists the repository branches a human can pick as the sprint's delivery branch.
+ *
+ * Bewusst nur die erste Seite: die Auswahl ist eine Entscheidungshilfe, kein
+ * Repository-Browser. Wer einen aelteren Branch braucht, tippt ihn ein.
+ */
+export async function fetchGitHubBranches(
+  repository: GitHubRepository,
+  options: GitHubRequestOptions = {}
+): Promise<GitHubBranchesResult> {
+  const request = requestFor(options);
+  const repoPath = `/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
+
+  try {
+    const [branchResponse, repoResponse] = await Promise.all([
+      request(`${repoPath}/branches?per_page=100`),
+      request(repoPath),
+    ]);
+    if (!branchResponse.ok) {
+      return {
+        valid: false,
+        error: `GitHub could not list branches for ${repository.owner}/${repository.name} (HTTP ${branchResponse.status}).`,
+      };
+    }
+
+    const payload = await branchResponse.json() as unknown;
+    const branches = Array.isArray(payload)
+      ? payload.flatMap((entry) => {
+          const name = isRecord(entry) ? text(entry.name) : null;
+          return name ? [name] : [];
+        })
+      : [];
+    const defaultBranch = repoResponse.ok
+      ? text((await jsonRecord(repoResponse))?.default_branch)
+      : null;
+
+    return { valid: true, branches, defaultBranch };
+  } catch (error) {
+    return {
+      valid: false,
+      error: `GitHub branch lookup failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
 function repositoryFromParts(owner: string, rawName: string): GitHubRepository | null {
   const name = rawName.replace(/\.git$/i, '');
   if (!owner || !name) return null;

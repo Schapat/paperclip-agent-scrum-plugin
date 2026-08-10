@@ -144,6 +144,60 @@ const manifest: PaperclipPluginManifestV1 = {
       },
     },
     {
+      name: "submit_refinement_batch",
+      displayName: "Submit complete refinement batch",
+      description:
+        "Record every estimate and acceptance-criteria set from the current project refinement batch in one call. Only the Technical Lead may call it.",
+      parametersSchema: {
+        type: "object",
+        required: ["refinements"],
+        properties: {
+          refinements: {
+            type: "array",
+            minItems: 1,
+            description: "One complete refinement for every ticket named in the current refinement batch.",
+            items: {
+              type: "object",
+              required: ["issueId", "storyPoints", "acceptanceCriteria"],
+              properties: {
+                issueId: { type: "string", description: "UUID of the ticket being refined." },
+                storyPoints: {
+                  type: "number",
+                  minimum: 1,
+                  maximum: 100,
+                  description: "Whole-number effort estimate.",
+                },
+                acceptanceCriteria: {
+                  type: "array",
+                  minItems: 1,
+                  items: { type: "string" },
+                  description: "Verifiable criteria QA will check one by one.",
+                },
+                technicalNotes: { type: "string", description: "Implementation guidance for the developer." },
+                labels: {
+                  type: "array",
+                  items: { type: "string" },
+                  description: "Technical domains used for developer assignment.",
+                },
+                risks: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    required: ["description"],
+                    properties: {
+                      description: { type: "string" },
+                      severity: { type: "string", enum: ["low", "medium", "high"] },
+                      mitigation: { type: "string" },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    {
       name: "submit_qa_verdict",
       displayName: "Submit QA verdict",
       description:

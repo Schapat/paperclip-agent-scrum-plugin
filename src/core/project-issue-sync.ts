@@ -124,6 +124,18 @@ export function syncProjectOnboardingIssue(
         assignedAgentId: hostFields.assignedAgentId,
         parentId: hostFields.parentId,
         labels: hostFields.labels,
+        // Ein Ticket, das erst nach seinem Refinement gespiegelt wird — nach
+        // einem Worker-Neustart der Normalfall — kam bisher ohne Schaetzung und
+        // ohne Akzeptanzkriterien auf dem Board an. Erst die naechste Aenderung
+        // des Host-Issues holte sie nach; blieb sie aus, galt das Ticket
+        // dauerhaft als unverfeinert.
+        storyPoints: hostFields.storyPoints,
+        acceptanceCriteria: hostFields.acceptanceCriteria,
+        technicalNotes: hostFields.technicalNotes,
+        risks: hostFields.risks,
+        refined: hostFields.refined,
+        comments: hostFields.comments,
+        decisions: hostFields.decisions,
         createdAt: hostFields.createdAt,
         updatedAt: hostFields.updatedAt,
         startedAt: hostFields.startedAt,

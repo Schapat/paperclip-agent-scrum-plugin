@@ -9,6 +9,17 @@ export interface ProjectOption {
   name: string;
 }
 
+/** Die Branch-Auswahl, die das Board vor dem Sprintstart anbietet. */
+export interface DeliveryBranchOptions {
+  selected: string | null;
+  suggestion: string;
+  branches: string[];
+  defaultBranch: string | null;
+  error: string | null;
+}
+
+const NEW_BRANCH_OPTION = "__new__";
+
 interface ProjectOnboardingPanelProps {
   onboarding: ProjectOnboarding;
   projects: ProjectOption[];
@@ -22,6 +33,10 @@ interface ProjectOnboardingPanelProps {
   canStartSprint: boolean;
   /** Tickets, die nachweislich stehen — speist die Begruendung im Header. */
   stalls?: TicketStall[];
+  /** Laeuft gerade ein Agent-Run? `undefined`, wenn der Host es nicht sagt. */
+  agentRunning?: boolean;
+  /** Auswaehlbare Lieferbranches fuer den ersten Sprint. */
+  branchOptions?: DeliveryBranchOptions;
   scopeHoldBusyId: string | null;
   onStart: (input: {
     projectId: string;

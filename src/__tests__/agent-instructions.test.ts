@@ -8,6 +8,7 @@ import {
   HEARTBEAT_QUEUE_MARKER,
   MANAGED_AGENT_INSTRUCTIONS,
   LEGACY_REPORTING_LINE_MARKER,
+  PROJECT_REFINEMENT_RUN_MARKER,
   REPORTING_LINE_INSTRUCTIONS,
   REPORTING_LINE_MARKER,
   SPRINT_AUTONOMY_MARKER,
@@ -82,6 +83,36 @@ describe('managed agent instruction upgrades', () => {
     expect(upgraded).toContain('`nohup`, `disown`, `setsid`, `screen` oder `tmux`');
     expect(upgraded).toContain('`npm run dev`, `next dev`, `vite` oder einen anderen Dauerprozess');
     expect(heartbeatAwareInstructions('developer-1', upgraded)).toBe(upgraded);
+  });
+
+  it('permits a host-managed project refinement run for the Technical Lead', () => {
+    const upgraded = heartbeatAwareInstructions('technical-lead', '# Existing Technical Lead guidance\n');
+
+    expect(upgraded).toContain(PROJECT_REFINEMENT_RUN_MARKER);
+    expect(upgraded).toContain('`todo` oder `in_progress`');
+    expect(upgraded).toContain('Vollstaendiger Refinement-Batch');
+    expect(upgraded).toContain('`submit_refinement_batch`');
+    expect(upgraded).toContain('weder Status noch Zuweisung');
+    expect(heartbeatAwareInstructions('technical-lead', upgraded)).toBe(upgraded);
+  });
+
+  it('upgrades the earlier single-ticket refinement rule to the batch rule', () => {
+    const existing = '# Existing Technical Lead guidance\n\n## Issue-bound project refinement\n\nRefine only the assigned ticket.\n';
+    const upgraded = heartbeatAwareInstructions('technical-lead', existing);
+
+    expect(upgraded).toContain(PROJECT_REFINEMENT_RUN_MARKER);
+    expect(upgraded).toContain('hat Vorrang vor allen frueheren Issue-bound-Refinement-Regeln');
+    expect(upgraded).toContain('genau einem `submit_refinement_batch`-Aufruf');
+    expect(heartbeatAwareInstructions('technical-lead', upgraded)).toBe(upgraded);
+  });
+
+  it('upgrades the previous batch rule to the enforced atomic batch rule', () => {
+    const existing = '# Existing Technical Lead guidance\n\n## Batch project refinement v3\n\nUse the batch tool when possible.\n';
+    const upgraded = heartbeatAwareInstructions('technical-lead', existing);
+
+    expect(upgraded).toContain(PROJECT_REFINEMENT_RUN_MARKER);
+    expect(upgraded).toContain('`submit_refinement` lehnt ein einzelnes Batch-Ticket ab');
+    expect(heartbeatAwareInstructions('technical-lead', upgraded)).toBe(upgraded);
   });
 
   it('uses one feature branch and one feature pull request instead of ticket pull requests', () => {

@@ -1,4 +1,4 @@
-import type { ProjectOnboarding, TicketStall } from '../../core/types';
+import type { ProjectOnboarding, ProjectRefinementWait, TicketStall } from '../../core/types';
 
 export interface ProjectWorkflowProgress {
   unrefinedTasks: number;
@@ -12,7 +12,31 @@ export interface ProjectWorkflowContext {
   stalls?: TicketStall[];
   /** Wann die aktuelle Phase begonnen hat. */
   phaseSince?: string | null;
+  /**
+   * Laeuft gerade ein Agent-Run?
+   *
+   * `undefined` heisst "unbekannt" — etwa wenn der Host keinen
+   * Orchestrierungs-Snapshot liefert. Dann bleibt die Phasenaussage stehen;
+   * geraten wird nicht in beide Richtungen.
+   */
+  agentRunning?: boolean;
+  /** Tickets, deren Refinement hinter einem Blocker wartet. */
+  refinementWaits?: ProjectRefinementWait[];
   now?: number;
+}
+
+/** Ein Ticket wartet auf ein anderes — Reihenfolge, kein Stillstand. */
+function describeWaits(waits: ProjectRefinementWait[]): string {
+  const blockers = [...new Set(waits.flatMap((wait) => wait.blockedBy))];
+  const carried = waits.some((wait) => wait.carriedBy);
+  const subject = waits.length === 1 ? '1 story' : `${waits.length} stories`;
+  const reason = blockers.length > 0
+    ? `${subject} cannot be refined on their own yet: they are blocked by ${blockers.join(', ')}.`
+    : `${subject} are waiting behind a blocking ticket.`;
+
+  return carried
+    ? `${reason} The Technical Lead refines them alongside the ticket it is working on.`
+    : `${reason} Refinement starts as soon as the blocker is done.`;
 }
 
 /** Menschenlesbare Dauer, bewusst grob — die Zahl soll einordnen, nicht messen. */
@@ -99,11 +123,36 @@ export function describeProjectWorkflow(
  * behauptete ungeprueft, es sei keine Freigabe noetig.
  */
 function withEvidence(
-  activity: ProjectWorkflowActivity,
-  { stalls = [], phaseSince, now = Date.now() }: ProjectWorkflowContext
+  base: ProjectWorkflowActivity,
+  { stalls = [], phaseSince, agentRunning, refinementWaits = [], now = Date.now() }: ProjectWorkflowContext
 ): ProjectWorkflowActivity {
+  // Ein Phasentext, der Arbeit behauptet, braucht einen laufenden Agenten.
+  // Fehlt er, sagt der Header, dass die Phase offen ist — nicht, dass jemand
+  // arbeitet. Das war der Unterschied zwischen "Technical Lead is refining
+  // backlog stories" und einem seit einer halben Stunde untaetigen Technical
+  // Lead. `undefined` bleibt unangetastet: unbekannt ist nicht dasselbe wie
+  // "kein Lauf".
+  const idlePhase = agentRunning === false && base.waitingOn === 'agent';
+  const queued = idlePhase && refinementWaits.length > 0;
+  const activity: ProjectWorkflowActivity = idlePhase
+    ? {
+        ...base,
+        title: queued ? `${base.title} — queued` : `${base.title} — no agent run`,
+        nextStep: queued
+          ? base.nextStep
+          : `${base.nextStep} No agent run is active right now — check the agent log if this does not move.`,
+        waitingOn: 'none',
+      }
+    : base;
+
   const waited = phaseSince ? describeDuration(phaseSince, now) : null;
-  const running = waited ? `${activity.detail} Running for ${waited}.` : activity.detail;
+  // "Running for 23 min" war die Dauer der *Phase*, nicht die eines Laufs.
+  const elapsed = waited
+    ? idlePhase
+      ? `${activity.detail} Waiting for ${waited}.`
+      : `${activity.detail} Running for ${waited}.`
+    : activity.detail;
+  const running = refinementWaits.length > 0 ? `${elapsed} ${describeWaits(refinementWaits)}` : elapsed;
 
   if (stalls.length === 0) {
     const overdue =
@@ -112,7 +161,10 @@ function withEvidence(
       now - Date.parse(phaseSince) > PHASE_ATTENTION_AFTER_MS &&
       !activity.attentionRequired &&
       activity.phase !== 'completed' &&
-      activity.phase !== 'project_request';
+      activity.phase !== 'project_request' &&
+      // Auf einen Blocker zu warten ist erklaert. Die Zeit dafuer ist keine
+      // Auffaelligkeit, sondern die Lieferreihenfolge des Product Owners.
+      refinementWaits.length === 0;
 
     return {
       ...activity,
@@ -129,7 +181,7 @@ function withEvidence(
 
   return {
     ...activity,
-    title: `${activity.title} — blocked`,
+    title: `${base.title} — blocked`,
     detail: `${running} ${describeStall(first, now)}${more}`,
     nextStep: 'Resolve the blocked ticket, then the board continues on its own.',
     attentionRequired: true,

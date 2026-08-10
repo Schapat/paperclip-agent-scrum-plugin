@@ -145,6 +145,61 @@ export function canRunAutomaticDelivery(onboarding: ProjectOnboarding): boolean 
   return onboarding.status === 'active';
 }
 
+/**
+ * Darf das Plugin ein Ticket durch Development, Review und QA reichen?
+ *
+ * Dieselbe Frage wie `canRunAutomaticDelivery`, aber fuer die Host-Ereignisse.
+ * Die Weiterleitungskette lief bisher ungeprueft bei *jedem* Issue-Event — ein
+ * Agent, der sich vor dem Sprintstart selbst ein Ticket auf `done` setzte,
+ * bekam daraufhin vom Plugin einen Developer zugewiesen und die Lieferung lief
+ * am Sprint-Gate vorbei.
+ */
+export function canRouteDelivery(onboarding: ProjectOnboarding | undefined): boolean {
+  return Boolean(onboarding && canRunAutomaticDelivery(onboarding));
+}
+
+/**
+ * Phasen, in denen der Human die Lieferung noch nicht freigegeben hat.
+ *
+ * Der Product Owner schreibt Stories, der Technical Lead verfeinert sie — was
+ * darueber hinausgeht, gehoert zurueck ins Backlog.
+ */
+export function isPreDeliveryGate(onboarding: ProjectOnboarding | undefined): boolean {
+  return onboarding?.status === 'backlog_in_progress' || onboarding?.status === 'sprint_planning';
+}
+
+/** Git erlaubt vieles, aber nicht alles — und ein Branch mit Leerzeichen bricht jeden Push. */
+export function normalizeBranchName(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+
+  const normalized = value
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/[~^:?*[\\\]]/g, '')
+    .replace(/\/{2,}/g, '/')
+    .replace(/^[/.]+|[/.]+$/g, '')
+    .slice(0, 200);
+
+  if (!normalized || normalized.includes('..') || normalized.endsWith('.lock')) return null;
+  return normalized;
+}
+
+/** Schlaegt einen Lieferbranch vor, solange der Human keinen gewaehlt hat. */
+export function suggestDeliveryBranch(
+  onboarding: Pick<ProjectOnboarding, 'projectName' | 'brief'>,
+  sprintNumber = 1
+): string {
+  const source = onboarding.projectName ?? onboarding.brief ?? 'delivery';
+  const slug = source
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+
+  return `feature/${slug || 'delivery'}-sprint-${Math.max(1, sprintNumber)}`;
+}
+
 /** Creates the persisted local sprint context for a host-backed project delivery cycle. */
 export function createProjectSprint({
   onboarding,
@@ -171,6 +226,10 @@ export function createProjectSprint({
     goal: onboarding.brief,
     velocity: 0,
     completedPoints: 0,
+    // Der Branch ist eine Sprintentscheidung, keine Ticketentscheidung: alle
+    // Tickets eines Sprints liefern auf denselben Branch, damit am Ende genau
+    // ein Pull Request entsteht.
+    deliveryBranch: onboarding.deliveryBranch ?? null,
     createdAt: now,
     updatedAt: now,
   };

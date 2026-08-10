@@ -11,7 +11,7 @@
  * pruefbar sind.
  */
 
-import type { TicketStall } from './types';
+import type { LiveAgentRun, TicketStall } from './types';
 
 /** Die Teilmenge der Host-Orchestrierung, die das Board auswertet. */
 export interface OrchestrationSnapshot {
@@ -76,6 +76,25 @@ function latestRunsByIssue(
   }
 
   return latestRuns;
+}
+
+/**
+ * Liefert die Runs, die der Host gerade als laufend fuehrt.
+ *
+ * Das ist der einzige Beleg dafuer, dass ueberhaupt ein Agent arbeitet. Die
+ * Ansicht hat diese Frage bisher aus dem Phasenstatus beantwortet und damit
+ * auch dann "Working now" gezeigt, wenn seit einer halben Stunde kein Lauf
+ * mehr existierte.
+ */
+export function liveRunsFromOrchestration(
+  snapshot: OrchestrationSnapshot,
+  knownTaskIds: ReadonlySet<string>
+): LiveAgentRun[] {
+  return [...latestRunsByIssue(snapshot, knownTaskIds).entries()].flatMap(([issueId, run]) =>
+    LIVE_RUN_STATUSES.has(run.status)
+      ? [{ taskId: issueId, runId: run.id, startedAt: run.startedAt ?? run.createdAt }]
+      : []
+  );
 }
 
 /** Liefert Timeouts, fuer die ein neuer, begrenzter Versuch sinnvoll ist. */
