@@ -14,6 +14,8 @@ import {
   definePlugin,
   runWorker,
   type Issue,
+  type IssueComment,
+  type ToolRunContext,
   type PluginContext,
   type PluginEvent,
 } from "@paperclipai/plugin-sdk";
@@ -22,7 +24,8 @@ import {
   MANAGED_AGENT_INSTRUCTIONS,
   heartbeatAwareInstructions,
 } from "./agent-instructions";
-import type { CeremonyType, ScrumTask, TaskStatus, WorkerState } from "./core/types";
+import manifest from "./manifest";
+import type { CeremonyType, ScrumTask, TaskStatus, TicketStall, WorkerState } from "./core/types";
 import { createDefaultSettings } from "./core/types";
 import { createCeremonyRecord, createId, createScrumTask } from "./core/factories";
 import {
@@ -43,7 +46,12 @@ import {
   syncProjectOnboardingIssue,
   syncTaskIdentifiers,
 } from "./core/project-issue-sync";
-import { projectIssueProjection, projectProgress } from "./core/project-issue-projection";
+import {
+  REFINEMENT_MARKER,
+  malformedMarkers,
+  projectIssueProjection,
+  projectProgress,
+} from "./core/project-issue-projection";
 import {
   fetchGitHubCommitChanges,
   parseGitHubRepositoryUrl,
@@ -51,9 +59,27 @@ import {
 import {
   PRODUCT_DECISION_REQUIRED_MARKER,
   PRODUCT_DECISION_RESOLVED_MARKER,
+  SPRINT_SCOPE_RESOLUTION_MARKER,
   hasQaReviewApproval,
+  hasSprintScopeResolution,
+  isPluginAuthoredNotice,
   reviewOwnerForProjectIssue,
 } from "./core/review-routing";
+import {
+  RECORD_COMMIT_TOOL,
+  SUBMIT_FOR_REVIEW_TOOL,
+  SUBMIT_QA_VERDICT_TOOL,
+  SUBMIT_REFINEMENT_TOOL,
+  commitComment,
+  qaVerdictComment,
+  refinementComment,
+  reviewSubmissionComment,
+  validateCommit,
+  validateReviewSubmission,
+  validateQaVerdict,
+  validateRefinement,
+} from "./core/agent-tools";
+import { mergeStalls, stallsFromOrchestration } from "./core/project-orchestration";
 import { migrateState } from "./core/storage";
 import { recalculateMetrics, createInitialMetrics, onStatusChange } from "./core/hooks";
 import { collectDecisions, recordDecision, sendMessage } from "./core/communication";
@@ -65,6 +91,7 @@ import {
   runSprintReview,
   runRetrospective,
   reviewTicket,
+  pickAssignee,
   type AgentWorkRequest,
   type CeremonyContext,
 } from "./core/ceremonies";
@@ -115,7 +142,64 @@ function createEmptyState(): WorkerState {
     skills: [],
     proposedStories: [],
     agentInstructions: {},
+    stalls: [],
   };
+}
+
+/**
+ * Zerlegt die deklarierte Faehigkeitsbeschreibung einer Rolle in Einzelbegriffe.
+ *
+ * `team.ts` beschreibt Faehigkeiten als Fliesstext ("Feature development, bug
+ * fixing, unit tests, ..."). Die Zuweisung vergleicht Einzelbegriffe, also wird
+ * hier genau einmal zerlegt statt an jeder Vergleichsstelle.
+ */
+function declaredCapabilities(description: string): string[] {
+  return description
+    .split(/[,;]/)
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry.length > 1);
+}
+
+/**
+ * Wie oft der Worker ein Refinement fuer dasselbe Ticket erneut anfordert,
+ * bevor er es als menschliche Entscheidung meldet.
+ */
+const MAX_REFINEMENT_ATTEMPTS = 3;
+
+/** Wie viele Tickets gleichzeitig beim Technical Lead liegen duerfen. */
+const MAX_CONCURRENT_REFINEMENTS = 2;
+
+/**
+ * Wartezeit vor einem automatischen Refinement-Wiederanlauf.
+ *
+ * Ein Wiederanlauf ist nur dann eine Reparatur, wenn der vorherige Versuch
+ * Gelegenheit hatte, zu liefern. Ohne diese Frist wuerde jedes eingehende
+ * Host-Event denselben Auftrag erneut stellen.
+ */
+const REFINEMENT_RETRY_AFTER_MS = 15 * 60 * 1000;
+
+/**
+ * Der Auftrag, den ein Refinement-Weckruf mitbringt.
+ *
+ * `requestWakeup` uebertraegt nur einen Grund-Code. Das erwartete Ergebnis —
+ * und vor allem sein exaktes Format — stand bisher ausschliesslich in der
+ * statischen AGENTS.md zwischen mehreren konkurrierenden Regelbloecken. Das
+ * Format ist aber die Bedingung dafuer, dass das Ticket ueberhaupt planbar
+ * wird, also gehoert es an die Stelle, an der die Arbeit beauftragt wird.
+ */
+function refinementBriefComment(previousAttempts: number): string {
+  const retryHint =
+    previousAttempts > 0
+      ? `\n\n**Hinweis:** Das ist Versuch ${previousAttempts + 1}. Ein vorheriger Lauf hat keinen gueltigen Marker hinterlassen — ohne ihn bleibt das Ticket ungeplant.`
+      : "";
+
+  return [
+    "## Technical refinement requested",
+    "Ergaenze dieses Ticket um Schaetzung, Akzeptanzkriterien, technische Hinweise und Risiken.",
+    "Schliesse deinen Kommentar mit genau einem Marker ab. Er ist maschinenlesbar: ohne ihn wird das Ticket weder eingeplant noch zugewiesen.",
+    '```html\n<!-- agent-scrum:refinement:v1 {"storyPoints":5,"acceptanceCriteria":["..."],"technicalNotes":"...","risks":[],"labels":["testing","documentation"]} -->\n```',
+    "- `storyPoints`: Ganzzahl zwischen 1 und 100.\n- `acceptanceCriteria`: nicht-leere Liste pruefbarer Kriterien.\n- `labels`: optionale technische Domaenen des Tickets. Die Sprint-Planung waehlt darueber den passenden Developer aus; ohne Labels entscheidet allein die Auslastung.\n- Der Marker muss gueltiges JSON enthalten und von dir als Technical Lead stammen.",
+  ].join("\n\n") + retryHint;
 }
 
 const plugin = definePlugin({
@@ -203,6 +287,9 @@ const plugin = definePlugin({
 
       await previousInvocation;
       try {
+        // Eine Host-Invocation ist genau ein konsistenter Lesezeitpunkt. Der
+        // Kommentar-Zwischenspeicher darf nie darueber hinaus gelten.
+        beginSyncPass();
         await ensureReady(typeof scope === "string" ? scope : undefined);
         return await operation();
       } finally {
@@ -360,31 +447,195 @@ const plugin = definePlugin({
       });
     }
 
+    /**
+     * Darf der Mensch den ersten Sprint starten?
+     *
+     * Erst wenn das technische Refinement *abgeschlossen* ist — nicht schon,
+     * wenn eine einzelne Story fertig ist. Vorher genuegte ein `some()`: der
+     * Knopf stand bereit, waehrend der Technical Lead noch an den uebrigen
+     * Stories arbeitete, und ein Sprintstart haette sie ungeschaetzt
+     * zurueckgelassen.
+     */
     function canStartProjectSprint(): boolean {
       const onboarding = state.projectOnboarding;
-      return Boolean(
-        onboarding?.status === "sprint_planning" &&
-          onboarding.rootIssueId &&
-          state.tasks.some(
-            (task) => task.parentId === onboarding.rootIssueId && task.column === "backlog" && isReady(task)
-          )
+      if (onboarding?.status !== "sprint_planning" || !onboarding.rootIssueId) return false;
+
+      const projectTasks = state.tasks.filter((task) => task.parentId === onboarding.rootIssueId);
+      if (projectTasks.length === 0) return false;
+
+      const everythingRefined = projectTasks.every((task) => task.refined);
+      const hasPlannableWork = projectTasks.some(
+        (task) => task.column === "backlog" && isReady(task)
       );
+      return everythingRefined && hasPlannableWork;
     }
+
+    /**
+     * Kommentare eines Issues innerhalb *eines* Durchlaufs.
+     *
+     * Ein einzelner Sync liess bis zu sechs `listComments` je Issue laufen —
+     * fuenf Routing-Regeln plus die Projektion, jede mit eigenem Abruf. Bei
+     * einem Board mit zwanzig Issues sind das 120 Host-Aufrufe fuer eine
+     * Ansicht, die sich nicht geaendert hat.
+     */
+    let commentCache = new Map<string, IssueComment[]>();
+
+    async function readComments(issueId: string): Promise<IssueComment[]> {
+      if (!companyId) return [];
+
+      const cached = commentCache.get(issueId);
+      if (cached) return cached;
+
+      const comments = await ctx.issues.listComments(issueId, companyId);
+      commentCache.set(issueId, comments);
+      return comments;
+    }
+
+    /** Nach jedem eigenen Kommentar ist der Zwischenspeicher fuer dieses Issue ueberholt. */
+    function invalidateComments(issueId: string): void {
+      commentCache.delete(issueId);
+    }
+
+    /** Schreibt einen Kommentar und haelt den Zwischenspeicher konsistent. */
+    async function createIssueComment(
+      issueId: string,
+      body: string,
+      scopeId: string,
+      options?: { authorAgentId?: string }
+    ): Promise<unknown> {
+      const created = await ctx.issues.createComment(issueId, body, scopeId, options);
+      invalidateComments(issueId);
+      return created;
+    }
+
+    /** Beginnt einen neuen Durchlauf; der Zwischenspeicher gilt nie ueber Durchlaeufe hinweg. */
+    function beginSyncPass(): void {
+      commentCache = new Map();
+    }
+
+    /**
+     * Haelt fest, dass ein Ticket nicht mehr weiterlaeuft.
+     *
+     * Der Unterschied zwischen "arbeitet noch" und "steht" war bisher nicht
+     * darstellbar: ein abgestuerzter Agent-Run sah auf dem Board genauso aus
+     * wie ein laufender. Beides ist `in_progress`.
+     */
+    function recordStall(taskId: string, reason: string, kind: TicketStall["kind"] = "wakeup_failed"): void {
+      const stalls = (state.stalls ??= []);
+      const existing = stalls.find((entry) => entry.taskId === taskId);
+      if (existing && existing.reason === reason) return;
+
+      const stall: TicketStall = {
+        taskId,
+        reason,
+        kind,
+        detectedAt: new Date().toISOString(),
+        retriedAt: null,
+      };
+      if (existing) Object.assign(existing, stall);
+      else stalls.push(stall);
+    }
+
+    /** Loescht den Stillstand, sobald sich das Ticket nachweislich wieder bewegt. */
+    function clearStall(taskId: string): void {
+      if (!state.stalls?.length) return;
+      state.stalls = state.stalls.filter((entry) => entry.taskId !== taskId);
+    }
+
+    /**
+     * Schutzschalter gegen selbstverstaerkende Schreibschleifen.
+     *
+     * Jede Notiz des Workers loest ein Host-Event aus, das ihn erneut aufruft.
+     * Die fachlichen Idempotenz-Pruefungen sitzen an der jeweiligen Regel; das
+     * hier ist die letzte Verteidigungslinie, damit ein kuenftiger Routing-
+     * Fehler im Ticket des Nutzers nicht mehr als Kommentarflut ankommt.
+     */
+    const noticeBudget = new Map<string, { count: number; windowStart: number }>();
+    const NOTICE_WINDOW_MS = 10 * 60 * 1000;
+    const NOTICE_LIMIT_PER_WINDOW = 3;
+
+    async function postIssueNotice(
+      issueId: string,
+      noticeKey: string,
+      body: string
+    ): Promise<boolean> {
+      if (!companyId) return false;
+
+      const budgetKey = `${issueId}:${noticeKey}`;
+      const now = Date.now();
+      const budget = noticeBudget.get(budgetKey);
+      if (!budget || now - budget.windowStart > NOTICE_WINDOW_MS) {
+        noticeBudget.set(budgetKey, { count: 1, windowStart: now });
+      } else if (budget.count >= NOTICE_LIMIT_PER_WINDOW) {
+        ctx.logger.error("Suppressed a repeating Agent Scrum notice", {
+          issueId,
+          noticeKey,
+          count: budget.count,
+          hint: "A routing rule is re-deciding the same question. This is a bug, not a state.",
+        });
+        return false;
+      } else {
+        budget.count += 1;
+      }
+
+      try {
+        await createIssueComment(issueId, body, companyId);
+        invalidateComments(issueId);
+        return true;
+      } catch (error) {
+        ctx.logger.warn("Could not record an Agent Scrum notice", {
+          issueId,
+          noticeKey,
+          error: String(error),
+        });
+        return false;
+      }
+    }
+
+    /**
+     * Weckt die zustaendige Rolle fuer ein Issue.
+     *
+     * Der Idempotenz-Schluessel traegt den Versuchszaehler: derselbe Grund tritt
+     * im Lebenslauf eines Tickets mehrfach auf — ein Review nach einem Rework
+     * ist ein neuer Weckruf, kein Duplikat des ersten. Ein konstanter Schluessel
+     * laesst den zweiten Durchlauf still verschwinden.
+     */
+    const wakeupAttempts = new Map<string, number>();
 
     async function requestIssueWakeup(issueId: string, reason: string) {
       if (!companyId) return { queued: false, error: "No company context." };
+
+      const attemptKey = `${issueId}:${reason}`;
+      const attempt = (wakeupAttempts.get(attemptKey) ?? 0) + 1;
+      wakeupAttempts.set(attemptKey, attempt);
 
       try {
         const wakeup = await ctx.issues.requestWakeup(issueId, companyId, {
           reason,
           contextSource: "agent-scrum.project-onboarding",
-          idempotencyKey: `agent-scrum:${issueId}:${reason}`,
+          idempotencyKey: `agent-scrum:${issueId}:${reason}:${attempt}`,
         });
+        if (!wakeup.queued) {
+          // `queued: false` heisst nicht "fehlgeschlagen". Der Host meldet es
+          // auch, wenn fuer dieses Issue bereits ein Lauf eingereiht ist — der
+          // haeufigste Fall, wenn der Worker kurz hintereinander weckt. Das als
+          // Stillstand zu melden hat gesunde Boards Sekunden nach dem Start als
+          // "blocked" ausgewiesen.
+          ctx.logger.info("Issue wake-up was not queued; a run is likely already pending", {
+            issueId,
+            reason,
+            attempt,
+          });
+        } else {
+          clearStall(issueId);
+        }
         return { queued: wakeup.queued, runId: wakeup.runId, error: null };
       } catch (error) {
-        ctx.logger.warn("Could not queue project onboarding work", {
+        recordStall(issueId, `Wake-up "${reason}" failed: ${String(error)}`);
+        ctx.logger.error("Could not queue project onboarding work", {
           issueId,
           reason,
+          attempt,
           error: String(error),
         });
         return { queued: false, error: String(error) };
@@ -536,7 +787,7 @@ const plugin = definePlugin({
           );
         }
         if (!existingHold) {
-          await ctx.issues.createComment(
+          await createIssueComment(
             issue.id,
             "## Human scope approval required\n\nAgent Scrum held this agent-created work because it is outside the active project request. Do not plan, assign, or implement it until a human explicitly approves a new project scope.",
             companyId
@@ -714,7 +965,7 @@ const plugin = definePlugin({
       if (!qa || !productOwner) return issue;
 
       try {
-        const comments = await ctx.issues.listComments(issue.id, companyId);
+        const comments = await readComments(issue.id);
         let route = reviewOwnerForProjectIssue(issue, comments);
         if (!route) return issue;
 
@@ -723,15 +974,21 @@ const plugin = definePlugin({
           state.projectOnboarding?.status === "active" &&
           state.currentSprint?.status === "active"
         ) {
-          await ctx.issues.createComment(
-            issue.id,
-            [
-              "## Sprint scope already approved",
-              "This decision is covered by the human-approved active sprint. QA continues with the approved ticket scope; no additional human approval is required.",
-              PRODUCT_DECISION_RESOLVED_MARKER,
-            ].join("\n\n"),
-            companyId
-          );
+          // Genau einmal je offener Produktentscheidung. Der Kommentar loest
+          // selbst ein `issue.comment.created` aus; ohne diese Pruefung
+          // beantwortet der naechste Durchlauf dieselbe Frage erneut.
+          if (!hasSprintScopeResolution(comments)) {
+            await createIssueComment(
+              issue.id,
+              [
+                "## Sprint scope already approved",
+                "This decision is covered by the human-approved active sprint. QA continues with the approved ticket scope; no additional human approval is required.",
+                SPRINT_SCOPE_RESOLUTION_MARKER,
+                PRODUCT_DECISION_RESOLVED_MARKER,
+              ].join("\n\n"),
+              companyId
+            );
+          }
           route = { role: "qa_engineer", reason: "technical_review" };
         }
 
@@ -776,7 +1033,7 @@ const plugin = definePlugin({
       }
 
       try {
-        const comments = await ctx.issues.listComments(issue.id, companyId);
+        const comments = await readComments(issue.id);
         const projection = projectIssueProjection({
           issueId: issue.id,
           description: issue.description ?? "",
@@ -793,7 +1050,7 @@ const plugin = definePlugin({
             companyId
           );
           try {
-            await ctx.issues.createComment(
+            await createIssueComment(
               returned.id,
               `## GitHub commit evidence required\n\nAgent Scrum returned this completion to Development. Add a developer comment with <!-- agent-scrum:commit:v1 {"sha":"...","url":"https://github.com/owner/repo/commit/...","message":"..."} --> before QA can complete the ticket.`,
               companyId
@@ -827,7 +1084,7 @@ const plugin = definePlugin({
             companyId
           );
           try {
-            await ctx.issues.createComment(
+            await createIssueComment(
               review.id,
               "## QA acceptance criteria verification required\n\nAgent Scrum returned this completion to QA. Record every acceptance criterion as a checked QA checklist entry before approving Done.",
               companyId
@@ -862,7 +1119,7 @@ const plugin = definePlugin({
           companyId
         );
         try {
-          await ctx.issues.createComment(
+          await createIssueComment(
             review.id,
             "## QA review required\n\nAgent Scrum returned this direct completion to QA. Verify all acceptance criteria and tests before approving Done.",
             companyId
@@ -904,7 +1161,7 @@ const plugin = definePlugin({
       if (!qa) return issue;
 
       try {
-        const comments = await ctx.issues.listComments(issue.id, companyId);
+        const comments = await readComments(issue.id);
         if (!hasQaReviewApproval(comments, qa.id)) return issue;
 
         const projection = projectIssueProjection({
@@ -961,7 +1218,7 @@ const plugin = definePlugin({
           companyId
         );
         try {
-          await ctx.issues.createComment(
+          await createIssueComment(
             reassigned.id,
             `## QA rework routed\n\nQA returned this ticket to Development. Assigned to ${developer.name} to implement the documented review findings before returning it to QA.`,
             companyId
@@ -991,21 +1248,38 @@ const plugin = definePlugin({
     /** Restores ready work that was incorrectly assigned to the Technical Lead before sprint approval. */
     async function returnMisassignedSprintPlanningIssueToBacklog(issue: Issue): Promise<Issue> {
       const onboarding = state.projectOnboarding;
-      if (
-        !companyId ||
-        onboarding?.status !== "sprint_planning" ||
-        !isProjectOnboardingChildIssue(issue) ||
-        issue.status !== "blocked"
-      ) {
+      if (!companyId || onboarding?.status !== "sprint_planning" || !isProjectOnboardingChildIssue(issue)) {
         return issue;
       }
+
+      // Vor dem Sprintstart gehoert ein fertig verfeinertes Ticket ins Backlog.
+      // Ein herrenloses TODO waere hier doppelt falsch: die Sprint-Planung darf
+      // noch niemanden zuweisen, und die Uebernahme laeuft erst im aktiven
+      // Sprint — das Ticket bliebe also ohne Besitzer liegen.
+      if (issue.status === "todo" && issue.assigneeAgentId === null) {
+        try {
+          const returned = await ctx.issues.update(issue.id, { status: "backlog" }, companyId);
+          ctx.logger.info("Returned an unowned sprint-planning ticket to backlog", {
+            issueId: returned.id,
+          });
+          return returned;
+        } catch (error) {
+          ctx.logger.warn("Could not return an unowned sprint-planning ticket", {
+            issueId: issue.id,
+            error: String(error),
+          });
+          return issue;
+        }
+      }
+
+      if (issue.status !== "blocked") return issue;
 
       const technicalLead = state.agents.find((agent) => agent.role === "technical_lead");
       if (!technicalLead || issue.assigneeAgentId !== technicalLead.id) return issue;
 
       try {
         const [comments, relations] = await Promise.all([
-          ctx.issues.listComments(issue.id, companyId),
+          readComments(issue.id),
           ctx.issues.relations.get(issue.id, companyId),
         ]);
         if (relations.blockedBy.length > 0) return issue;
@@ -1029,7 +1303,7 @@ const plugin = definePlugin({
           companyId
         );
         try {
-          await ctx.issues.createComment(
+          await createIssueComment(
             returned.id,
             "## Sprint planning recovery\n\nAgent Scrum returned this ready ticket to Backlog because it was blocked under the Technical Lead without a native issue blocker. The human can now start the sprint; sprint planning will assign an available Developer.",
             companyId
@@ -1064,14 +1338,39 @@ const plugin = definePlugin({
       if (!technicalLead || issue.assigneeAgentId !== technicalLead.id) return issue;
 
       try {
-        const comments = await ctx.issues.listComments(issue.id, companyId);
+        const comments = await readComments(issue.id);
         const projection = projectIssueProjection({
           issueId: issue.id,
           description: issue.description ?? "",
           comments,
           agents: state.agents,
         });
-        if (!projection.refinement.refined) return issue;
+        if (!projection.refinement.refined) {
+          // Ein vorhandener, aber unlesbarer Marker ist eine andere Lage als
+          // gar kein Marker: der Agent hat geliefert, nur nicht verwertbar.
+          const broken = comments.flatMap((comment) =>
+            malformedMarkers(comment.body, REFINEMENT_MARKER)
+          );
+          if (broken.length > 0) {
+            recordStall(
+              issue.id,
+              "The refinement marker is present but not valid JSON.",
+              "refinement_invalid"
+            );
+            await postIssueNotice(
+              issue.id,
+              "refinement-malformed",
+              [
+                "## Technical refinement requested",
+                "Der letzte Refinement-Marker liess sich nicht lesen — er enthaelt kein gueltiges JSON. Das Ticket bleibt dadurch ungeplant.",
+                "Bitte den Marker erneut anhaengen, diesmal als eine einzige gueltige JSON-Zeile:",
+                '```html\n<!-- agent-scrum:refinement:v1 {"storyPoints":5,"acceptanceCriteria":["..."],"technicalNotes":null,"risks":[]} -->\n```',
+              ].join("\n\n")
+            );
+            await save();
+          }
+          return issue;
+        }
 
         const returned = await ctx.issues.update(
           issue.id,
@@ -1177,9 +1476,12 @@ const plugin = definePlugin({
             continue;
           }
 
+          // Nur den Status zu setzen hinterlaesst ein herrenloses TODO: es hat
+          // niemanden, den der Worker wecken koennte. Die Zuweisung uebernimmt
+          // die Planung direkt im Anschluss.
           const todo = await ctx.issues.update(issue.id, { status: "todo" }, companyId);
           try {
-            await ctx.issues.createComment(
+            await createIssueComment(
               todo.id,
               "## Blocker resolved\n\nAll linked blocker issues are done. Agent Scrum returned this ticket to TODO.",
               companyId
@@ -1218,6 +1520,9 @@ const plugin = definePlugin({
         await save();
         if (releasedTaskIds.length > 0) {
           ctx.logger.info("Project blockers resolved", { taskIds: releasedTaskIds });
+          // Direkt weiterreichen: ein freigegebenes Ticket ohne Assignee waere
+          // sonst genau das herrenlose TODO, das den Fluss anhaelt.
+          await requestProjectPlanning();
         }
       } catch (error) {
         ctx.logger.warn("Could not resolve project blockers", { error: String(error) });
@@ -1241,6 +1546,42 @@ const plugin = definePlugin({
             (task.column === "todo" && task.assignedAgentId === technicalLeadId)
           )
       );
+    }
+
+    /**
+     * Haelt Tickets zurueck, die der Host gar nicht wecken wuerde.
+     *
+     * Der Product Owner verknuepft Stories mit Abhaengigkeiten. Ein Weckruf auf
+     * ein blockiertes Issue lehnt der Host mit "Issue is blocked by unresolved
+     * blockers" ab — der Worker hat das als Stillstand vermerkt, das Ticket nie
+     * verfeinert, und damit blieb der Sprint dauerhaft nicht startbar. Die
+     * Abhaengigkeit ist aber kein Fehler, sondern eine Reihenfolge.
+     */
+    async function withoutBlockedCandidates(tasks: ScrumTask[]): Promise<ScrumTask[]> {
+      if (!companyId || tasks.length === 0) return tasks;
+
+      const open: ScrumTask[] = [];
+      for (const task of tasks) {
+        try {
+          const relations = await ctx.issues.relations.get(task.id, companyId);
+          const blocked = relations.blockedBy.some((blocker) => blocker.status !== "done");
+          if (blocked) {
+            // Auf eine Abhaengigkeit zu warten ist kein Stillstand, sondern
+            // Reihenfolge. Ein frueher vermerkter Weckruf-Fehler an diesem
+            // Ticket war genau dieser Fall und wird zurueckgenommen.
+            clearStall(task.id);
+            ctx.logger.info("Refinement deferred until blockers clear", { issueId: task.id });
+            continue;
+          }
+        } catch (error) {
+          ctx.logger.warn("Could not read blocker relations; refining anyway", {
+            issueId: task.id,
+            error: String(error),
+          });
+        }
+        open.push(task);
+      }
+      return open;
     }
 
     function reconcileProjectRefinementRequests(): boolean {
@@ -1267,19 +1608,33 @@ const plugin = definePlugin({
     };
 
     let projectRefinementPromise: Promise<ProjectRefinementResult> | null = null;
+    /**
+     * True, solange die Refinement-Routine auf diesem Aufrufpfad laeuft.
+     *
+     * Die Routine schreibt ins Ticket, das Schreiben erzeugt ein Host-Event,
+     * und der Event-Handler fordert seinerseits ein Refinement an. Ohne diese
+     * Markierung wuerde er die laufende Promise zurueckbekommen — also auf sich
+     * selbst warten.
+     */
+    let refinementRunning = false;
 
     async function requestProjectRefinement(
       source: "automatic" | "manual" = "manual",
       force = false
     ): Promise<ProjectRefinementResult> {
+      if (refinementRunning) {
+        return { requested: false, error: "Refinement is already running.", taskIds: [] };
+      }
       if (projectRefinementPromise) return projectRefinementPromise;
 
+      refinementRunning = true;
       const refinement = requestProjectRefinementInternal(source, force);
       projectRefinementPromise = refinement;
       try {
         return await refinement;
       } finally {
         projectRefinementPromise = null;
+        refinementRunning = false;
       }
     }
 
@@ -1320,9 +1675,76 @@ const plugin = definePlugin({
         };
       }
 
+      const attempts = new Map(
+        (onboarding.refinementAttempts ?? []).map((entry) => [entry.taskId, entry])
+      );
       const requestedTaskIds = new Set(onboarding.refinementRequestedTaskIds ?? []);
-      const taskIds = refinementCandidates()
-        .filter((task) => force || !requestedTaskIds.has(task.id))
+
+      // Der Technical Lead laeuft mit `maxConcurrentRuns: 1`. Alle offenen
+      // Tickets gleichzeitig zu wecken erzeugt keine Parallelitaet, sondern
+      // eine Warteschlange, hinter der die gesamte Lieferung steht.
+      const openRefinements = state.tasks.filter(
+        (task) =>
+          task.column === "todo" &&
+          task.assignedAgentId === technicalLead.id &&
+          !task.refined
+      ).length;
+      const refinementSlots = Math.max(0, MAX_CONCURRENT_REFINEMENTS - openRefinements);
+      if (refinementSlots === 0 && !force) {
+        if (requestStateChanged) await save();
+        return {
+          requested: false,
+          error: "The Technical Lead is already refining the maximum number of tickets.",
+          taskIds: [] as string[],
+        };
+      }
+
+      const candidates = await withoutBlockedCandidates(refinementCandidates());
+
+      // Erschoepfte Tickets werden gemeldet, nicht verschwiegen. Der Technical
+      // Lead liefert hier dauerhaft kein verwertbares Refinement; das ist eine
+      // menschliche Entscheidung, kein Zustand zum Aussitzen.
+      for (const task of candidates) {
+        const attempt = attempts.get(task.id);
+        if (!attempt || attempt.attempts < MAX_REFINEMENT_ATTEMPTS) continue;
+        if (state.stalls?.some((entry) => entry.taskId === task.id)) continue;
+
+        recordStall(
+          task.id,
+          `The Technical Lead did not produce a valid refinement marker in ${attempt.attempts} attempts.`,
+          "refinement_invalid"
+        );
+        await postIssueNotice(
+          task.id,
+          "refinement-exhausted",
+          [
+            "## Refinement needs a human decision",
+            `Agent Scrum requested a technical refinement ${attempt.attempts} times without receiving a valid \`agent-scrum:refinement:v1\` marker.`,
+            "This ticket stays out of sprint planning until it is refined. Add the estimate and acceptance criteria by hand, or retry refinement from the Scrum Board.",
+          ].join("\n\n")
+        );
+      }
+      const taskIds = candidates
+        .filter((task) => {
+          if (force) return true;
+          if (!requestedTaskIds.has(task.id)) return true;
+
+          // Ein Wiederanlauf ist erlaubt, sobald der vorherige Versuch
+          // erkennbar nichts geliefert hat — entweder weil er gescheitert ist
+          // oder weil die Frist verstrichen ist. Bisher war jedes Ticket nach
+          // genau einem Versuch endgueltig verloren.
+          const attempt = attempts.get(task.id);
+          if (!attempt || attempt.attempts >= MAX_REFINEMENT_ATTEMPTS) return false;
+
+          const failedRun = state.stalls?.some(
+            (entry) => entry.taskId === task.id && entry.kind === "run_failed"
+          );
+          if (failedRun) return true;
+
+          const waitedFor = Date.now() - Date.parse(attempt.lastRequestedAt);
+          return Number.isFinite(waitedFor) && waitedFor >= REFINEMENT_RETRY_AFTER_MS;
+        })
+        .slice(0, force ? undefined : refinementSlots)
         .map((task) => task.id);
       if (taskIds.length === 0) {
         if (requestStateChanged) await save();
@@ -1330,24 +1752,42 @@ const plugin = definePlugin({
       }
 
       try {
-        const wakeups = await Promise.all(
-          taskIds.map(async (taskId) => {
-            await ctx.issues.update(
-              taskId,
-              { status: "todo", assigneeAgentId: technicalLead.id },
-              refinementCompanyId
-            );
-            return requestIssueWakeup(taskId, "project_refinement");
-          })
-        );
+        const wakeups: Array<{ taskId: string; queued: boolean; error: string | null }> = [];
+        for (const taskId of taskIds) {
+          await ctx.issues.update(
+            taskId,
+            { status: "todo", assigneeAgentId: technicalLead.id },
+            refinementCompanyId
+          );
+          // Der Weckruf traegt nur einen Grund-Code. Das erwartete Ergebnis
+          // gehoert ins Ticket, sonst muss der Agent es aus 12 KB Instruktionen
+          // erraten — und genau daran scheitert der Marker.
+          await postIssueNotice(
+            taskId,
+            "refinement-brief",
+            refinementBriefComment(attempts.get(taskId)?.attempts ?? 0)
+          );
+          const wakeup = await requestIssueWakeup(taskId, "project_refinement");
+          wakeups.push({ taskId, queued: wakeup.queued, error: wakeup.error ?? null });
+        }
         const failedWakeup = wakeups.find((wakeup) => !wakeup.queued);
         if (failedWakeup) {
           throw new Error(failedWakeup.error ?? "Could not queue project refinement.");
         }
+        const now = new Date().toISOString();
+        for (const taskId of taskIds) {
+          const previous = attempts.get(taskId);
+          attempts.set(taskId, {
+            taskId,
+            attempts: (previous?.attempts ?? 0) + 1,
+            lastRequestedAt: now,
+          });
+        }
         state.projectOnboarding = {
           ...onboarding,
           refinementRequestedTaskIds: [...new Set([...requestedTaskIds, ...taskIds])],
-          updatedAt: new Date().toISOString(),
+          refinementAttempts: [...attempts.values()],
+          updatedAt: now,
         };
         state.ceremonies.push(
           createCeremonyRecord(
@@ -1393,37 +1833,68 @@ const plugin = definePlugin({
       }
 
       const rootIssueId = onboarding.rootIssueId;
-      const hasTodo = state.tasks.some(
-        (task) => task.parentId === rootIssueId && task.column === "todo"
-      );
-      if (hasTodo) return;
+      const technicalLeadId = state.agents.find((agent) => agent.role === "technical_lead")?.id;
 
-      const currentTodo = state.tasks.filter((task) => task.column === "todo").length;
+      // Bewusst kein "es liegt schon etwas in TODO"-Abbruch mehr. Die Kapazitaet
+      // regeln `todoSlots` und die freien Entwicklerplaetze; der zusaetzliche
+      // Wachposten hat ein *unzugewiesenes* TODO wie laufende Arbeit behandelt
+      // und damit die Planung dauerhaft angehalten — das Ticket bekam nie einen
+      // Assignee, und ohne Assignee weckt der Worker niemanden.
+      const currentTodo = state.tasks.filter(
+        (task) => task.column === "todo" && task.assignedAgentId !== technicalLeadId
+      ).length;
       const todoSlots = Math.max(0, state.settings.wipLimits.todo - currentTodo);
       if (todoSlots === 0) return;
 
-      const availableDevelopers = state.agents.filter(
-        (agent) =>
-          agent.role === "developer" &&
-          !state.tasks.some(
-            (task) =>
-              task.assignedAgentId === agent.id &&
-              (task.column === "todo" || task.column === "in_progress" || task.column === "in_review")
-          )
+      // Kapazitaet folgt `wipLimitDevelopment`. Ein Ticket in `in_review` wartet
+      // auf QA und belegt den Entwickler nicht — es als Auslastung zu zaehlen
+      // hat die Einstellung wirkungslos gemacht.
+      const developerLimit = state.settings.wipLimits.development;
+      const availableDevelopers = state.agents.flatMap((agent) => {
+        if (agent.role !== "developer") return [];
+
+        const activeLoad = state.tasks.filter(
+          (task) =>
+            task.assignedAgentId === agent.id &&
+            (task.column === "todo" || task.column === "in_progress")
+        ).length;
+        const freeSlots = Math.max(0, developerLimit - activeLoad);
+        return Array.from({ length: freeSlots }, () => agent);
+      });
+      // Ein Ticket in TODO *ohne* Assignee ist herrenlos: der Blocker-Release
+      // setzt nur den Status, die Zuweisung fehlt. Solche Tickets werden hier
+      // uebernommen — sonst wartet das Board auf einen Agenten, den es nie
+      // benannt hat.
+      const orphanedTodo = state.tasks.filter(
+        (task) =>
+          task.parentId === rootIssueId &&
+          task.column === "todo" &&
+          task.assignedAgentId === null &&
+          isReady(task)
       );
       const readyBacklog = state.tasks
         .filter(
           (task) => task.parentId === rootIssueId && task.column === "backlog" && isReady(task)
         )
         .sort(byBusinessValue);
-      const planned = readyBacklog.slice(0, Math.min(todoSlots, availableDevelopers.length));
+      const planned = [...orphanedTodo, ...readyBacklog].slice(
+        0,
+        Math.min(todoSlots + orphanedTodo.length, availableDevelopers.length)
+      );
       if (planned.length === 0) return;
 
       const productOwner = state.agents.find((agent) => agent.role === "product_owner");
       const plannedTaskIds: string[] = [];
+      // Reihum zu verteilen ignoriert, was der Technical Lead ueber das Ticket
+      // weiss. `pickAssignee` wertet Labels gegen Faehigkeiten und faellt bei
+      // Gleichstand auf die geringste Auslastung zurueck.
+      const remainingDevelopers = [...availableDevelopers];
 
-      for (const [index, task] of planned.entries()) {
-        const developer = availableDevelopers[index];
+      for (const task of planned) {
+        const candidate = pickAssignee(task, remainingDevelopers, state);
+        const developer = candidate?.agent ?? remainingDevelopers[0];
+        if (!developer) break;
+        remainingDevelopers.splice(remainingDevelopers.indexOf(developer), 1);
         try {
           const updated = await ctx.issues.update(
             task.id,
@@ -1476,7 +1947,7 @@ const plugin = definePlugin({
       if (!companyId) return { ...issue, comments: [] };
 
       try {
-        return { ...issue, comments: await ctx.issues.listComments(issue.id, companyId) };
+        return { ...issue, comments: await readComments(issue.id) };
       } catch (error) {
         ctx.logger.warn("Could not load project issue comments", {
           issueId: issue.id,
@@ -1515,12 +1986,232 @@ const plugin = definePlugin({
     }
 
     /**
+     * Stammt dieses Kommentar-Event vom Worker selbst?
+     *
+     * Der Worker dokumentiert Routing-Entscheidungen als Kommentare. Jeder davon
+     * erzeugt ein `issue.comment.created`, das ihn erneut aufruft. Ohne diesen
+     * Filter ist jede Notiz der Ausloeser der naechsten.
+     */
+    function isOwnNoticeEvent(event: { payload?: unknown }): boolean {
+      const payload = event.payload as { body?: unknown } | null;
+      return typeof payload?.body === "string" && isPluginAuthoredNotice(payload.body);
+    }
+
+    /**
+     * Laesst den Lernzyklus auch waehrend der Lieferung laufen.
+     *
+     * Die Retrospektive lief bisher genau einmal — beim Abschluss des
+     * Projektauftrags. Damit konnte sie den Sprint, den sie auswertet, nicht
+     * mehr verbessern; ihr einziger Zweck war also verfehlt.
+     *
+     * Sie darf hier laufen, weil sie als einzige Zeremonie keine Ticketzustaende
+     * anfasst: sie liest fertige Arbeit und schreibt Learnings, Skills und
+     * Vorschlaege. Impediment Resolution und Sprint Planning bleiben dagegen
+     * ausgeschlossen — beide setzen `column` und `assignedAgentId`, was auf
+     * einem host-gefuehrten Board sofort auseinanderlaufen wuerde. Ihre
+     * Aufgaben uebernehmen `releaseResolvedProjectBlockers`,
+     * `refreshOrchestrationStalls` und `planProjectBacklog`.
+     */
+    const MIN_DONE_TASKS_PER_RETROSPECTIVE = 2;
+
+    async function maybeRunProjectRetrospective(): Promise<boolean> {
+      const rootIssueId = state.projectOnboarding?.rootIssueId;
+      if (!rootIssueId || state.settings.events.enableAutoReview === false) return false;
+
+      const doneTasks = state.tasks.filter(
+        (task) => task.parentId === rootIssueId && task.column === "done"
+      );
+      const lastRetrospective = [...state.ceremonies]
+        .reverse()
+        .find((ceremony) => ceremony.type === "sprint_retrospective");
+      const alreadyInspected = lastRetrospective?.taskIds?.length ?? 0;
+      if (doneTasks.length - alreadyInspected < MIN_DONE_TASKS_PER_RETROSPECTIVE) return false;
+
+      // Die Zeremonie darf keine neue Produktarbeit erfinden — dieselbe Grenze
+      // wie beim automatischen Trigger.
+      const queuedWork = pendingWork.length;
+      try {
+        runCeremony("sprint_retrospective", false);
+      } finally {
+        pendingWork.splice(queuedWork);
+      }
+      await syncRetrospectiveSkills();
+      ctx.logger.info("Project retrospective extracted learnings mid-delivery", {
+        doneTasks: doneTasks.length,
+        learnings: state.learnings.length,
+      });
+      return true;
+    }
+
+    /**
+     * Liest den Stillstandszustand beim Host, statt ihn aus Events zu erraten.
+     *
+     * Die Event-Handler bleiben: sie melden sofort. Diese Abfrage ist die
+     * Korrektur — sie findet auch, was waehrend eines Worker-Neustarts passiert
+     * ist, und raeumt auf, was der Host laengst geloest hat.
+     */
+    async function refreshOrchestrationStalls(): Promise<boolean> {
+      const rootIssueId = state.projectOnboarding?.rootIssueId;
+      if (!companyId || !rootIssueId) return false;
+
+      try {
+        const summary = await ctx.issues.summaries.getOrchestration({
+          issueId: rootIssueId,
+          companyId,
+          includeSubtree: true,
+        });
+        const observed = stallsFromOrchestration(
+          summary,
+          new Set(state.tasks.map((task) => task.id))
+        );
+        // Erledigte und stornierte Tickets koennen nicht stehen.
+        const settled = new Set(
+          state.tasks.filter((task) => task.column === "done").map((task) => task.id)
+        );
+        const merged = mergeStalls(state.stalls ?? [], observed, settled);
+        if (JSON.stringify(merged) === JSON.stringify(state.stalls ?? [])) return false;
+
+        state.stalls = merged;
+        if (observed.length > 0) {
+          ctx.logger.warn("Host reports stalled project work", {
+            count: observed.length,
+            kinds: [...new Set(observed.map((stall) => stall.kind))],
+          });
+        }
+        return true;
+      } catch (error) {
+        // Fehlt die Capability oder antwortet der Host nicht, bleibt die
+        // ereignisbasierte Erfassung die Grundlage. Das ist weniger, aber nicht
+        // falsch — deshalb nur eine Warnung.
+        ctx.logger.warn("Could not read host orchestration summary", { error: String(error) });
+        return false;
+      }
+    }
+
+    /**
+     * Findet Tickets, die auf einen menschlichen Board-Dialog warten.
+     *
+     * Der Host verlangt fuer einen agentengeschriebenen Wechsel nach
+     * `in_review` einen Review-Pfad. Ein Agent, der sich selbst hilft, baut
+     * dafuer eine `request_confirmation` mit `board_only` — und das Ticket
+     * wartet danach auf einen Klick, den niemand erwartet. Der
+     * Orchestrierungs-Snapshot kennt Freigaben, aber keine Interactions;
+     * deshalb wird hier gezielt nachgesehen.
+     */
+    async function detectPendingInteractionStalls(): Promise<boolean> {
+      const rootIssueId = state.projectOnboarding?.rootIssueId;
+      if (!companyId || !rootIssueId) return false;
+
+      const reviewTasks = state.tasks.filter(
+        (task) => task.parentId === rootIssueId && task.column === "in_review"
+      );
+      if (reviewTasks.length === 0) return false;
+
+      let changed = false;
+      for (const task of reviewTasks) {
+        try {
+          const interactions = await ctx.issues.listInteractions(task.id, companyId);
+          const blocking = interactions.find(
+            (interaction) => (interaction as { status?: string }).status === "pending"
+          );
+          if (!blocking) continue;
+
+          recordStall(
+            task.id,
+            "A board confirmation is pending. QA cannot take this review until it is resolved.",
+            "awaiting_approval"
+          );
+          changed = true;
+        } catch (error) {
+          ctx.logger.warn("Could not inspect issue interactions", {
+            issueId: task.id,
+            error: String(error),
+          });
+          return changed;
+        }
+      }
+      return changed;
+    }
+
+    /**
+     * Wann der teure Voll-Abgleich zuletzt lief.
+     *
+     * Das Board pollt alle paar Sekunden. Der Voll-Abgleich liest jedes Issue
+     * des Projekts *und schreibt dabei* — er gehoert damit nicht in einen
+     * Lesepfad, den die Oberflaeche taktet. Events treiben die Arbeit; dieser
+     * Abgleich heilt nur, was ein verpasstes Event liegen gelassen hat.
+     */
+    let lastFullSyncAt = 0;
+    const FULL_SYNC_INTERVAL_MS = 60 * 1000;
+
+    /**
+     * Liest den Liefer-Scope: bevorzugt als Kickoff-Teilbaum, sonst das Projekt.
+     *
+     * `getSubtree` liefert genau die Issues, die dieses Board zeigt — in einem
+     * Aufruf und ohne Fremd-Issues des Projekts. Fehlt die Capability oder
+     * antwortet der Host nicht, bleibt das Projekt-Listing die Grundlage; das
+     * Board soll nicht leer laufen, nur weil eine Optimierung fehlt.
+     */
+    async function listProjectScopeIssues(
+      rootIssueId: string,
+      projectId: string,
+      limit: number,
+      offset: number
+    ): Promise<Issue[]> {
+      if (!companyId) return [];
+
+      if (offset === 0 && subtreeReadAvailable) {
+        try {
+          const subtree = await ctx.issues.getSubtree(rootIssueId, companyId, {
+            includeRoot: true,
+          });
+          return subtree.issues;
+        } catch (error) {
+          // Einmal merken statt bei jedem Abgleich erneut anlaufen zu lassen.
+          subtreeReadAvailable = false;
+          ctx.logger.warn("Subtree read unavailable, falling back to project listing", {
+            error: String(error),
+          });
+        }
+      }
+      // Der Teilbaum kam bereits vollstaendig; eine zweite Seite gibt es nicht.
+      if (subtreeReadAvailable) return [];
+
+      return ctx.issues.list({ companyId, projectId, limit, offset });
+    }
+
+    /** Wird einmal abgeschaltet, wenn der Host den Teilbaum nicht liefert. */
+    let subtreeReadAvailable = true;
+
+    /**
+     * Fuehrt den Voll-Abgleich nur aus, wenn er faellig ist.
+     *
+     * `force` gilt fuer Pfade, die auf Aktualitaet angewiesen sind: Start,
+     * menschliche Aktionen und Statuswechsel.
+     */
+    async function reconcileProjectIssues(force = false): Promise<boolean> {
+      // Materialisieren muss jeder Lesevorgang: ein neu angelegtes Child-Issue
+      // darf nicht bis zum naechsten Routing-Fenster unsichtbar bleiben.
+      // Gedrosselt wird nur der Teil, der *schreibt*.
+      const routeDue = force || Date.now() - lastFullSyncAt >= FULL_SYNC_INTERVAL_MS;
+      return syncOnboardingProjectIssues({ route: routeDue });
+    }
+
+    /**
      * Heilt verpasste Events nach einem Worker-Neustart.
      *
      * Das Host-Issue bleibt die Quelle der Wahrheit. Daher aktualisiert diese
      * Funktion nur das lokale Materialisat und startet keine Zeremonie.
+     *
+     * `route` trennt Lesen von Schreiben. Die fuenf Routing-Regeln aendern
+     * Host-Zustand; sie gehoeren nicht in einen Pfad, den die Oberflaeche im
+     * Sekundentakt aufruft.
      */
-    async function syncOnboardingProjectIssues(): Promise<boolean> {
+    async function syncOnboardingProjectIssues(
+      options: { route?: boolean } = {}
+    ): Promise<boolean> {
+      const route = options.route !== false;
+      if (route) lastFullSyncAt = Date.now();
       const onboarding = state.projectOnboarding;
       if (
         !companyId ||
@@ -1542,22 +2233,28 @@ const plugin = definePlugin({
 
       try {
         while (true) {
-          const issues = await ctx.issues.list({
-            companyId,
-            projectId: onboarding.projectId,
+          // Der Kickoff-Teilbaum ist genau der Liefer-Scope. Das gesamte Projekt
+          // zu listen holt auch Issues, die dieses Board nie anfasst — und
+          // zwingt danach zum Filtern.
+          const issues = await listProjectScopeIssues(
+            onboarding.rootIssueId,
+            onboarding.projectId,
             limit,
-            offset,
-          });
+            offset
+          );
           for (const issue of issues) {
-            const completionGatedIssue = await routeProjectCompletionToQa(issue, null);
-            const qaCompletedIssue = await completeFinalQaProjectReview(completionGatedIssue);
-            const reworkRoutedIssue = await routeProjectReworkToDeveloper(qaCompletedIssue);
-            const recoveredIssue = await returnMisassignedSprintPlanningIssueToBacklog(reworkRoutedIssue);
-            const routedIssue = await routeProjectReview(recoveredIssue);
+            let current = issue;
+            if (route) {
+              current = await routeProjectCompletionToQa(current, null);
+              current = await completeFinalQaProjectReview(current);
+              current = await routeProjectReworkToDeveloper(current);
+              current = await returnMisassignedSprintPlanningIssueToBacklog(current);
+              current = await routeProjectReview(current);
+            }
             const result = syncProjectOnboardingIssue(
               state.tasks,
               onboarding,
-              await withHostComments(routedIssue),
+              await withHostComments(current),
               null,
               state.agents
             );
@@ -1575,12 +2272,27 @@ const plugin = definePlugin({
       const projectCompleted = completeProjectOnboardingIfDelivered();
       const refinementRequestsChanged = reconcileProjectRefinementRequests();
       const agentActivityChanged = syncProjectAgentActivity();
-      if (changed || projectCompleted || refinementRequestsChanged || agentActivityChanged) {
+      // Nur im Schreibfenster: die Abfrage kostet einen Host-Aufruf und der
+      // Stillstandszustand aendert sich nicht im Sekundentakt.
+      const stallsChanged = route ? await refreshOrchestrationStalls() : false;
+      const interactionStalls = route ? await detectPendingInteractionStalls() : false;
+      const learned = route && !projectCompleted ? await maybeRunProjectRetrospective() : false;
+      if (
+        changed ||
+        projectCompleted ||
+        refinementRequestsChanged ||
+        agentActivityChanged ||
+        stallsChanged ||
+        interactionStalls ||
+        learned
+      ) {
         if (changed) state.metrics = recalculateMetrics(state);
         await save();
       }
       if (projectCompleted) await syncRetrospectiveSkills();
-      await releaseResolvedProjectBlockers();
+      // Blocker aufloesen heisst Host-Issues aendern — auch das gehoert in den
+      // Schreibpfad, nicht in jeden Board-Aufruf.
+      if (route) await releaseResolvedProjectBlockers();
       return changed || projectCompleted;
     }
 
@@ -1676,7 +2388,12 @@ const plugin = definePlugin({
             role: member.role,
             status: existing?.status ?? "idle",
             currentTaskId: existing?.currentTaskId ?? null,
-            capabilities: existing?.capabilities ?? [],
+            // Die deklarierten Faehigkeiten der Rolle, nicht ein leeres Array:
+            // die skill-basierte Zuweisung hat sonst nie etwas zu vergleichen
+            // und faellt immer auf blosse Reihenfolge zurueck.
+            capabilities: existing?.capabilities?.length
+              ? existing.capabilities
+              : declaredCapabilities(member.capabilities),
             skills: existing?.skills,
           });
         } catch (error) {
@@ -2201,6 +2918,9 @@ const plugin = definePlugin({
 
         reconcileProjectRefinementRequests();
         syncProjectAgentActivity();
+        // Der Lernzyklus haengt an fertiger Arbeit, nicht an einem Zeitfenster:
+        // ein abgeschlossenes Ticket ist der Anlass, nicht der naechste Tick.
+        if (!projectCompleted) await maybeRunProjectRetrospective();
         state.metrics = recalculateMetrics(state);
         await save();
         if (
@@ -2243,16 +2963,97 @@ const plugin = definePlugin({
     });
 
     registerCompanyEvent("issue.comment.created", async (event) => {
+      // Eigene Routing-Notizen sind Protokoll, kein neuer Vorgang.
+      if (isOwnNoticeEvent(event)) return;
+
       const issueId = issueIdFromEvent(event);
       if (issueId) {
+        // `syncOnboardingIssue` routet dieses Issue bereits. Ein zusaetzlicher
+        // Lauf ueber alle offenen Reviews verdoppelt nur jede Schreiboperation.
         await syncOnboardingIssue({
           companyId: event.companyId,
           entityId: issueId,
           actorId: event.actorId,
         });
+        await refreshTechnicalAnalysisStatus();
+        return;
       }
+
       await refreshTechnicalAnalysisStatus();
       await routeOpenProjectReviews();
+    });
+
+    /**
+     * Ein gescheiterter Agent-Run war bisher unsichtbar.
+     *
+     * Das Ticket blieb in `in_progress` stehen, das Board zeigte "laeuft", und
+     * der einzige Weg zurueck war der 30-Minuten-Watchdog des Scrum Masters —
+     * der einen abgestuerzten Run nicht als solchen erkennen kann.
+     */
+    async function recordRunFailure(event: PluginEvent, label: string): Promise<void> {
+      const issueId = issueIdFromEvent(event);
+      if (!issueId || !state.tasks.some((task) => task.id === issueId)) return;
+
+      recordStall(issueId, label, "run_failed");
+      ctx.logger.error("Agent run did not finish", { issueId, label, eventId: event.eventId });
+      await save();
+    }
+
+    registerCompanyEvent("agent.run.failed", async (event) => {
+      await recordRunFailure(event, "The agent run failed. The ticket needs a new attempt.");
+    });
+
+    registerCompanyEvent("agent.run.cancelled", async (event) => {
+      await recordRunFailure(event, "The agent run was cancelled before it finished.");
+    });
+
+    registerCompanyEvent("agent.run.finished", async (event) => {
+      const issueId = issueIdFromEvent(event);
+      if (!issueId || !state.stalls?.some((entry) => entry.taskId === issueId)) return;
+
+      clearStall(issueId);
+      await save();
+    });
+
+    /**
+     * Eine wartende Freigabe ist der haeufigste Grund fuer ein Ticket, das
+     * "ewig dauert" — und der Header behauptete dabei, es sei keine noetig.
+     */
+    registerCompanyEvent("approval.created", async (event) => {
+      const issueId = issueIdFromEvent(event);
+      if (!issueId || !state.tasks.some((task) => task.id === issueId)) return;
+
+      recordStall(issueId, "Waiting for a human approval outside the board.", "awaiting_approval");
+      await save();
+    });
+
+    registerCompanyEvent("approval.decided", async (event) => {
+      const issueId = issueIdFromEvent(event);
+      if (!issueId) return;
+
+      clearStall(issueId);
+      await save();
+    });
+
+    registerCompanyEvent("budget.incident.opened", async (event) => {
+      const issueId = issueIdFromEvent(event);
+      if (!issueId || !state.tasks.some((task) => task.id === issueId)) return;
+
+      recordStall(issueId, "A budget incident stopped this agent.", "budget");
+      await save();
+    });
+
+    registerCompanyEvent("budget.incident.resolved", async (event) => {
+      const issueId = issueIdFromEvent(event);
+      if (!issueId) return;
+
+      clearStall(issueId);
+      await save();
+    });
+
+    /** Ein aufgeloester Blocker soll die Arbeit sofort weitertreiben, nicht erst beim naechsten Kommentar. */
+    registerCompanyEvent("issue.relations.updated", async () => {
+      await releaseResolvedProjectBlockers();
     });
 
     // -------------------------------------------------------------------------
@@ -2260,8 +3061,10 @@ const plugin = definePlugin({
     // -------------------------------------------------------------------------
 
     registerCompanyData("board", async (params) => {
+      // Die Oberflaeche taktet diesen Aufruf. Der Voll-Abgleich laeuft deshalb
+      // gedrosselt: Events treiben die Arbeit, der Abgleich heilt nur Luecken.
       await refreshTechnicalAnalysisStatus();
-      await syncOnboardingProjectIssues();
+      await reconcileProjectIssues(params.force === true);
       await hydrateTaskIdentifiers();
       const rootIssueId = state.projectOnboarding?.rootIssueId;
       const kickoffTask = await projectKickoffTask();
@@ -2280,6 +3083,7 @@ const plugin = definePlugin({
         canStartProjectOnboarding: canStartProjectOnboarding(),
         canStartProjectSprint: canStartProjectSprint(),
         projectProgress: projectProgress(projectTasks),
+        stalls: state.stalls ?? [],
       };
     });
 
@@ -2466,7 +3270,7 @@ const plugin = definePlugin({
 
       let commentError: string | null = null;
       try {
-        await ctx.issues.createComment(
+        await createIssueComment(
           onboarding.rootIssueId,
           "## Technical analysis approved\n\nA human approved the Technical Lead analysis and started Product Owner story discovery.",
           companyId
@@ -2503,7 +3307,7 @@ const plugin = definePlugin({
       if (!technicalLead) return { rejected: false, error: "The Technical Lead is not available." };
 
       try {
-        await ctx.issues.createComment(
+        await createIssueComment(
           onboarding.rootIssueId,
           [
             "## Technical analysis changes requested",
@@ -2551,7 +3355,7 @@ const plugin = definePlugin({
 
       let commentError: string | null = null;
       try {
-        await ctx.issues.createComment(
+        await createIssueComment(
           rootIssueId,
           onboarding.requiresSprint
             ? "## Backlog approved\n\nThe human approved the initial backlog. Technical refinement must finish before the human starts the first sprint; do not advance child issues into delivery yet."
@@ -2611,7 +3415,7 @@ const plugin = definePlugin({
       await save();
 
       try {
-        await ctx.issues.createComment(
+        await createIssueComment(
           onboarding.rootIssueId,
           `## ${sprint.name} started\n\nThe human approved the first sprint. Agent Scrum will plan refined backlog issues through the Paperclip workflow.`,
           companyId
@@ -2654,7 +3458,7 @@ const plugin = definePlugin({
           return { resolved: false, error: "This ticket has no pending product decision." };
         }
 
-        await ctx.issues.createComment(
+        await createIssueComment(
           taskId,
           `## Human product decision approved\n\nA human approved the pending product decision from the Scrum Board.\n\n${PRODUCT_DECISION_RESOLVED_MARKER}`,
           companyId
@@ -2717,7 +3521,7 @@ const plugin = definePlugin({
           ].filter(Boolean).join("\n\n"),
           status: "backlog",
         });
-        await ctx.issues.createComment(
+        await createIssueComment(
           approvedIssue.id,
           `## Human scope approved\n\nThis project ticket was created from held ticket ${issue.id} after human scope approval.`,
           companyId
@@ -2727,7 +3531,7 @@ const plugin = definePlugin({
           { status: "cancelled", assigneeAgentId: null },
           companyId
         );
-        await ctx.issues.createComment(
+        await createIssueComment(
           issueId,
           `## Human scope approved\n\nA human approved this ticket as part of the active project request. Delivery now continues in project ticket ${approvedIssue.id}.`,
           companyId
@@ -2777,7 +3581,7 @@ const plugin = definePlugin({
         if (issue.status !== "cancelled") {
           await ctx.issues.update(issueId, { status: "cancelled", assigneeAgentId: null }, companyId);
         }
-        await ctx.issues.createComment(
+        await createIssueComment(
           issueId,
           "## Human scope dismissed\n\nA human dismissed this held item. No follow-up project request or delivery work will start from it.",
           companyId
@@ -2874,13 +3678,13 @@ const plugin = definePlugin({
           ].filter(Boolean).join("\n\n"),
           status: "backlog",
         });
-        await ctx.issues.createComment(
+        await createIssueComment(
           followUpIssue.id,
           `## Human scope approved\n\nThis follow-up ticket was created from held ticket ${heldIssue.id}.`,
           companyId
         );
         await ctx.issues.update(issueId, { status: "cancelled", assigneeAgentId: null }, companyId);
-        await ctx.issues.createComment(
+        await createIssueComment(
           issueId,
           `## Human scope approved as follow-up\n\nDelivery continues in new kickoff ${rootIssue.id} and project ticket ${followUpIssue.id}.`,
           companyId
@@ -2996,6 +3800,262 @@ const plugin = definePlugin({
       await save();
       return { started: true, record };
     });
+
+    // -------------------------------------------------------------------------
+    // Agent tools
+    // -------------------------------------------------------------------------
+
+    /**
+     * Prueft, ob dieser Agent dieses Ticket auf diesem Weg veraendern darf.
+     *
+     * `ToolRunContext` nennt den Agenten, aber nicht das Ticket — die Ticket-ID
+     * kommt als Parameter und ist damit erst einmal eine Behauptung. Rolle und
+     * Projektzugehoerigkeit werden deshalb hier geprueft, nicht geglaubt.
+     */
+    async function authorizeToolCall(
+      runCtx: ToolRunContext,
+      issueId: unknown,
+      expectedRole: string
+    ): Promise<{ ok: true; issueId: string } | { ok: false; error: string }> {
+      if (typeof issueId !== 'string' || !issueId.trim()) {
+        return { ok: false, error: 'issueId is required.' };
+      }
+
+      const agent = state.agents.find((entry) => entry.id === runCtx.agentId);
+      if (!agent || agent.role !== expectedRole) {
+        return { ok: false, error: `Only the ${expectedRole.replace('_', ' ')} may use this tool.` };
+      }
+
+      const task = state.tasks.find((entry) => entry.id === issueId);
+      if (!task || task.parentId !== state.projectOnboarding?.rootIssueId) {
+        return { ok: false, error: 'This ticket does not belong to the active project request.' };
+      }
+
+      return { ok: true, issueId };
+    }
+
+    ctx.tools.register(
+      SUBMIT_REFINEMENT_TOOL,
+      {
+        displayName: 'Submit ticket refinement',
+        description:
+          'Record estimate, acceptance criteria, technical notes, risks, and labels for a project ticket.',
+        parametersSchema: toolSchema(SUBMIT_REFINEMENT_TOOL),
+      },
+      async (params, runCtx) => {
+        const record = params as Record<string, unknown>;
+        const auth = await authorizeToolCall(runCtx, record.issueId, 'technical_lead');
+        if (!auth.ok) return { error: auth.error };
+
+        const parsed = validateRefinement(record);
+        if (!parsed.ok) return { error: parsed.error };
+
+        try {
+          await createIssueComment(auth.issueId, refinementComment(parsed.value), runCtx.companyId, {
+            authorAgentId: runCtx.agentId,
+          });
+        } catch (error) {
+          return { error: `Could not record the refinement: ${String(error)}` };
+        }
+
+        clearStall(auth.issueId);
+        await save();
+        return {
+          content: `Refinement recorded: ${parsed.value.storyPoints} points, ${parsed.value.acceptanceCriteria.length} acceptance criteria. The ticket is now eligible for sprint planning.`,
+        };
+      }
+    );
+
+    ctx.tools.register(
+      SUBMIT_QA_VERDICT_TOOL,
+      {
+        displayName: 'Submit QA verdict',
+        description: 'Record the QA result for a ticket in review, criterion by criterion.',
+        parametersSchema: toolSchema(SUBMIT_QA_VERDICT_TOOL),
+      },
+      async (params, runCtx) => {
+        const record = params as Record<string, unknown>;
+        const auth = await authorizeToolCall(runCtx, record.issueId, 'qa_engineer');
+        if (!auth.ok) return { error: auth.error };
+
+        const parsed = validateQaVerdict(record);
+        if (!parsed.ok) return { error: parsed.error };
+
+        try {
+          await createIssueComment(auth.issueId, qaVerdictComment(parsed.value), runCtx.companyId, {
+            authorAgentId: runCtx.agentId,
+          });
+        } catch (error) {
+          return { error: `Could not record the QA verdict: ${String(error)}` };
+        }
+
+        return {
+          content: parsed.value.approved
+            ? 'Approval recorded. Agent Scrum completes the ticket once commit evidence is present.'
+            : 'Change request recorded. Agent Scrum returns the ticket to a developer.',
+        };
+      }
+    );
+
+    /**
+     * Uebergibt ein fertiges Ticket an QA — in einem Schritt.
+     *
+     * Der Host lehnt einen agentengeschriebenen Wechsel nach `in_review` ab:
+     * er liesse das Ticket ohne jemanden zurueck, der die naechste Handlung
+     * besitzt. Ein Developer hat sich daraufhin selbst eine
+     * `request_confirmation` gebaut — die auf einen *menschlichen* Klick
+     * wartet, nicht auf QA. Damit stand das Ticket still, obwohl alles fertig
+     * war.
+     *
+     * Das Plugin darf den Wechsel vornehmen, weil es dabei zugleich QA
+     * zuweist und weckt: die naechste Handlung hat einen Besitzer.
+     */
+    ctx.tools.register(
+      SUBMIT_FOR_REVIEW_TOOL,
+      {
+        displayName: 'Hand a ticket to QA',
+        description:
+          'Record the review summary and delivered commit, move the ticket to review, and assign QA.',
+        parametersSchema: toolSchema(SUBMIT_FOR_REVIEW_TOOL),
+      },
+      async (params, runCtx) => {
+        const record = params as Record<string, unknown>;
+        const auth = await authorizeToolCall(runCtx, record.issueId, 'developer');
+        if (!auth.ok) return { error: auth.error };
+
+        const parsed = validateReviewSubmission(record);
+        if (!parsed.ok) return { error: parsed.error };
+
+        const qa = state.agents.find((agent) => agent.role === 'qa_engineer');
+        const productOwner = state.agents.find((agent) => agent.role === 'product_owner');
+        const reviewer = parsed.value.productDecisionRequired ? productOwner : qa;
+        if (!reviewer) return { error: 'No reviewer is available for this project.' };
+
+        try {
+          await createIssueComment(
+            auth.issueId,
+            reviewSubmissionComment(parsed.value),
+            runCtx.companyId,
+            { authorAgentId: runCtx.agentId }
+          );
+          await ctx.issues.update(
+            auth.issueId,
+            { status: 'in_review', assigneeAgentId: reviewer.id },
+            runCtx.companyId
+          );
+        } catch (error) {
+          return { error: `Could not hand the ticket to review: ${String(error)}` };
+        }
+
+        await requestIssueWakeup(
+          auth.issueId,
+          parsed.value.productDecisionRequired
+            ? 'project_review_product_decision'
+            : 'project_review_qa'
+        );
+        clearStall(auth.issueId);
+        await save();
+
+        return {
+          content: `Ticket handed to ${reviewer.name}. Do not change the status yourself — Agent Scrum owns the review routing from here.`,
+        };
+      }
+    );
+
+    ctx.tools.register(
+      RECORD_COMMIT_TOOL,
+      {
+        displayName: 'Record delivery commit',
+        description: 'Record the pushed commit that delivers a ticket.',
+        parametersSchema: toolSchema(RECORD_COMMIT_TOOL),
+      },
+      async (params, runCtx) => {
+        const record = params as Record<string, unknown>;
+        const auth = await authorizeToolCall(runCtx, record.issueId, 'developer');
+        if (!auth.ok) return { error: auth.error };
+
+        const parsed = validateCommit(record);
+        if (!parsed.ok) return { error: parsed.error };
+
+        try {
+          await createIssueComment(auth.issueId, commitComment(parsed.value), runCtx.companyId, {
+            authorAgentId: runCtx.agentId,
+          });
+        } catch (error) {
+          return { error: `Could not record the commit: ${String(error)}` };
+        }
+
+        return { content: `Commit ${parsed.value.sha.slice(0, 8)} recorded as delivery evidence.` };
+      }
+    );
+
+    /** Holt das im Manifest deklarierte Schema, damit beide nie auseinanderlaufen. */
+    function toolSchema(name: string): Record<string, unknown> {
+      const declared = manifest.tools?.find((tool) => tool.name === name);
+      return (declared?.parametersSchema ?? { type: 'object' }) as Record<string, unknown>;
+    }
+
+    // -------------------------------------------------------------------------
+    // Reconcile tick
+    // -------------------------------------------------------------------------
+
+    /**
+     * Stellt fest, was steht — ohne dass jemand das Board oeffnen muss.
+     *
+     * Bewusst kein zweiter Scheduler: der Tick startet keine Zeremonie und
+     * weist nichts zu. Er liest die Orchestrierungssicht des Hosts und schreibt
+     * das Ergebnis ins Board. Ein Agent-Run, der waehrend eines Worker-
+     * Neustarts scheitert, ist sonst dauerhaft unsichtbar, weil sein Event
+     * niemanden mehr erreicht hat.
+     */
+    ctx.jobs.register("reconcile-stalled-work", async (job) => {
+      const scopes = await reconcilableCompanies();
+      if (scopes.length === 0) {
+        ctx.logger.info("Reconcile tick found no bound company", { trigger: job.trigger });
+        return;
+      }
+
+      for (const scope of scopes) {
+        try {
+          await withCompanyInvocation(scope, async () => {
+            if (!state.projectOnboarding?.rootIssueId) return;
+
+            const changed = await refreshOrchestrationStalls();
+            if (changed) await save();
+            ctx.logger.info("Reconcile tick completed", {
+              companyId: scope,
+              stalls: state.stalls?.length ?? 0,
+            });
+          });
+        } catch (error) {
+          ctx.logger.warn("Reconcile tick could not inspect a company", {
+            companyId: scope,
+            error: String(error),
+          });
+        }
+      }
+    });
+
+    /**
+     * Firmen, die der Tick pruefen darf.
+     *
+     * Der Job-Kontext traegt keine Firma — anders als ein Event oder eine
+     * Aktion. Der Fan-out ueber `ctx.companies.list()` wird deshalb *versucht*;
+     * verweigert der Host ihn, bleibt die zuletzt gebundene Firma uebrig. Das
+     * ist weniger Abdeckung, aber kein falsches Ergebnis.
+     */
+    async function reconcilableCompanies(): Promise<string[]> {
+      try {
+        const companies = await ctx.companies.list({ limit: 100 });
+        const ids = companies.map((company) => company.id).filter(Boolean);
+        if (ids.length > 0) return ids;
+      } catch (error) {
+        ctx.logger.info("Reconcile tick falls back to the bound company", {
+          reason: String(error),
+        });
+      }
+      return companyId ? [companyId] : [];
+    }
 
     ctx.logger.info("Agent Scrum loaded", {
       note: "board and team are loaded on the first company-scoped request",

@@ -29,6 +29,7 @@ import type {
   CeremonyType,
   ProjectOnboarding,
   TaskStatus,
+  TicketStall,
 } from "../core/types";
 import type { ProjectProgress } from "../core/project-issue-projection";
 import type { GitHubCommitChangesResult } from "../core/github-repository";
@@ -54,6 +55,8 @@ interface BoardData {
   canStartProjectOnboarding: boolean;
   canStartProjectSprint: boolean;
   projectProgress: ProjectProgress;
+  /** Tickets, die nachweislich stehen — leer heisst: nichts blockiert. */
+  stalls: TicketStall[];
 }
 
 interface LogData {
@@ -153,10 +156,13 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
   const tasks = useMemo(() => data?.tasks ?? [], [data]);
   const inReview = useMemo(() => tasks.filter((t) => t.column === "in_review"), [tasks]);
 
+  // Jeder Aufruf liest das gesamte Projekt beim Host. Fuenf Sekunden waren
+  // keine Aktualisierungsrate, sondern eine Dauerlast, die sich die
+  // Ereignisverarbeitung des Workers mit der Ansicht teilen musste.
   useEffect(() => {
     if (!data?.projectOnboarding.rootIssueId) return;
 
-    const interval = window.setInterval(() => refresh(), 5_000);
+    const interval = window.setInterval(() => refresh(), 20_000);
     return () => window.clearInterval(interval);
   }, [data?.projectOnboarding.rootIssueId, refresh]);
 
@@ -496,6 +502,7 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
         progress={data.projectProgress}
         latestEventSummary={lastCeremony?.summary ?? null}
         canStartSprint={data.canStartProjectSprint}
+        stalls={data.stalls}
         scopeHoldBusyId={scopeHoldBusyId}
         onStart={handleStartProjectOnboarding}
         onActivate={handleActivateProjectOnboarding}
@@ -519,35 +526,34 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
               : `${hasPriorRefinementRequest ? "Retry" : "Request"} refinement (${data.projectProgress.unrefinedTasks})`}
           </button>
         )}
-        {CEREMONIES.map((c) => (
-          <button
-            key={c.type}
-            className="btn btn-secondary"
-            onClick={() => void handleCeremony(c.type)}
-            disabled={
-              hostControlled ||
-              (!deliveryEnabled &&
-                (c.type === "sprint_planning" || c.type === "backlog_refinement"))
-            }
-            title={
-              hostControlled
-                ? "Project-backed tickets are coordinated through their Paperclip issues."
-                : undefined
-            }
-          >
-            {c.label}
-          </button>
-        ))}
-        {inReview.length > 0 && (
+        {/*
+          Auf einem projektgebundenen Board koordiniert Paperclip den Ablauf.
+          Fuenf dauerhaft deaktivierte Schalter erklaeren das nicht, sie
+          verstellen nur den Blick auf die eine Schaltflaeche, die hier wirkt.
+        */}
+        {!hostControlled &&
+          CEREMONIES.map((c) => (
+            <button
+              key={c.type}
+              className="btn btn-secondary"
+              onClick={() => void handleCeremony(c.type)}
+              disabled={
+                !deliveryEnabled &&
+                (c.type === "sprint_planning" || c.type === "backlog_refinement")
+              }
+            >
+              {c.label}
+            </button>
+          ))}
+        {hostControlled && (
+          <span className="ceremony-note">
+            Paperclip issues drive this board. Ceremonies run from ticket state.
+          </span>
+        )}
+        {inReview.length > 0 && !hostControlled && (
           <button
             className="btn btn-secondary"
             onClick={() => void handleReview()}
-            disabled={hostControlled}
-            title={
-              hostControlled
-                ? "Project-backed tickets are reviewed through their Paperclip issues."
-                : undefined
-            }
           >
             QA review ({inReview.length})
           </button>

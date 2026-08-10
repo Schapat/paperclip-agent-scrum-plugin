@@ -5,6 +5,8 @@ export const PRODUCT_DECISION_RESOLVED_MARKER = '<!-- agent-scrum:po-decision-re
 export const QA_REVIEW_APPROVED_MARKER = '<!-- agent-scrum:qa-review-approved -->';
 export const QA_REVIEW_REJECTED_MARKER = '<!-- agent-scrum:qa-review-rejected -->';
 export const QA_REWORK_ROUTED_MARKER = '## QA rework routed';
+/** Titel der automatischen Sprint-Scope-Auflösung; zugleich ihre Wiedererkennung. */
+export const SPRINT_SCOPE_RESOLUTION_MARKER = '<!-- agent-scrum:sprint-scope-resolution -->';
 
 export type ProjectReviewOwner = 'qa_engineer' | 'product_owner';
 
@@ -35,7 +37,14 @@ export function reviewOwnerForProjectIssue(
 ): ProjectReviewRoute | null {
   if (issue.status !== 'in_review') return null;
 
-  const history = [issue.description ?? '', ...comments.map((comment) => comment.body)];
+  // Chronologisch sortieren, bevor Marker-Positionen verglichen werden. Ohne das
+  // entscheidet die Rueckgabereihenfolge von `listComments`, ob eine bereits
+  // dokumentierte Entscheidung als offen gilt — und der Worker beantwortet
+  // dieselbe Frage endlos neu.
+  const history = [
+    issue.description ?? '',
+    ...chronologicalComments(comments).map((comment) => comment.body),
+  ];
   const lastRequired = lastMarkerIndex(history, PRODUCT_DECISION_REQUIRED_MARKER);
   const lastResolved = lastMarkerIndex(history, PRODUCT_DECISION_RESOLVED_MARKER);
 
@@ -45,6 +54,44 @@ export function reviewOwnerForProjectIssue(
 
   return { role: 'qa_engineer', reason: 'technical_review' };
 }
+
+/**
+ * Hat der Worker die aktive Sprint-Freigabe fuer diese Review-Runde bereits
+ * dokumentiert?
+ *
+ * Die Auflösung ist eine Feststellung, kein Vorgang: sie gehoert genau einmal
+ * je offener Produktentscheidung ins Ticket. Ohne diese Pruefung beantwortet
+ * jeder Durchlauf dieselbe Frage erneut — und jede Antwort loest den naechsten
+ * Durchlauf aus.
+ */
+export function hasSprintScopeResolution(comments: ProjectReviewComment[]): boolean {
+  const bodies = chronologicalComments(comments).map((comment) => comment.body);
+  const lastRequired = lastMarkerIndex(bodies, PRODUCT_DECISION_REQUIRED_MARKER);
+  const lastResolution = lastMarkerIndex(bodies, SPRINT_SCOPE_RESOLUTION_MARKER);
+
+  return lastResolution > lastRequired;
+}
+
+/** Kommentare, die der Worker selbst erzeugt hat, duerfen ihn nicht erneut ausloesen. */
+export function isPluginAuthoredNotice(body: string): boolean {
+  return (
+    body.includes(SPRINT_SCOPE_RESOLUTION_MARKER) ||
+    PLUGIN_NOTICE_HEADINGS.some((heading) => body.trimStart().startsWith(heading))
+  );
+}
+
+const PLUGIN_NOTICE_HEADINGS = [
+  '## Sprint scope already approved',
+  '## QA review required',
+  '## QA rework routed',
+  '## QA acceptance criteria verification required',
+  '## GitHub commit evidence required',
+  '## Sprint planning recovery',
+  '## Blocker resolved',
+  '## Human scope approval required',
+  '## Technical refinement requested',
+  '## Refinement needs a human decision',
+];
 
 /** A QA approval survives worker restarts because it is recorded on the host issue. */
 export function hasQaReviewApproval(

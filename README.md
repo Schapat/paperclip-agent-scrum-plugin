@@ -1,12 +1,73 @@
-# Agent Scrum
+<h1 align="center">Agent Scrum</h1>
 
-A Paperclip plugin that runs a Scrum team of AI agents: ceremonies fire from
-board state, tickets move through a Kanban board, and the retrospective turns
-finished work into skills the team applies next sprint.
+<p align="center">
+  <strong>Six AI agents that run a real Scrum process on your Paperclip board.</strong><br>
+  You approve the scope. They analyse, estimate, build, review, and learn from what shipped.
+</p>
 
-![Plugin API](https://img.shields.io/badge/plugin%20API-v1-blue.svg)
-![Tests](https://img.shields.io/badge/tests-400%20passing-brightgreen.svg)
-![License](https://img.shields.io/badge/license-MIT-green.svg)
+<p align="center">
+  <img alt="Plugin API" src="https://img.shields.io/badge/plugin%20API-v1-blue.svg">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-437%20passing-brightgreen.svg">
+  <img alt="License" src="https://img.shields.io/badge/license-MIT-green.svg">
+</p>
+
+![The Scrum Board during delivery](docs/media/hero-board.png)
+
+---
+
+## See it work
+
+### The board tells you who is working — right now
+
+Not "a phase is open". A named role, with the work it is doing and how long it
+has been at it.
+
+![Working now: Technical Lead](docs/media/02-working-now.png)
+
+While the Product Owner writes the backlog, the board counts the stories as
+they appear — evidence that work is happening, not a promise that it is:
+
+![Working now: Product Owner](docs/media/06-po-working.png)
+
+### A ticket moves only when someone owns the next step
+
+Backlog → TODO → Development → Review → Done. `in_progress → done` is not a
+legal transition: QA verifies every acceptance criterion one by one, and a
+GitHub-backed ticket needs the Developer's commit before it can stay Done.
+
+![Kanban during delivery](docs/media/07-kanban.png)
+
+Estimates, acceptance-criteria counts, and labels come from the Technical
+Lead's refinement. Sprint planning reads those labels to pick the developer —
+`frontend`, `infrastructure`, `react` above went to Developer 1.
+
+### The whole request, start to delivery
+
+One human request becomes technical analysis, an approval, a Product Owner
+backlog, refinement, and a sprint. The header names the phase and who holds
+the turn at each step:
+
+![Project phases](docs/media/flow.gif)
+
+### When something stops, the board says why
+
+A failed agent run, a pending approval, a budget incident, an unreadable
+estimate — each is reported against the ticket it holds up, with how long it
+has been stuck. A ticket that is merely slow is not reported as stuck.
+
+![A blocked ticket](docs/media/05-blocked.png)
+
+### The team learns from what it shipped
+
+The retrospective looks for evidence-backed patterns in finished work — a
+rejection reason that recurs, a column with long dwell time — and turns them
+into skills that travel with the next assignment.
+
+![Agent log with learnings and skills](docs/media/04-agent-log.png)
+
+> The screenshots show a real run. Ceremony summaries and agent messages are
+> currently German; the code, README, and board chrome are English. See
+> [Known limitations](#known-limitations).
 
 ---
 
@@ -398,6 +459,14 @@ or finish that request before starting another one.
 
 ## Ceremonies
 
+> **Which board are you on?** The ceremony engine below drives *local, ad-hoc*
+> boards. For **project-backed delivery** — the flow described under
+> [Start project work](#start-project-work) — Paperclip issues are the source of
+> truth, and the plugin coordinates through issue state instead: refinement
+> requests, sprint planning, review routing, and the QA gate. Sprint Review and
+> Retrospective run once, when the project's last ticket reaches Done. The
+> ceremony bar is hidden on those boards, because it does not apply there.
+
 An event earns its place only if it leaves something behind. Measured by what
 each one persists:
 
@@ -428,6 +497,10 @@ reporting. When there is nothing to resolve, it deliberately leaves no record.
 ---
 
 ## Triggers
+
+These conditions apply to **local, ad-hoc boards**. Project-backed delivery is
+driven by Paperclip issue events instead — see the note under
+[Ceremonies](#ceremonies).
 
 Ceremonies are evaluated after every board change, never on a timer.
 
@@ -662,7 +735,7 @@ whom*; the agents decide *what it says*.
 pnpm setup:sdk --paperclip /path/to/paperclip   # once
 pnpm install
 pnpm dev                                        # watch build
-pnpm test                                       # 370 tests
+pnpm test                                       # 437 tests
 pnpm typecheck
 ```
 
@@ -706,9 +779,11 @@ Stated plainly, because the alternative is a README that lies:
   local tickets still live in plugin state. Direct child issues of a project
   kickoff are projected from Paperclip; their status, assignment, comments,
   decisions, refinement, and planning transitions are host-backed.
-- **Agent wake-up is not observed.** `ctx.agents.invoke` is called when a
-  ceremony requests content, but whether the agents then produce user stories or
-  acceptance criteria was not watched end to end.
+- **Agent output is checked, not supervised.** The plugin now observes
+  `agent.run.failed`, `agent.run.cancelled`, `approval.created` and
+  `budget.incident.opened`, and reports the affected ticket as stalled on the
+  board. It cannot tell a *slow* agent from a productive one — only a run that
+  ended without a result from one that is still going.
 - **Ceremony summaries and agent messages are in German.** The code, README and
   comments are English; the operational text the agents read is not yet.
 - **Hierarchy setup needs a reachable API.** The plugin sets the reporting line
@@ -721,6 +796,13 @@ Stated plainly, because the alternative is a README that lies:
   binary changes; the Code tab still lists the file and its change statistics in
   that case.
 - **No performance measurements.** Nothing here has been profiled under load.
+  The board read is bounded — one issue listing plus one comment read per issue
+  per request, with host writes throttled to at most once a minute — but that is
+  a design bound, not a measurement.
+- **A stalled ticket is reported, not repaired.** Refinement retries itself up
+  to three times, then asks for a human decision. Every other stall kind
+  (failed run, waiting approval, budget incident) is surfaced on the board and
+  left to a person.
 
 ---
 

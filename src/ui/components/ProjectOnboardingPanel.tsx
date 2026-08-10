@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 
-import type { ProjectOnboarding } from "../../core/types";
+import type { ProjectOnboarding, TicketStall } from "../../core/types";
 import type { ProjectProgress } from "../../core/project-issue-projection";
 import { describeProjectWorkflow, type ProjectWorkflowActivity } from "./project-workflow";
 
@@ -20,6 +20,8 @@ interface ProjectOnboardingPanelProps {
   progress: ProjectProgress;
   latestEventSummary: string | null;
   canStartSprint: boolean;
+  /** Tickets, die nachweislich stehen — speist die Begruendung im Header. */
+  stalls?: TicketStall[];
   scopeHoldBusyId: string | null;
   onStart: (input: {
     projectId: string;
@@ -45,6 +47,7 @@ export function ProjectOnboardingPanel({
   progress,
   latestEventSummary,
   canStartSprint,
+  stalls,
   scopeHoldBusyId,
   onStart,
   onActivate,
@@ -59,7 +62,10 @@ export function ProjectOnboardingPanel({
   const [skipSprintPlanning, setSkipSprintPlanning] = useState(false);
   const [startingNextProject, setStartingNextProject] = useState(false);
   const planningNextFeature = onboarding.status === "completed";
-  const workflow = describeProjectWorkflow(onboarding, progress);
+  const workflow = describeProjectWorkflow(onboarding, progress, {
+    stalls,
+    phaseSince: onboarding.updatedAt,
+  });
 
   function submitStart(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -152,11 +158,36 @@ export function ProjectOnboardingPanel({
           label: onboarding.requiresSprint ? "Approve backlog for sprint planning" : "Approve backlog",
           run: onActivate,
         }
-      : onboarding.status === "sprint_planning" && canStartSprint
+      : onboarding.status === "sprint_planning"
         ? { label: "Start first sprint", run: onStartSprint }
       : onboarding.status === "completed" && canStart
         ? { label: "Plan next feature", run: startNextFeature }
       : null;
+  // Der stärkste Beleg dafuer, dass der Product Owner arbeitet, ist die Zahl
+  // der Stories, die waehrenddessen entsteht — nicht ein Satz darueber.
+  const backlogInProgress = onboarding.status === "backlog_in_progress";
+  // Der Sprint startet erst, wenn das Refinement fertig ist. Fehlt noch etwas,
+  // gehoert der Grund sichtbar hin — nicht ein fehlender Knopf.
+  const refinementPending = onboarding.status === "sprint_planning" && progress.unrefinedTasks > 0;
+  const backlogProgressNote = backlogInProgress
+    ? progress.totalTasks > 0
+      ? `${progress.totalTasks} ${progress.totalTasks === 1 ? "story" : "stories"} created so far`
+      : "No stories yet — the first one usually appears within a few minutes."
+    : null;
+  // Solange keine Story existiert, gibt es nichts zu genehmigen. Der Knopf war
+  // trotzdem die auffaelligste Schaltflaeche der Ansicht.
+  const actionReady = backlogInProgress
+    ? progress.totalTasks > 0
+    : onboarding.status === "sprint_planning"
+      ? canStartSprint
+      : true;
+  const actionBlockedReason = backlogInProgress
+    ? "The Product Owner has not created any stories yet."
+    : refinementPending
+      ? `${progress.unrefinedTasks} ${progress.unrefinedTasks === 1 ? "story is" : "stories are"} still waiting for the Technical Lead's estimate and acceptance criteria.`
+      : onboarding.status === "sprint_planning" && !canStartSprint
+        ? "No refined backlog ticket is ready for the sprint yet."
+        : null;
   const analysisInProgress = onboarding.status === "analysis_in_progress";
   const analysisReady = onboarding.status === "analysis_ready";
   const sprintPlanning = onboarding.status === "sprint_planning";
@@ -197,12 +228,15 @@ export function ProjectOnboardingPanel({
           workflow={workflow}
           onOpenKickoff={onOpenKickoff}
           kickoffHref={kickoffHref}
+          progressNote={backlogProgressNote}
         />
 
-        <p className={`project-onboarding-stage is-${onboarding.status}`}>
-          {analysisInProgress && <span className="project-onboarding-spinner" aria-hidden="true" />}
-          {stageLabel(onboarding.status, hostControlled)}
-        </p>
+        {/*
+          Die Stage-Zeile wiederholte in jedem Zustand nur die Ueberschrift des
+          Trackers — und widersprach ihr, sobald beide unterschiedlich
+          herleiteten ("waits for human approval" waehrend der Technical Lead
+          noch verfeinerte). Der Tracker ist die einzige Quelle.
+        */}
 
         {progress.totalTasks > 0 && (
           <p className="project-onboarding-progress-summary">
@@ -298,7 +332,13 @@ export function ProjectOnboardingPanel({
 
         {action && (
           <div className="project-onboarding-actions">
-            <button className="btn btn-primary" type="button" disabled={busy} onClick={() => void action.run()}>
+            <button
+              className={`btn ${actionReady ? "btn-primary" : "btn-secondary"}`}
+              type="button"
+              disabled={busy || !actionReady}
+              onClick={() => void action.run()}
+              title={actionReady ? undefined : actionBlockedReason ?? undefined}
+            >
               {busy ? "Working…" : action.label}
             </button>
           </div>
@@ -309,21 +349,45 @@ export function ProjectOnboardingPanel({
 }
 
 interface ProjectWorkflowTrackerProps {
+  /** Beobachtbarer Fortschritt der laufenden Phase, z. B. angelegte Stories. */
+  progressNote?: string | null;
   workflow: ProjectWorkflowActivity;
   onOpenKickoff?: () => void;
   kickoffHref?: string | null;
 }
 
-function ProjectWorkflowTracker({ workflow, onOpenKickoff, kickoffHref }: ProjectWorkflowTrackerProps) {
+function ProjectWorkflowTracker({
+  workflow,
+  onOpenKickoff,
+  kickoffHref,
+  progressNote,
+}: ProjectWorkflowTrackerProps) {
   return (
-    <div className={`project-onboarding-workflow is-${workflow.phase}`} aria-live="polite">
+    <div
+      className={`project-onboarding-workflow is-${workflow.phase} waiting-on-${workflow.waitingOn}`}
+      aria-live="polite"
+    >
       <div className="project-onboarding-workflow-summary">
-        <span className="project-onboarding-workflow-eyebrow">Outside the board now</span>
-        <strong>{workflow.title}</strong>
+        <span className="project-onboarding-workflow-eyebrow">
+          {workflow.waitingOn === "agent" ? "Working now" : "Outside the board now"}
+        </span>
+        <strong>
+          {/* Ein arbeitender Agent war bisher nur an der Formulierung zu
+              erkennen. Der Indikator macht die Frage "laeuft ueberhaupt was?"
+              auf einen Blick beantwortbar. */}
+          {workflow.waitingOn === "agent" && (
+            <span className="project-onboarding-working-dot" aria-hidden="true" />
+          )}
+          {workflow.title}
+        </strong>
         <span>{workflow.detail}</span>
+        {progressNote && <span className="project-onboarding-workflow-evidence">{progressNote}</span>}
       </div>
       <div className="project-onboarding-workflow-meta">
-        <span className="project-onboarding-workflow-actor">With {workflow.actor}</span>
+        <span className="project-onboarding-workflow-actor">
+          {workflow.waitingOn === "agent" ? "Running as " : "With "}
+          {workflow.actor}
+        </span>
         {workflow.attentionRequired && (
           <span className="project-onboarding-workflow-approval">Human approval required</span>
         )}
@@ -347,21 +411,3 @@ function ProjectWorkflowTracker({ workflow, onOpenKickoff, kickoffHref }: Projec
   );
 }
 
-function stageLabel(status: ProjectOnboarding["status"], hostControlled: boolean): string {
-  switch (status) {
-    case "analysis_in_progress":
-      return "Technical analysis in progress";
-    case "analysis_ready":
-      return "Technical analysis ready for approval";
-    case "backlog_in_progress":
-      return "Product Owner is preparing the first backlog";
-    case "sprint_planning":
-      return "Sprint planning waits for human approval";
-    case "active":
-      return hostControlled ? "Paperclip delivery active" : "Delivery enabled";
-    case "completed":
-      return "Project request complete — ready for the next feature";
-    default:
-      return "Project request not started";
-  }
-}

@@ -46,6 +46,14 @@ export interface ProjectRefinementProjection {
   acceptanceCriteria: AcceptanceCriterion[];
   technicalNotes: string | null;
   risks: TicketRisk[];
+  /**
+   * Technische Domaenen des Tickets.
+   *
+   * Host-Issues kennen kein Label-Feld, die Zuweisung braucht aber etwas zum
+   * Vergleichen. Der Technical Lead kennt die Domaene ohnehin — sie kommt
+   * daher aus seinem Refinement.
+   */
+  labels: string[];
   refined: boolean;
   sourceCommentId: string | null;
 }
@@ -77,6 +85,7 @@ interface RefinementPayload {
   acceptanceCriteria?: unknown;
   technicalNotes?: unknown;
   risks?: unknown;
+  labels?: unknown;
 }
 
 interface DecisionPayload {
@@ -282,6 +291,7 @@ function toRefinement(
     ? parseText(payload.technicalNotes)
     : extractSection(description, ['Technischer Kontext', 'Technical Context', 'Technische Hinweise']);
   const risks = payload ? parseRisks(issueId, payload.risks, sourceAgentId) : [];
+  const labels = payload ? parseLabels(payload.labels) : [];
   const qaChecks = qaChecksForCriteria(acceptanceTexts, comments, agents);
   const finalQaApproval = finalQaApprovalForCriteria(comments, agents);
   const refined = storyPoints > 0 && acceptanceTexts.length > 0;
@@ -301,9 +311,21 @@ function toRefinement(
     }),
     technicalNotes,
     risks,
+    labels,
     refined,
     sourceCommentId: sourceComment?.id ?? null,
   };
+}
+
+/** Normalisiert die Label-Liste eines Refinements auf vergleichbare Einzelbegriffe. */
+function parseLabels(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+
+  const labels = value
+    .filter((entry): entry is string => typeof entry === 'string')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry.length > 1);
+  return [...new Set(labels)];
 }
 
 function isTechnicalLead(
@@ -542,6 +564,28 @@ function extractSection(markdown: string, headings: string[]): string | null {
   return result || null;
 }
 
+/**
+ * Marker, die zwar vorhanden, aber unbrauchbar sind.
+ *
+ * Ein kaputtes JSON war bisher von "kein Marker" nicht zu unterscheiden: beides
+ * liess das Ticket stumm ungeplant liegen. Der Unterschied ist entscheidend —
+ * im einen Fall hat der Agent nicht geantwortet, im anderen hat er geantwortet
+ * und sich vertippt.
+ */
+export function malformedMarkers(body: string, marker: string): string[] {
+  const expression = new RegExp(`<!--\\s*${escapeRegExp(marker)}\\s+([\\s\\S]*?)\\s*-->`, 'g');
+  const broken: string[] = [];
+  for (const match of body.matchAll(expression)) {
+    try {
+      const parsed = JSON.parse(match[1]) as unknown;
+      if (typeof parsed !== 'object' || parsed === null) broken.push(match[1]);
+    } catch {
+      broken.push(match[1]);
+    }
+  }
+  return broken;
+}
+
 function lastMarkerPayload<T>(body: string, marker: string): T | null {
   const expression = new RegExp(`<!--\\s*${escapeRegExp(marker)}\\s+([\\s\\S]*?)\\s*-->`, 'g');
   let result: T | null = null;
@@ -551,6 +595,7 @@ function lastMarkerPayload<T>(body: string, marker: string): T | null {
       if (typeof parsed === 'object' && parsed !== null) result = parsed as T;
     } catch {
       // A malformed marker is non-authoritative and must never alter board data.
+      // Its *existence* is reported separately — see `malformedMarkers`.
     }
   }
   return result;

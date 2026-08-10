@@ -16,7 +16,7 @@ import {
 } from '../core/review-routing';
 import { COMMIT_MARKER, DECISION_MARKER, REFINEMENT_MARKER } from '../core/project-issue-projection';
 import { createAcceptanceCriterion, createScrumTask } from '../core/factories';
-import type { CeremonyRecord, ProjectOnboarding, ScrumAgent, ScrumTask, WorkerState } from '../core/types';
+import type { CeremonyRecord, ProjectOnboarding, ScrumAgent, ScrumTask, TicketStall, WorkerState } from '../core/types';
 
 const COMPANY_ID = 'company-bmw';
 const PROJECT_ID = 'project-bmw';
@@ -62,6 +62,8 @@ interface BoardData {
   currentSprint: { id: string; status: string; taskIds: string[] } | null;
   canStartProjectOnboarding: boolean;
   canStartProjectSprint: boolean;
+  projectProgress: { unrefinedTasks: number; totalTasks: number };
+  stalls: TicketStall[];
 }
 
 async function completeTechnicalAnalysis(
@@ -1421,6 +1423,393 @@ describe('project onboarding worker actions', () => {
       storyPoints: 5,
     });
     expect(board.ceremonies.at(-1)).toMatchObject({ type: 'sprint_planning', taskIds: [child.id] });
+  });
+
+
+  /**
+   * Fehlerfaelle statt Gluecksfaelle.
+   *
+   * Die bestehenden Tests simulieren durchweg einen wohlerzogenen Agenten:
+   * Marker korrekt, JSON gueltig, Run erfolgreich. Genau daneben lagen die
+   * gemeldeten Stillstaende.
+   */
+  it('reports a failed agent run instead of leaving the ticket silently in progress', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+    const child = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Add accessible image slider',
+      status: 'backlog',
+    });
+    await harness.emit(
+      'issue.created',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
+    );
+    await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+    await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+
+    await harness.emit(
+      'agent.run.failed',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
+    );
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    expect(board.stalls).toEqual([
+      expect.objectContaining({ taskId: child.id, kind: 'run_failed' }),
+    ]);
+
+    await harness.emit(
+      'agent.run.finished',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
+    );
+    const recovered = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    expect(recovered.stalls).toEqual([]);
+  });
+
+  it('reports a malformed refinement marker instead of leaving the ticket unplanned', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+    const child = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Add accessible image slider',
+      status: 'backlog',
+    });
+    await harness.emit(
+      'issue.created',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
+    );
+    await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const technicalLead = board.agents.find((agent) => agent.role === 'technical_lead');
+    // Geliefert, aber unlesbar: ein fehlendes Anfuehrungszeichen.
+    const broken = await harness.ctx.issues.createComment(
+      child.id,
+      `<!-- ${REFINEMENT_MARKER} {"storyPoints":5,"acceptanceCriteria":[Keyboard navigation works"]} -->`,
+      COMPANY_ID,
+      { authorAgentId: technicalLead?.id }
+    );
+    await harness.emit(
+      'issue.comment.created',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: broken.id, entityType: 'issue_comment' }
+    );
+
+    const afterBrokenMarker = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    expect(afterBrokenMarker.stalls).toEqual([
+      expect.objectContaining({ taskId: child.id, kind: 'refinement_invalid' }),
+    ]);
+  });
+
+  it('keeps planning ready work while another ticket is still being refined', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+
+    const ready = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Add slider controls',
+      status: 'backlog',
+    });
+    const unrefined = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Add slider captions',
+      status: 'backlog',
+    });
+    for (const issue of [ready, unrefined]) {
+      await harness.emit(
+        'issue.created',
+        { issueId: issue.id },
+        { companyId: COMPANY_ID, entityId: issue.id, entityType: 'issue' }
+      );
+    }
+    await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const technicalLead = board.agents.find((agent) => agent.role === 'technical_lead');
+    const developer = board.agents.find((agent) => agent.role === 'developer');
+
+    const refinement = await harness.ctx.issues.createComment(
+      ready.id,
+      `<!-- ${REFINEMENT_MARKER} {"storyPoints":3,"acceptanceCriteria":["Controls are reachable by keyboard"]} -->`,
+      COMPANY_ID,
+      { authorAgentId: technicalLead?.id }
+    );
+    await harness.emit(
+      'issue.comment.created',
+      { issueId: ready.id },
+      { companyId: COMPANY_ID, entityId: refinement.id, entityType: 'issue_comment' }
+    );
+
+    // Das zweite Ticket liegt weiterhin unverfeinert beim Technical Lead. Es
+    // darf die Lieferung des ersten nicht aufhalten.
+    const plannedIssue = await harness.ctx.issues.get(ready.id, COMPANY_ID);
+    expect(plannedIssue).toMatchObject({ status: 'todo', assigneeAgentId: developer?.id });
+  });
+
+
+  /**
+   * Die Retrospektive lief bisher genau einmal, beim Projektabschluss — sie
+   * konnte den Sprint, den sie auswertet, also nicht mehr verbessern.
+   */
+  it('extracts learnings while delivery is still running', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+
+    const delivered = [];
+    for (const title of ['Slider markup', 'Slider controls', 'Slider captions']) {
+      const issue = await harness.ctx.issues.create({
+        companyId: COMPANY_ID,
+        projectId: PROJECT_ID,
+        parentId: kickoff.rootIssueId,
+        title,
+        status: 'backlog',
+      });
+      await harness.emit(
+        'issue.created',
+        { issueId: issue.id },
+        { companyId: COMPANY_ID, entityId: issue.id, entityType: 'issue' }
+      );
+      delivered.push(issue);
+    }
+    await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+    const setup = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const qa = setup.agents.find((agent) => agent.role === 'qa_engineer');
+    const developer = setup.agents.find((agent) => agent.role === 'developer');
+
+    // Zwei Tickets echt durch die Qualitaetsschranke, eines offen: das Projekt
+    // laeuft noch. Ein Ticket einfach auf `done` zu setzen wuerde die Schranke
+    // ausloesen und es zurueckschicken — genau wie in der Praxis.
+    for (const issue of delivered.slice(0, 2)) {
+      await recordDeveloperCommit(harness, issue.id, developer?.id);
+      await harness.ctx.issues.createComment(
+        issue.id,
+        `## QA approved\n\n${QA_REVIEW_APPROVED_MARKER}`,
+        COMPANY_ID,
+        { authorAgentId: qa?.id }
+      );
+      await harness.ctx.issues.update(issue.id, { status: 'done', assigneeAgentId: qa?.id }, COMPANY_ID);
+      await harness.emit(
+        'issue.updated',
+        { issueId: issue.id },
+        { companyId: COMPANY_ID, entityId: issue.id, entityType: 'issue', actorId: qa?.id }
+      );
+    }
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    expect(board.projectOnboarding.status).toBe('active');
+    expect(board.ceremonies.some((ceremony) => ceremony.type === 'sprint_retrospective')).toBe(true);
+  });
+
+
+  /**
+   * Der Sprint darf erst startbar sein, wenn das technische Refinement fertig
+   * ist. Vorher genuegte eine einzelne fertige Story — der Knopf stand bereit,
+   * waehrend der Technical Lead noch an den uebrigen arbeitete.
+   */
+  it('offers the first sprint only once every story is refined', async () => {
+    // Eigener Harness: die Standard-Fixture liefert direkt aus, dieser Fall
+    // braucht die Sprint-Schranke.
+    const harness = createTestHarness({ manifest, config: { enableTeam: true } });
+    harness.seed({ projects: [project()], projectWorkspaces: [workspace()] });
+    await plugin.definition.setup(harness.ctx);
+
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+
+    const children = [];
+    for (const title of ['Slider markup', 'Slider controls']) {
+      const issue = await harness.ctx.issues.create({
+        companyId: COMPANY_ID,
+        projectId: PROJECT_ID,
+        parentId: kickoff.rootIssueId,
+        title,
+        status: 'backlog',
+      });
+      await harness.emit(
+        'issue.created',
+        { issueId: issue.id },
+        { companyId: COMPANY_ID, entityId: issue.id, entityType: 'issue' }
+      );
+      children.push(issue);
+    }
+    await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const technicalLead = board.agents.find((agent) => agent.role === 'technical_lead');
+
+    async function refine(issueId: string, points: number) {
+      const comment = await harness.ctx.issues.createComment(
+        issueId,
+        `<!-- ${REFINEMENT_MARKER} {"storyPoints":${points},"acceptanceCriteria":["Works"]} -->`,
+        COMPANY_ID,
+        { authorAgentId: technicalLead?.id }
+      );
+      await harness.emit(
+        'issue.comment.created',
+        { issueId },
+        { companyId: COMPANY_ID, entityId: comment.id, entityType: 'issue_comment' }
+      );
+    }
+
+    await refine(children[0].id, 3);
+    const halfway = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    expect(halfway.projectOnboarding.status).toBe('sprint_planning');
+    expect(halfway.projectProgress.unrefinedTasks).toBe(1);
+    expect(halfway.canStartProjectSprint).toBe(false);
+
+    await refine(children[1].id, 5);
+    const ready = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    expect(ready.projectOnboarding.status).toBe('sprint_planning');
+    expect(ready.projectProgress.unrefinedTasks).toBe(0);
+    expect(ready.canStartProjectSprint).toBe(true);
+  });
+
+
+  /**
+   * Nach dem ersten fertigen Ticket blieb der Fluss stehen.
+   *
+   * Ein Ticket in TODO *ohne* Assignee — etwa nach einer Blocker-Freigabe —
+   * galt der Planung als laufende Arbeit. Sie brach deshalb ab, wies das
+   * Ticket nie zu, und ohne Assignee gab es niemanden zu wecken. Beide
+   * Developer blieben idle, waehrend zwei Tickets bereitlagen.
+   */
+  it('adopts an unassigned TODO ticket instead of stalling behind it', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+
+    const orphan = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Released from a blocker',
+      status: 'backlog',
+    });
+    await harness.emit(
+      'issue.created',
+      { issueId: orphan.id },
+      { companyId: COMPANY_ID, entityId: orphan.id, entityType: 'issue' }
+    );
+    await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const technicalLead = board.agents.find((agent) => agent.role === 'technical_lead');
+    const refinement = await harness.ctx.issues.createComment(
+      orphan.id,
+      `<!-- ${REFINEMENT_MARKER} {"storyPoints":3,"acceptanceCriteria":["Works"]} -->`,
+      COMPANY_ID,
+      { authorAgentId: technicalLead?.id }
+    );
+    await harness.emit(
+      'issue.comment.created',
+      { issueId: orphan.id },
+      { companyId: COMPANY_ID, entityId: refinement.id, entityType: 'issue_comment' }
+    );
+
+    // Genau der Zustand aus der Blocker-Freigabe: TODO, aber ohne Assignee.
+    await harness.ctx.issues.update(orphan.id, { status: 'todo', assigneeAgentId: null }, COMPANY_ID);
+    await harness.emit(
+      'issue.updated',
+      { issueId: orphan.id },
+      { companyId: COMPANY_ID, entityId: orphan.id, entityType: 'issue' }
+    );
+
+    const adopted = await harness.ctx.issues.get(orphan.id, COMPANY_ID);
+    expect(adopted?.status).toBe('todo');
+    expect(adopted?.assigneeAgentId, 'an unassigned TODO must be adopted, not stepped over').not.toBeNull();
+  });
+
+
+  /**
+   * Der Product Owner verknuepft Stories mit Abhaengigkeiten. Ein Weckruf auf
+   * ein blockiertes Issue lehnt der Host ab ("Issue is blocked by unresolved
+   * blockers"); der Worker vermerkte das als Stillstand, verfeinerte das Ticket
+   * nie und liess den Sprint dauerhaft nicht startbar werden.
+   */
+  it('defers refinement for a ticket that is blocked by another', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+
+    const blocker = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'i18n infrastructure',
+      status: 'backlog',
+    });
+    const dependent = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Translate the header',
+      status: 'backlog',
+    });
+    for (const issue of [blocker, dependent]) {
+      await harness.emit(
+        'issue.created',
+        { issueId: issue.id },
+        { companyId: COMPANY_ID, entityId: issue.id, entityType: 'issue' }
+      );
+    }
+    await harness.ctx.issues.relations.setBlockedBy(dependent.id, [blocker.id], COMPANY_ID);
+
+    const wakeups: string[] = [];
+    vi.spyOn(harness.ctx.issues, 'requestWakeup').mockImplementation(async (issueId) => {
+      wakeups.push(issueId as string);
+      return { queued: true, runId: 'run-1' };
+    });
+
+    await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+    expect(wakeups, 'the blocked ticket must not be woken').not.toContain(dependent.id);
+    expect(wakeups, 'the unblocked ticket still gets refined').toContain(blocker.id);
   });
 
   it('routes project reviews to QA by default and to the Product Owner for an explicit decision', async () => {

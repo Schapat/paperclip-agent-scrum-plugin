@@ -34,9 +34,14 @@ function skillsOf(agent: ScrumAgent): string[] {
  * Zählt laufende Tickets eines Agents (Development + Review).
  */
 export function currentLoad(agent: ScrumAgent, state: WorkerState): number {
+  // `todo` zaehlt mit: ein zugewiesenes Ticket gehoert dem Entwickler bereits,
+  // auch wenn er es noch nicht angefasst hat. Ohne das wirkt er nach einer
+  // Zuweisung unveraendert frei — und bekommt in derselben Planungsrunde das
+  // naechste Ticket obendrauf, waehrend der zweite Entwickler leer ausgeht.
   return state.tasks.filter(
     (t) =>
-      t.assignedAgentId === agent.id && (t.column === 'in_progress' || t.column === 'in_review')
+      t.assignedAgentId === agent.id &&
+      (t.column === 'todo' || t.column === 'in_progress' || t.column === 'in_review')
   ).length;
 }
 
@@ -69,10 +74,13 @@ export function rankCandidates(
     })
     .filter((c) => c.load < wipLimit)
     .sort((a, b) => {
-      // Bester Skill-Match zuerst, bei Gleichstand die geringste Auslastung
+      // Bester Skill-Match zuerst, bei Gleichstand die geringste Auslastung.
       if (b.skillScore !== a.skillScore) return b.skillScore - a.skillScore;
-      if (a.load !== b.load) return a.load - b.load;
-      return a.agent.id.localeCompare(b.agent.id);
+      return a.load - b.load;
+      // Danach bewusst kein weiteres Kriterium: `sort` ist stabil, also bleibt
+      // die uebergebene Teamreihenfolge erhalten. Nach der UUID zu sortieren
+      // waere zwar deterministisch, aber sachlich willkuerlich — Developer 2
+      // ginge vor Developer 1, sobald sein Schluessel kleiner ist.
     });
 }
 
