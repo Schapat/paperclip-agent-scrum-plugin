@@ -1702,6 +1702,65 @@ describe('project onboarding worker actions', () => {
     expect(ready.canStartProjectSprint).toBe(true);
   });
 
+
+  /**
+   * Nach dem ersten fertigen Ticket blieb der Fluss stehen.
+   *
+   * Ein Ticket in TODO *ohne* Assignee — etwa nach einer Blocker-Freigabe —
+   * galt der Planung als laufende Arbeit. Sie brach deshalb ab, wies das
+   * Ticket nie zu, und ohne Assignee gab es niemanden zu wecken. Beide
+   * Developer blieben idle, waehrend zwei Tickets bereitlagen.
+   */
+  it('adopts an unassigned TODO ticket instead of stalling behind it', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+
+    const orphan = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Released from a blocker',
+      status: 'backlog',
+    });
+    await harness.emit(
+      'issue.created',
+      { issueId: orphan.id },
+      { companyId: COMPANY_ID, entityId: orphan.id, entityType: 'issue' }
+    );
+    await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const technicalLead = board.agents.find((agent) => agent.role === 'technical_lead');
+    const refinement = await harness.ctx.issues.createComment(
+      orphan.id,
+      `<!-- ${REFINEMENT_MARKER} {"storyPoints":3,"acceptanceCriteria":["Works"]} -->`,
+      COMPANY_ID,
+      { authorAgentId: technicalLead?.id }
+    );
+    await harness.emit(
+      'issue.comment.created',
+      { issueId: orphan.id },
+      { companyId: COMPANY_ID, entityId: refinement.id, entityType: 'issue_comment' }
+    );
+
+    // Genau der Zustand aus der Blocker-Freigabe: TODO, aber ohne Assignee.
+    await harness.ctx.issues.update(orphan.id, { status: 'todo', assigneeAgentId: null }, COMPANY_ID);
+    await harness.emit(
+      'issue.updated',
+      { issueId: orphan.id },
+      { companyId: COMPANY_ID, entityId: orphan.id, entityType: 'issue' }
+    );
+
+    const adopted = await harness.ctx.issues.get(orphan.id, COMPANY_ID);
+    expect(adopted?.status).toBe('todo');
+    expect(adopted?.assigneeAgentId, 'an unassigned TODO must be adopted, not stepped over').not.toBeNull();
+  });
+
   it('routes project reviews to QA by default and to the Product Owner for an explicit decision', async () => {
     const kickoff = await harness.performAction<{ rootIssueId: string }>(
       'startProjectOnboarding',

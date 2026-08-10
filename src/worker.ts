@@ -1453,6 +1453,9 @@ const plugin = definePlugin({
             continue;
           }
 
+          // Nur den Status zu setzen hinterlaesst ein herrenloses TODO: es hat
+          // niemanden, den der Worker wecken koennte. Die Zuweisung uebernimmt
+          // die Planung direkt im Anschluss.
           const todo = await ctx.issues.update(issue.id, { status: "todo" }, companyId);
           try {
             await createIssueComment(
@@ -1494,6 +1497,9 @@ const plugin = definePlugin({
         await save();
         if (releasedTaskIds.length > 0) {
           ctx.logger.info("Project blockers resolved", { taskIds: releasedTaskIds });
+          // Direkt weiterreichen: ein freigegebenes Ticket ohne Assignee waere
+          // sonst genau das herrenlose TODO, das den Fluss anhaelt.
+          await requestProjectPlanning();
         }
       } catch (error) {
         ctx.logger.warn("Could not resolve project blockers", { error: String(error) });
@@ -1770,17 +1776,11 @@ const plugin = definePlugin({
       const rootIssueId = onboarding.rootIssueId;
       const technicalLeadId = state.agents.find((agent) => agent.role === "technical_lead")?.id;
 
-      // Refinement-Tickets liegen als TODO beim Technical Lead. Sie sind kein
-      // Grund, die Lieferung anzuhalten: sonst blockiert ein einziges
-      // unverfeinertes Ticket das gesamte Projekt, bis ein Mensch eingreift.
-      const hasDeliverableTodo = state.tasks.some(
-        (task) =>
-          task.parentId === rootIssueId &&
-          task.column === "todo" &&
-          task.assignedAgentId !== technicalLeadId
-      );
-      if (hasDeliverableTodo) return;
-
+      // Bewusst kein "es liegt schon etwas in TODO"-Abbruch mehr. Die Kapazitaet
+      // regeln `todoSlots` und die freien Entwicklerplaetze; der zusaetzliche
+      // Wachposten hat ein *unzugewiesenes* TODO wie laufende Arbeit behandelt
+      // und damit die Planung dauerhaft angehalten — das Ticket bekam nie einen
+      // Assignee, und ohne Assignee weckt der Worker niemanden.
       const currentTodo = state.tasks.filter(
         (task) => task.column === "todo" && task.assignedAgentId !== technicalLeadId
       ).length;
@@ -1802,12 +1802,26 @@ const plugin = definePlugin({
         const freeSlots = Math.max(0, developerLimit - activeLoad);
         return Array.from({ length: freeSlots }, () => agent);
       });
+      // Ein Ticket in TODO *ohne* Assignee ist herrenlos: der Blocker-Release
+      // setzt nur den Status, die Zuweisung fehlt. Solche Tickets werden hier
+      // uebernommen — sonst wartet das Board auf einen Agenten, den es nie
+      // benannt hat.
+      const orphanedTodo = state.tasks.filter(
+        (task) =>
+          task.parentId === rootIssueId &&
+          task.column === "todo" &&
+          task.assignedAgentId === null &&
+          isReady(task)
+      );
       const readyBacklog = state.tasks
         .filter(
           (task) => task.parentId === rootIssueId && task.column === "backlog" && isReady(task)
         )
         .sort(byBusinessValue);
-      const planned = readyBacklog.slice(0, Math.min(todoSlots, availableDevelopers.length));
+      const planned = [...orphanedTodo, ...readyBacklog].slice(
+        0,
+        Math.min(todoSlots + orphanedTodo.length, availableDevelopers.length)
+      );
       if (planned.length === 0) return;
 
       const productOwner = state.agents.find((agent) => agent.role === "product_owner");
