@@ -1,4 +1,5 @@
-<h1 align="center">Agent Scrum</h1>
+<img width="1306" height="653" alt="image" src="https://github.com/user-attachments/assets/ba6493c8-bf05-48cd-8740-3670afd6d883" />
+
 
 <p align="center">
   <strong>Six AI agents that run a real Scrum process on your Paperclip board.</strong><br>
