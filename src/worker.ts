@@ -1054,6 +1054,44 @@ const plugin = definePlugin({
       }
     }
 
+    /** Returns a Technical Lead refinement task to the backlog after its marker is recorded. */
+    async function returnRefinedTechnicalLeadIssueToBacklog(issue: Issue): Promise<Issue> {
+      if (!companyId || !isProjectOnboardingChildIssue(issue) || issue.status !== "todo") {
+        return issue;
+      }
+
+      const technicalLead = state.agents.find((agent) => agent.role === "technical_lead");
+      if (!technicalLead || issue.assigneeAgentId !== technicalLead.id) return issue;
+
+      try {
+        const comments = await ctx.issues.listComments(issue.id, companyId);
+        const projection = projectIssueProjection({
+          issueId: issue.id,
+          description: issue.description ?? "",
+          comments,
+          agents: state.agents,
+        });
+        if (!projection.refinement.refined) return issue;
+
+        const returned = await ctx.issues.update(
+          issue.id,
+          { status: "backlog", assigneeAgentId: null },
+          companyId
+        );
+        ctx.logger.info("Project refinement completed", {
+          issueId: returned.id,
+          technicalLeadId: technicalLead.id,
+        });
+        return returned;
+      } catch (error) {
+        ctx.logger.warn("Could not return refined project issue to backlog", {
+          issueId: issue.id,
+          error: String(error),
+        });
+        return issue;
+      }
+    }
+
     function developerForProjectRework(issueId: string): WorkerState["agents"][number] | null {
       const activeColumns = new Set(["todo", "in_progress", "in_review"]);
       return state.agents
@@ -1190,11 +1228,18 @@ const plugin = definePlugin({
       const rootIssueId = state.projectOnboarding?.rootIssueId;
       if (!rootIssueId) return [];
 
+      const technicalLeadId = state.agents.find(
+        (agent) => agent.role === "technical_lead"
+      )?.id;
+
       return state.tasks.filter(
         (task) =>
           task.parentId === rootIssueId &&
-          task.column !== "done" &&
-          !task.refined
+          !task.refined &&
+          (
+            (task.column === "backlog" && task.assignedAgentId === null) ||
+            (task.column === "todo" && task.assignedAgentId === technicalLeadId)
+          )
       );
     }
 
@@ -1243,6 +1288,7 @@ const plugin = definePlugin({
       force = false
     ): Promise<ProjectRefinementResult> {
       if (!companyId) return { requested: false, error: "No company context.", taskIds: [] as string[] };
+      const refinementCompanyId = companyId;
 
       const requestStateChanged = reconcileProjectRefinementRequests();
       const onboarding = state.projectOnboarding;
@@ -1286,7 +1332,11 @@ const plugin = definePlugin({
       try {
         const wakeups = await Promise.all(
           taskIds.map(async (taskId) => {
-            await ctx.issues.update(taskId, { assigneeAgentId: technicalLead.id }, companyId);
+            await ctx.issues.update(
+              taskId,
+              { status: "todo", assigneeAgentId: technicalLead.id },
+              refinementCompanyId
+            );
             return requestIssueWakeup(taskId, "project_refinement");
           })
         );
@@ -2136,7 +2186,8 @@ const plugin = definePlugin({
         const completionGatedIssue = await routeProjectCompletionToQa(issue, event.actorId ?? null);
         const qaCompletedIssue = await completeFinalQaProjectReview(completionGatedIssue);
         const reworkRoutedIssue = await routeProjectReworkToDeveloper(qaCompletedIssue);
-        const recoveredIssue = await returnMisassignedSprintPlanningIssueToBacklog(reworkRoutedIssue);
+        const refinedIssue = await returnRefinedTechnicalLeadIssueToBacklog(reworkRoutedIssue);
+        const recoveredIssue = await returnMisassignedSprintPlanningIssueToBacklog(refinedIssue);
         const routedIssue = await routeProjectReview(recoveredIssue);
         const result = syncProjectOnboardingIssue(
           state.tasks,

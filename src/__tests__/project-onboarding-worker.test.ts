@@ -745,7 +745,10 @@ describe('project onboarding worker actions', () => {
 
     expect(approval).toMatchObject({ activated: true, projectOnboarding: { status: 'sprint_planning' } });
     expect(board.currentSprint).toBeNull();
-    expect(await sprintHarness.ctx.issues.get(child.id, COMPANY_ID)).toMatchObject({ status: 'backlog' });
+    expect(await sprintHarness.ctx.issues.get(child.id, COMPANY_ID)).toMatchObject({
+      status: 'todo',
+      assigneeAgentId: technicalLead?.id,
+    });
 
     const refinement = await sprintHarness.ctx.issues.createComment(
       child.id,
@@ -1243,42 +1246,7 @@ describe('project onboarding worker actions', () => {
     ).toHaveLength(1);
   });
 
-  it('requests refinement for an already active project ticket missing an estimate', async () => {
-    const kickoff = await harness.performAction<{ rootIssueId: string }>(
-      'startProjectOnboarding',
-      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
-      { companyId: COMPANY_ID }
-    );
-    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
-    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
-    await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
-
-    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
-    const technicalLead = board.agents.find((agent) => agent.role === 'technical_lead');
-    const child = await harness.ctx.issues.create({
-      companyId: COMPANY_ID,
-      projectId: PROJECT_ID,
-      parentId: kickoff.rootIssueId,
-      title: 'Implement image slider controls',
-      status: 'backlog',
-    });
-    await harness.emit(
-      'issue.created',
-      { issueId: child.id },
-      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
-    );
-
-    expect(
-      harness.logs.filter(
-        (entry) =>
-          entry.message === 'Project refinement requested' &&
-          Array.isArray(entry.meta?.taskIds) &&
-          entry.meta.taskIds.includes(child.id)
-      )
-    ).toHaveLength(1);
-  });
-
-  it('retries a previously requested project refinement only through the explicit retry action', async () => {
+  it('does not reassign an already active project ticket missing an estimate', async () => {
     const kickoff = await harness.performAction<{ rootIssueId: string }>(
       'startProjectOnboarding',
       { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
@@ -1304,6 +1272,45 @@ describe('project onboarding worker actions', () => {
       { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
     );
 
+    expect(
+      harness.logs.filter(
+        (entry) =>
+          entry.message === 'Project refinement requested' &&
+          Array.isArray(entry.meta?.taskIds) &&
+          entry.meta.taskIds.includes(child.id)
+      )
+    ).toHaveLength(0);
+    await expect(harness.ctx.issues.get(child.id, COMPANY_ID)).resolves.toMatchObject({
+      status: 'in_progress',
+      assigneeAgentId: developer?.id,
+    });
+  });
+
+  it('retries a previously requested project refinement only through the explicit retry action', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+    await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const technicalLead = board.agents.find((agent) => agent.role === 'technical_lead');
+    const child = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Implement image slider controls',
+      status: 'backlog',
+    });
+    await harness.emit(
+      'issue.created',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
+    );
+
     await expect(
       harness.performAction('requestProjectRefinement', {}, { companyId: COMPANY_ID })
     ).resolves.toMatchObject({ requested: false });
@@ -1317,7 +1324,51 @@ describe('project onboarding worker actions', () => {
       expect.objectContaining({ reason: 'project_refinement' })
     );
     await expect(harness.ctx.issues.get(child.id, COMPANY_ID)).resolves.toMatchObject({
+      status: 'todo',
       assigneeAgentId: technicalLead?.id,
+    });
+  });
+
+  it('returns a refined Technical Lead task to the backlog for sprint planning', async () => {
+    harness.setConfig({ enableTeam: true, requireProjectSprint: true });
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+    await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const technicalLead = board.agents.find((agent) => agent.role === 'technical_lead');
+    const child = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Implement image slider controls',
+      status: 'backlog',
+    });
+    await harness.emit(
+      'issue.created',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
+    );
+    const refinement = await harness.ctx.issues.createComment(
+      child.id,
+      `<!-- ${REFINEMENT_MARKER} {"storyPoints":3,"acceptanceCriteria":["Keyboard navigation works"],"technicalNotes":"Reuse the media primitives.","risks":[]} -->`,
+      COMPANY_ID,
+      { authorAgentId: technicalLead?.id }
+    );
+    await harness.emit(
+      'issue.comment.created',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: refinement.id, entityType: 'issue_comment' }
+    );
+
+    await expect(harness.ctx.issues.get(child.id, COMPANY_ID)).resolves.toMatchObject({
+      status: 'backlog',
+      assigneeAgentId: null,
     });
   });
 
@@ -1953,6 +2004,7 @@ describe('project onboarding worker actions', () => {
     const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
     const productOwner = board.agents.find((agent) => agent.role === 'product_owner');
     const developer = board.agents.find((agent) => agent.role === 'developer');
+    const technicalLead = board.agents.find((agent) => agent.role === 'technical_lead');
     const unscoped = await harness.ctx.issues.create({
       companyId: COMPANY_ID,
       projectId: PROJECT_ID,
@@ -1990,6 +2042,7 @@ describe('project onboarding worker actions', () => {
     const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
     const productOwner = board.agents.find((agent) => agent.role === 'product_owner');
     const developer = board.agents.find((agent) => agent.role === 'developer');
+    const technicalLead = board.agents.find((agent) => agent.role === 'technical_lead');
     const unscoped = await harness.ctx.issues.create({
       companyId: COMPANY_ID,
       projectId: PROJECT_ID,
@@ -2025,7 +2078,11 @@ describe('project onboarding worker actions', () => {
       expect.objectContaining({ issueId: unscoped.id })
     );
     const approvedTask = refreshedBoard.tasks.find((task) => task.id === approval.taskId);
-    expect(approvedTask).toMatchObject({ parentId: kickoff.rootIssueId, column: 'backlog' });
+    expect(approvedTask).toMatchObject({
+      parentId: kickoff.rootIssueId,
+      column: 'todo',
+      assignedAgentId: technicalLead?.id,
+    });
     expect(approvedTask?.comments).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ body: expect.stringContaining('Human scope approved') }),
