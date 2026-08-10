@@ -104,6 +104,7 @@ import {
   validateRefinement,
 } from "./core/agent-tools";
 import {
+  LIVE_RUN_STALL_AFTER_MS,
   mergeStalls,
   liveRunsFromOrchestration,
   stallsFromOrchestration,
@@ -1839,6 +1840,22 @@ const plugin = definePlugin({
       );
     }
 
+    /**
+     * Laeuft fuer dieses Ticket ein Run, der sein Zeitbudget noch einhaelt?
+     *
+     * Der Host meldet einen abgestuerzten Run weiter als "running". Genau
+     * dafuer gibt es `LIVE_RUN_STALL_AFTER_MS`: danach ist er ein Stillstand
+     * und darf keine Anfrage mehr aufhalten.
+     */
+    function isRunningWithinBudget(taskId: string): boolean {
+      const run = state.liveRuns?.find((entry) => entry.taskId === taskId);
+      if (!run) return false;
+
+      const startedAt = Date.parse(run.startedAt);
+      if (!Number.isFinite(startedAt)) return false;
+      return Date.now() - startedAt < LIVE_RUN_STALL_AFTER_MS;
+    }
+
     interface DeferredRefinement {
       task: ScrumTask;
       blockedBy: string[];
@@ -2076,7 +2093,12 @@ const plugin = definePlugin({
           // zweiter Weckruf ueberholt ihn, und der Technical Lead faengt von
           // vorne an. Genau so hat ein Ticket sechs Anlaeufe verbraucht, ohne
           // je fertig zu werden — im Minutentakt des Reconcile-Jobs.
-          if (state.liveRuns?.some((run) => run.taskId === task.id)) return false;
+          //
+          // Nur zaehlt "laufend" nicht unbegrenzt: ein Run jenseits seines
+          // Zeitbudgets ist ein Stillstand, kein Fortschritt. Ohne diese Frist
+          // haette die Bremse aus einem haengenden Run eine Dauersperre
+          // gemacht — dieselbe Sorte Deadlock, gegen die sie gebaut ist.
+          if (isRunningWithinBudget(task.id)) return false;
 
           // Der Deckel gehoert vor die Gedaechtnispruefung. Stand er dahinter,
           // liess ihn jedes Leeren der Anfrageliste ins Leere laufen: das
@@ -2103,31 +2125,35 @@ const plugin = definePlugin({
           return Number.isFinite(waitedFor) && waitedFor >= REFINEMENT_RETRY_AFTER_MS;
         })
         .map((task) => task.id);
-      if (taskIds.length === 0) {
+      // Eine Kette blockierter Tickets hat keinen freien Traeger. Genau so
+      // entsteht der Stillstand: der Product Owner reiht die Stories der Reihe
+      // nach auf, das erste Ticket wird verfeinert — und die uebrigen warten
+      // auf ein `done`, das ohne Sprint nie kommt, waehrend der Sprint auf ihre
+      // Schaetzung wartet. Der Kickoff ist nie blockiert und traegt den Batch
+      // deshalb, wenn sonst niemand kann.
+      const carrierTaskId = taskIds[0] ?? (deferred.length > 0 ? rootIssueId : null);
+      if (carrierTaskId === null) {
         // Auch ohne freies Ticket bleibt die Wartelage eine Tatsache: ohne
         // diesen Vermerk behauptet der Header weiter, jemand verfeinere gerade.
         const waitsChanged = recordRefinementWaits(deferred, null);
         if (requestStateChanged || waitsChanged) await save();
-        if (deferred.length > 0) {
-          ctx.logger.info("Refinement deferred until blockers clear", {
-            taskIds: deferred.map((entry) => entry.task.id),
-          });
-        }
         return { requested: false, error: "No project tickets need technical refinement.", taskIds };
       }
+      const carrierIsKickoff = carrierTaskId === rootIssueId;
 
       try {
         // Der Technical Lead darf nur einen Run gleichzeitig ausfuehren. Ein
         // Carrier vermeidet eine Host-Warteschlange und gibt dem einen Run alle
         // offenen Stories samt ihrer exakten Tool-IDs mit.
-        const carrierTaskId = taskIds[0];
         // Ein neu aufgetauchtes Ticket ist auch der Anlass, noch unverfeinerte
         // Tickets aus einer frueheren Einzelwarteschlange mitzunehmen. So
         // erholt ein bereits vor dem Batch-Fix gestartetes Feature sofort,
         // statt bis zum zeitbasierten Retry zu warten.
-        const batchTasks = candidates;
+        const batchTasks = carrierIsKickoff ? [] : candidates;
         const carriedTaskIds = deferred.map((entry) => entry.task.id);
         const batchTaskIds = [...batchTasks.map((task) => task.id), ...carriedTaskIds];
+        // Der Kickoff traegt den Auftrag nur; er wird nicht Teil des Batches
+        // und bleibt fuer die Lieferkette unberuehrt.
         await ctx.issues.update(
           carrierTaskId,
           { status: "todo", assigneeAgentId: technicalLead.id },
@@ -2137,10 +2163,13 @@ const plugin = definePlugin({
         // gehoert ins Carrier-Ticket, sonst muss der Agent es aus 12 KB
         // Instruktionen erraten — und genau daran scheitert der Batch.
         const brief = refinementBriefComment(attempts.get(carrierTaskId)?.attempts ?? 0);
+        const kickoffNote = carrierIsKickoff
+          ? "\n\nJedes Ticket dieses Batches ist durch eine Lieferreihenfolge blockiert und laesst sich nicht einzeln wecken. Der Auftrag steht deshalb hier am Kickoff. Verfeinere die genannten Tickets; an diesem Kickoff-Issue selbst aenderst du nichts."
+          : "";
         const briefPosted = await postIssueNotice(
           carrierTaskId,
           "refinement-brief",
-          `${brief}\n\n${batchRefinementBrief(batchTasks, deferred)}`
+          `${brief}\n\n${batchRefinementBrief(batchTasks, deferred)}${kickoffNote}`
         );
         // Ohne zugestellten Auftrag ist der Weckruf schaedlich: der Technical
         // Lead startet, findet die erwartete Batch-Liste nicht im Ticket,

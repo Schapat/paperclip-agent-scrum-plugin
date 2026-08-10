@@ -2408,6 +2408,91 @@ describe('project onboarding worker actions', () => {
       expect(wakeups, 'a live run must not be overtaken by a second wake-up').toEqual([]);
     });
 
+    it('refines a whole blocker chain through the kickoff when no ticket is free', async () => {
+      const { harness, children } = await boardWithTwoUnrefinedStories();
+      const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+      const technicalLead = board.agents.find((agent) => agent.role === 'technical_lead');
+      const rootIssueId = board.projectOnboarding.rootIssueId!;
+
+      // Der Product Owner reiht die Stories der Reihe nach auf — die haeufigste
+      // Form eines Backlogs. Ist der Kopf verfeinert, hat kein verbleibendes
+      // Ticket mehr einen freien Traeger: der Host weckt kein blockiertes
+      // Issue, und `done` wird der Kopf erst nach der Lieferung, die ohne
+      // Schaetzung nie startet.
+      await harness.ctx.issues.relations.setBlockedBy(children[1].id, [children[0].id], COMPANY_ID);
+      const marker = await harness.ctx.issues.createComment(
+        children[0].id,
+        `<!-- ${REFINEMENT_MARKER} {"storyPoints":3,"acceptanceCriteria":["Works"]} -->`,
+        COMPANY_ID,
+        { authorAgentId: technicalLead?.id }
+      );
+      await harness.emit(
+        'issue.comment.created',
+        { issueId: children[0].id },
+        { companyId: COMPANY_ID, entityId: marker.id, entityType: 'issue_comment' }
+      );
+
+      const wakeups: string[] = [];
+      vi.spyOn(harness.ctx.issues, 'requestWakeup').mockImplementation(async (issueId) => {
+        wakeups.push(issueId as string);
+        return { queued: true, runId: 'run-1' };
+      });
+
+      const result = await harness.performAction<{ requested: boolean }>(
+        'retryProjectRefinement',
+        {},
+        { companyId: COMPANY_ID }
+      );
+
+      expect(result.requested, 'the chain must not stall out').toBe(true);
+      expect(wakeups, 'the kickoff carries the batch').toContain(rootIssueId);
+      const kickoffComments = await harness.ctx.issues.listComments(rootIssueId, COMPANY_ID);
+      const carriedBrief = kickoffComments.find((comment) =>
+        comment.body.includes('Refinement-Batch')
+      );
+      expect(carriedBrief?.body).toContain(children[1].id);
+
+      const after = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+      expect(after.projectOnboarding.refinementWaits).toMatchObject([
+        { taskId: children[1].id, carriedBy: rootIssueId },
+      ]);
+      // Der Kickoff traegt nur — er wird nicht Teil des Batches.
+      expect(after.projectOnboarding.refinementRequestedTaskIds).not.toContain(rootIssueId);
+    });
+
+    it('lets a run that blew its budget go instead of blocking forever', async () => {
+      const { harness, children } = await boardWithTwoUnrefinedStories();
+
+      const wakeups: string[] = [];
+      vi.spyOn(harness.ctx.issues, 'requestWakeup').mockImplementation(async (issueId) => {
+        wakeups.push(issueId as string);
+        return { queued: true, runId: 'run-1' };
+      });
+      // Ein Run, den der Host seit zwei Stunden als "running" fuehrt. Ohne
+      // Frist waere die Ueberhol-Bremse daraus eine Dauersperre geworden.
+      const longAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+      vi.spyOn(harness.ctx.issues.summaries, 'getOrchestration').mockResolvedValue({
+        runs: children.map((child, index) => ({
+          id: `run-${index}`,
+          issueId: child.id,
+          status: 'running',
+          startedAt: longAgo,
+          error: null,
+          finishedAt: null,
+          createdAt: longAgo,
+        })),
+        approvals: [],
+        invocationBlocks: [],
+        openBudgetIncidents: [],
+      } as never);
+      await harness.getData<BoardData>('board', { companyId: COMPANY_ID, force: true });
+
+      wakeups.length = 0;
+      await harness.performAction('retryProjectRefinement', {}, { companyId: COMPANY_ID });
+
+      expect(wakeups.length, 'an expired run must not hold the refinement hostage').toBeGreaterThan(0);
+    });
+
     it('never exceeds three automatic attempts, however often the memory is cleared', async () => {
       const harness = createTestHarness({ manifest, config: { enableTeam: true } });
       harness.seed({ projects: [project()], projectWorkspaces: [workspace()] });
