@@ -12,6 +12,14 @@ export interface ProjectOnboardingInput {
   brief: string;
   constraints: string | null;
   skipSprintPlanning: boolean;
+  /**
+   * Der Lieferbranch, wenn der Human ihn schon hier festlegt.
+   *
+   * Die Frage gehoert eigentlich an den Sprintstart — aber eine kleine
+   * Umsetzung ueberspringt das Sprint-Planning ganz, und dann wuerde sie nie
+   * gestellt. `null` heisst wie ueberall: das Team entscheidet selbst.
+   */
+  deliveryBranch: string | null;
 }
 
 export type ProjectOnboardingInputResult =
@@ -85,6 +93,7 @@ export function parseProjectOnboardingInput(input: {
   brief?: unknown;
   constraints?: unknown;
   skipSprintPlanning?: unknown;
+  deliveryBranch?: unknown;
 }): ProjectOnboardingInputResult {
   const projectId = trimmedString(input.projectId);
   if (!projectId) return { valid: false, error: 'Choose a Paperclip project first.' };
@@ -100,6 +109,7 @@ export function parseProjectOnboardingInput(input: {
       brief,
       constraints: constraints || null,
       skipSprintPlanning: input.skipSprintPlanning === true,
+      deliveryBranch: normalizeBranchName(input.deliveryBranch),
     },
   };
 }
@@ -122,6 +132,10 @@ export function startProjectOnboarding({
     scopeHolds: [],
     brief: input.brief,
     constraints: input.constraints,
+    // Die Branchwahl ueberlebt den ganzen Ablauf: sie wird am Sprintstart
+    // wieder angeboten, gilt aber schon vorher — auch fuer eine kleine
+    // Umsetzung, die das Sprint-Planning ueberspringt.
+    deliveryBranch: input.deliveryBranch,
     startedAt: now,
     updatedAt: now,
   };

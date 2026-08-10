@@ -2596,6 +2596,60 @@ describe('project onboarding worker actions', () => {
     });
   });
 
+  /**
+   * Eine kleine Umsetzung ueberspringt das Sprint-Planning — und damit die
+   * Stelle, an der das Board bisher als einziges nach dem Branch gefragt hat.
+   * Die Developer lieferten dann wieder auf selbst erfundenen Branches.
+   */
+  it('carries a branch chosen at the request through to the ticket', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      {
+        projectId: PROJECT_ID,
+        brief: 'Build a responsive image slider.',
+        skipSprintPlanning: true,
+        deliveryBranch: 'feature/image slider',
+      },
+      { companyId: COMPANY_ID }
+    );
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const technicalLead = board.agents.find((agent) => agent.role === 'technical_lead');
+    const child = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Slider markup',
+      status: 'backlog',
+    });
+    await harness.ctx.issues.createComment(
+      child.id,
+      `<!-- ${REFINEMENT_MARKER} {"storyPoints":3,"acceptanceCriteria":["Works"]} -->`,
+      COMPANY_ID,
+      { authorAgentId: technicalLead?.id }
+    );
+    await harness.emit(
+      'issue.created',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
+    );
+    await harness.performAction('activateProjectOnboarding', {}, { companyId: COMPANY_ID });
+
+    const after = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    // Kein Sprint-Gate, kein Sprint — die Branchwahl gilt trotzdem.
+    expect(after.projectOnboarding).toMatchObject({
+      status: 'active',
+      deliveryBranch: 'feature/image-slider',
+    });
+    expect(after.tasks.find((task) => task.id === child.id)?.deliveryBranch).toBe(
+      'feature/image-slider'
+    );
+    const comments = await harness.ctx.issues.listComments(child.id, COMPANY_ID);
+    expect(comments.some((comment) => comment.body.includes('feature/image-slider'))).toBe(true);
+  });
+
   it('rejects a branch name that Git would not take', async () => {
     const { harness } = await startSprintReadyBoard();
 

@@ -149,6 +149,7 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
   const activateProjectOnboarding = usePluginAction("activateProjectOnboarding");
   const startProjectSprint = usePluginAction("startProjectSprint");
   const resetProjectWorkflow = usePluginAction("resetProjectWorkflow");
+  const listProjectBranches = usePluginAction("listProjectBranches");
   const requestProjectRefinement = usePluginAction("requestProjectRefinement");
   const retryProjectRefinement = usePluginAction("retryProjectRefinement");
   const fetchTicketCommitChanges = usePluginAction("fetchTicketCommitChanges");
@@ -209,12 +210,19 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
     log.refresh();
   }, [refresh, projects, log]);
 
+  const handleLoadBranches = useCallback(
+    async (projectId: string) =>
+      (await listProjectBranches({ projectId })) as DeliveryBranchOptions,
+    [listProjectBranches],
+  );
+
   const handleStartProjectOnboarding = useCallback(
     async (input: {
       projectId: string;
       brief: string;
       constraints: string;
       skipSprintPlanning: boolean;
+      deliveryBranch: string;
     }) => {
       setOnboardingBusy(true);
       try {
@@ -535,6 +543,7 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
         branchOptions={data.deliveryBranchOptions}
         scopeHoldBusyId={scopeHoldBusyId}
         onStart={handleStartProjectOnboarding}
+        onLoadBranches={handleLoadBranches}
         onActivate={handleActivateProjectOnboarding}
         onStartSprint={handleStartProjectSprint}
         onResetWorkflow={handleResetProjectWorkflow}

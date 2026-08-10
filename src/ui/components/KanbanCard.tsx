@@ -252,6 +252,14 @@ export function KanbanCard({
         </div>
       )}
 
+      {/* Wohin dieses Ticket liefert — sonst steht der Branch nur in einem
+          Kommentar, und der Human muss das Ticket oeffnen, um ihn zu finden. */}
+      {task.deliveryBranch && (
+        <div className="kanban-card-branch" title={`Lieferbranch: ${task.deliveryBranch}`}>
+          <span aria-hidden="true">⑂</span> {task.deliveryBranch}
+        </div>
+      )}
+
       {/* Footer: Labels + Assignee */}
       <div className="kanban-card-footer">
         {/* Labels */}

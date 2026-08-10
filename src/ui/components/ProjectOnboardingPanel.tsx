@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 
 import type { ProjectOnboarding, TicketStall } from "../../core/types";
 import type { ProjectProgress } from "../../core/project-issue-projection";
@@ -44,7 +44,10 @@ interface ProjectOnboardingPanelProps {
     brief: string;
     constraints: string;
     skipSprintPlanning: boolean;
+    deliveryBranch: string;
   }) => Promise<void>;
+  /** Laedt die Branches des im Formular gewaehlten Projekts. */
+  onLoadBranches?: (projectId: string) => Promise<DeliveryBranchOptions>;
   onActivate: () => Promise<void>;
   onStartSprint: (input: { deliveryBranch: string }) => Promise<void>;
   /** Setzt den Ablauf auf Story-Arbeit oder auf das technische Refinement zurueck. */
@@ -70,6 +73,7 @@ export function ProjectOnboardingPanel({
   branchOptions,
   scopeHoldBusyId,
   onStart,
+  onLoadBranches,
   onActivate,
   onStartSprint,
   onResetWorkflow,
@@ -86,6 +90,9 @@ export function ProjectOnboardingPanel({
   // gespeicherte Wahl, sonst kein Branch.
   const [branchChoice, setBranchChoice] = useState<string | null>(null);
   const [customBranch, setCustomBranch] = useState("");
+  // Die Branches haengen am *im Formular* gewaehlten Projekt, nicht am
+  // Onboarding — das gibt es zu diesem Zeitpunkt noch gar nicht.
+  const [formBranchOptions, setFormBranchOptions] = useState<DeliveryBranchOptions | null>(null);
   const planningNextFeature = onboarding.status === "completed";
   const workflow = describeProjectWorkflow(onboarding, progress, {
     stalls,
@@ -93,8 +100,10 @@ export function ProjectOnboardingPanel({
     agentRunning,
     refinementWaits: onboarding.refinementWaits,
   });
-  const suggestedBranch = branchOptions?.suggestion ?? "";
-  const storedBranch = branchOptions?.selected ?? onboarding.deliveryBranch ?? null;
+  // Im Startformular gilt das dort gewaehlte Projekt, sonst das Onboarding.
+  const activeBranchOptions = formBranchOptions ?? branchOptions;
+  const suggestedBranch = activeBranchOptions?.suggestion ?? "";
+  const storedBranch = activeBranchOptions?.selected ?? onboarding.deliveryBranch ?? null;
   // Kein Branch ist die Vorgabe. Einen zu erfinden hiesse, die Agents auf einen
   // Branch zu schicken, den niemand entschieden hat.
   const selectedBranch = branchChoice ?? storedBranch ?? NO_BRANCH_OPTION;
@@ -105,9 +114,24 @@ export function ProjectOnboardingPanel({
         ? customBranch.trim()
         : selectedBranch;
 
+  useEffect(() => {
+    if (!projectId || !onLoadBranches) {
+      setFormBranchOptions(null);
+      return;
+    }
+
+    let cancelled = false;
+    void onLoadBranches(projectId).then((options) => {
+      if (!cancelled) setFormBranchOptions(options);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, onLoadBranches]);
+
   function submitStart(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    void onStart({ projectId, brief, constraints, skipSprintPlanning });
+    void onStart({ projectId, brief, constraints, skipSprintPlanning, deliveryBranch });
   }
 
   function startNextFeature() {
@@ -180,6 +204,18 @@ export function ProjectOnboardingPanel({
               <small>Skip the separate sprint-planning step after backlog approval.</small>
             </span>
           </label>
+
+          <div className="project-onboarding-field-wide">
+            <DeliveryBranchPicker
+              busy={busy || !projectId}
+              options={activeBranchOptions}
+              selected={selectedBranch}
+              customBranch={customBranch}
+              suggestion={suggestedBranch}
+              onSelect={setBranchChoice}
+              onCustomChange={setCustomBranch}
+            />
+          </div>
 
           <div className="project-onboarding-actions project-onboarding-field-wide">
             <button className="btn btn-primary" type="submit" disabled={busy || projects.length === 0}>

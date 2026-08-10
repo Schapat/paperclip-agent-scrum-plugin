@@ -48,8 +48,30 @@ describe('project onboarding', () => {
         brief: 'Build an image slider',
         constraints: 'Use the design system',
         skipSprintPlanning: true,
+        // Ohne Angabe entscheidet das Team weiter selbst.
+        deliveryBranch: null,
       },
     });
+  });
+
+  it('accepts a delivery branch with the request and repairs its spelling', () => {
+    // Die Frage gehoert an den Sprintstart — aber eine kleine Umsetzung
+    // ueberspringt ihn, und dann muss sie hier gestellt werden.
+    expect(
+      parseProjectOnboardingInput({
+        projectId: 'project-bmw',
+        brief: 'Build an image slider',
+        deliveryBranch: ' feature/image slider ',
+      })
+    ).toMatchObject({ valid: true, value: { deliveryBranch: 'feature/image-slider' } });
+
+    expect(
+      parseProjectOnboardingInput({
+        projectId: 'project-bmw',
+        brief: 'Build an image slider',
+        deliveryBranch: '..',
+      })
+    ).toMatchObject({ valid: true, value: { deliveryBranch: null } });
   });
 
   it('requires human-approved transitions before automatic delivery starts', () => {

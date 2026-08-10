@@ -520,7 +520,23 @@ const plugin = definePlugin({
       error: string | null;
     }
 
-    let branchOptionsCache: { at: number; value: DeliveryBranchOptions } | null = null;
+    const branchOptionsCache = new Map<string, { at: number; value: DeliveryBranchOptions }>();
+
+    /** Liefert die Branches eines Projekts, gedrosselt und pro Projekt gecacht. */
+    async function branchOptionsForProject(
+      projectId: string,
+      selected: string | null,
+      suggestion: string
+    ): Promise<DeliveryBranchOptions> {
+      const cached = branchOptionsCache.get(projectId);
+      if (cached && Date.now() - cached.at < BRANCH_OPTIONS_TTL_MS) {
+        return { ...cached.value, selected, suggestion };
+      }
+
+      const value = await loadDeliveryBranchOptions(projectId, selected, suggestion);
+      branchOptionsCache.set(projectId, { at: Date.now(), value });
+      return value;
+    }
 
     /**
      * Liefert der Host einen lesbaren Orchestrierungs-Snapshot?
@@ -545,19 +561,14 @@ const plugin = definePlugin({
         ? suggestDeliveryBranch(onboarding, state.completedSprints.length + 1)
         : "feature/delivery-sprint-1";
 
-      // Die Frage stellt sich genau einmal: vor dem Sprintstart.
+      // Am Sprint-Gate stellt sich die Frage zuletzt. Fuer das Startformular
+      // laedt die Ansicht die Branches gezielt zum gewaehlten Projekt — dort
+      // steht das Projekt noch gar nicht im Onboarding.
       if (!companyId || onboarding?.status !== "sprint_planning" || !onboarding.projectId) {
         return { selected, suggestion, branches: [], defaultBranch: null, error: null };
       }
 
-      const cached = branchOptionsCache;
-      if (cached && Date.now() - cached.at < BRANCH_OPTIONS_TTL_MS) {
-        return { ...cached.value, selected, suggestion };
-      }
-
-      const value = await loadDeliveryBranchOptions(onboarding.projectId, selected, suggestion);
-      branchOptionsCache = { at: Date.now(), value };
-      return value;
+      return branchOptionsForProject(onboarding.projectId, selected, suggestion);
     }
 
     async function loadDeliveryBranchOptions(
@@ -2304,9 +2315,11 @@ const plugin = definePlugin({
             state.currentSprint.updatedAt = new Date().toISOString();
           }
           // Der Lieferbranch steht im Ticket, nicht nur im Sprint: der Agent
-          // liest das Ticket, nicht den Board-State.
+          // liest das Ticket, nicht den Board-State — und der Human sieht am
+          // Ticket, wohin es geliefert wird.
           const deliveryBranch =
             state.currentSprint?.deliveryBranch ?? state.projectOnboarding?.deliveryBranch ?? null;
+          if (plannedTask) plannedTask.deliveryBranch = deliveryBranch;
           if (deliveryBranch) {
             await postIssueNotice(
               task.id,
@@ -3668,6 +3681,7 @@ const plugin = definePlugin({
         brief: params.brief,
         constraints: params.constraints,
         skipSprintPlanning: params.skipSprintPlanning,
+        deliveryBranch: params.deliveryBranch,
       });
       if (!parsed.valid) return { started: false, error: parsed.error };
 
@@ -3730,6 +3744,27 @@ const plugin = definePlugin({
         projectOnboarding: state.projectOnboarding,
         wakeup,
       };
+    });
+
+    /**
+     * Die Branches eines Projekts, bevor es ein Onboarding dafuer gibt.
+     *
+     * Das Startformular fragt danach, sobald der Human ein Projekt waehlt —
+     * dort steht das Projekt noch nirgends im State. Ohne diesen Weg bliebe die
+     * Branchwahl an das Sprint-Gate gebunden, und eine kleine Umsetzung, die es
+     * ueberspringt, wuerde nie danach gefragt.
+     */
+    registerCompanyAction("listProjectBranches", async (params) => {
+      if (!companyId) return { branches: [], error: "No company context." };
+
+      const projectId = typeof params.projectId === "string" ? params.projectId.trim() : "";
+      if (!projectId) return { branches: [], error: "Choose a Paperclip project first." };
+
+      const onboarding = state.projectOnboarding;
+      const suggestion = onboarding
+        ? suggestDeliveryBranch(onboarding, state.completedSprints.length + 1)
+        : "feature/delivery-sprint-1";
+      return branchOptionsForProject(projectId, onboarding?.deliveryBranch ?? null, suggestion);
     });
 
     registerCompanyAction("fetchTicketCommitChanges", async (params) => {
@@ -4340,7 +4375,15 @@ const plugin = definePlugin({
         ].filter(Boolean).join("\n\n");
         const constraints = `Follow-up created from held ticket ${heldIssue.id}.`;
         const provisionalOnboarding = startProjectOnboarding({
-          input: { projectId: project.id, brief, constraints, skipSprintPlanning: false },
+          input: {
+            projectId: project.id,
+            brief,
+            constraints,
+            skipSprintPlanning: false,
+            // Eine Nachfassaktion erbt die Branchwahl des Projekts, statt sie
+            // stillschweigend fallen zu lassen.
+            deliveryBranch: state.projectOnboarding?.deliveryBranch ?? null,
+          },
           projectName: project.name,
           rootIssueId: "pending",
           requiresSprint,
@@ -4378,7 +4421,15 @@ const plugin = definePlugin({
         );
 
         const followUpOnboarding = startProjectOnboarding({
-          input: { projectId: project.id, brief, constraints, skipSprintPlanning: false },
+          input: {
+            projectId: project.id,
+            brief,
+            constraints,
+            skipSprintPlanning: false,
+            // Eine Nachfassaktion erbt die Branchwahl des Projekts, statt sie
+            // stillschweigend fallen zu lassen.
+            deliveryBranch: state.projectOnboarding?.deliveryBranch ?? null,
+          },
           projectName: project.name,
           rootIssueId: rootIssue.id,
           requiresSprint,

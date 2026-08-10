@@ -164,6 +164,14 @@ export interface ScrumTask {
   parentId: string | null;
   labels: string[];
   priority: 'low' | 'medium' | 'high' | 'critical';
+  /**
+   * Branch, auf dem dieses Ticket geliefert wird.
+   *
+   * Beim Einplanen festgehalten, nicht aus dem laufenden Sprint abgeleitet: ein
+   * Ticket aus Sprint 1 behaelt seinen Branch, auch wenn Sprint 2 laengst auf
+   * einem anderen liefert. `null` heisst: der Human hat keinen vorgegeben.
+   */
+  deliveryBranch?: string | null;
 
   // Refinement-Ergebnisse (Technical Lead, Spec §3)
   /** Akzeptanzkriterien — QA prüft diese beim Review */
