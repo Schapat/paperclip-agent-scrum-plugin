@@ -1669,3 +1669,10 @@
   font-size: 10px;
   text-transform: uppercase;
 }
+
+/* Zwei Antworten nebeneinander: die Frage ist eine Ja/Nein-Entscheidung. */
+.ticket-detail-question-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+}

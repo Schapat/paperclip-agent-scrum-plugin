@@ -264,6 +264,9 @@ describe('project onboarding worker actions', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    // Spione auf Globals — etwa `Date.now` fuer eine verstrichene Wartefrist —
+    // ueberleben den Harness sonst und faerben den naechsten Test ein.
+    vi.restoreAllMocks();
   });
 
   it('creates a project-bound kickoff issue and queues the Technical Lead', async () => {
@@ -2407,6 +2410,31 @@ describe('project onboarding worker actions', () => {
       await harness.performAction('retryProjectRefinement', {}, { companyId: COMPANY_ID });
 
       expect(wakeups, 'a live run must not be overtaken by a second wake-up').toEqual([]);
+    });
+
+    it('picks a due retry up again on a board where nothing else happens', async () => {
+      const { harness, children } = await boardWithTwoUnrefinedStories();
+
+      const wakeups: string[] = [];
+      vi.spyOn(harness.ctx.issues, 'requestWakeup').mockImplementation(async (issueId) => {
+        wakeups.push(issueId as string);
+        return { queued: true, runId: 'run-1' };
+      });
+
+      const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+      expect(board.projectOnboarding.refinementAttempts?.length ?? 0).toBeGreaterThan(0);
+
+      // Der Technical Lead liefert nichts, und danach passiert auf dem Board
+      // nichts mehr. Die Wartefrist verstreicht — bewertet wurde sie bisher
+      // nur, wenn zufaellig ein Ereignis kam. Auf einem stillen Board: nie.
+      const realNow = Date.now();
+      vi.spyOn(Date, 'now').mockReturnValue(realNow + 20 * 60 * 1000);
+
+      wakeups.length = 0;
+      await harness.runJob('reconcile-stalled-work');
+
+      expect(children.length).toBe(2);
+      expect(wakeups.length, 'a quiet board must still resume a due refinement').toBeGreaterThan(0);
     });
 
     it('refines a whole blocker chain through the kickoff when no ticket is free', async () => {

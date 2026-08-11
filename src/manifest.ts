@@ -44,6 +44,12 @@ const manifest: PaperclipPluginManifestV1 = {
     // Ein Ticket, das auf einen Board-Dialog wartet, ist sonst nicht von einem
     // Ticket zu unterscheiden, das QA gerade prueft.
     "issue.interactions.read",
+    // Und sie beantworten duerfen — aber ausschliesslich auf einen Klick des
+    // Humans im Board hin. Der Host schreibt die Entscheidung einem
+    // menschlichen Mitglied zu und prueft das nach; das Plugin entscheidet
+    // deshalb nie von selbst, es nimmt dem Human nur die Suche nach dem Ticket
+    // ab.
+    "issue.interactions.respond",
     // Ein stehendes Ticket ist von einem laufenden nur unterscheidbar, wenn der
     // Host nach Runs, Freigaben und Budget-Sperren gefragt werden kann. Aus
     // Events allein laesst sich das nicht rekonstruieren: was waehrend eines

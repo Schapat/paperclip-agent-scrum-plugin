@@ -56,6 +56,18 @@ export interface TicketDetailPanelProps {
   onApproveTechnicalAnalysis?: () => Promise<boolean>;
   /** Gibt eine abgeschlossene Technical-Lead-Analyse mit Human-Feedback zurueck. */
   onRejectTechnicalAnalysis?: (reason: string) => Promise<boolean>;
+  /**
+   * Beantwortet eine Rueckfrage, die ein Agent im Ticket gestellt hat.
+   *
+   * Die Entscheidung bleibt die des Humans — das Board nimmt ihm nur die Suche
+   * nach dem Ticket ab, in dem die Frage haengt.
+   */
+  onResolveTicketQuestion?: (
+    taskId: string,
+    action: 'accept' | 'reject'
+  ) => Promise<boolean>;
+  /** Wartet an diesem Ticket eine selbst gestellte Agent-Rueckfrage? */
+  hasPendingQuestion?: boolean;
 }
 
 export interface Comment {
@@ -172,6 +184,8 @@ export function TicketDetailPanel({
   onResolveProductDecision,
   onApproveTechnicalAnalysis,
   onRejectTechnicalAnalysis,
+  onResolveTicketQuestion,
+  hasPendingQuestion = false,
 }: TicketDetailPanelProps) {
   // ---------------------------------------------------------------------------
   // State
@@ -190,6 +204,8 @@ export function TicketDetailPanel({
   const [isApprovingTechnicalAnalysis, setIsApprovingTechnicalAnalysis] = useState(false);
   const [isRejectingTechnicalAnalysis, setIsRejectingTechnicalAnalysis] = useState(false);
   const [technicalAnalysisError, setTechnicalAnalysisError] = useState<string | null>(null);
+  const [isResolvingQuestion, setIsResolvingQuestion] = useState(false);
+  const [questionError, setQuestionError] = useState<string | null>(null);
 
   // Refs for focus management
   const panelRef = useRef<HTMLDivElement>(null);
@@ -383,6 +399,24 @@ export function TicketDetailPanel({
   };
 
   const getAgentIcon = (agentId: string | null): string => agentIcon(agentPresentation(agentId, agents)?.role);
+  const handleResolveQuestion = useCallback(
+    async (action: 'accept' | 'reject') => {
+      if (!task || !onResolveTicketQuestion) return;
+
+      setIsResolvingQuestion(true);
+      setQuestionError(null);
+      try {
+        const resolved = await onResolveTicketQuestion(task.id, action);
+        if (!resolved) setQuestionError('Die Rückfrage konnte nicht beantwortet werden.');
+      } catch (error) {
+        setQuestionError(error instanceof Error ? error.message : 'Die Rückfrage konnte nicht beantwortet werden.');
+      } finally {
+        setIsResolvingQuestion(false);
+      }
+    },
+    [task, onResolveTicketQuestion],
+  );
+
   const hasPendingProductDecision = Boolean(
     task &&
       onResolveProductDecision &&
@@ -539,6 +573,37 @@ export function TicketDetailPanel({
             {description || <em>Keine Beschreibung</em>}
           </div>
         </div>
+
+        {hasPendingQuestion && onResolveTicketQuestion && (
+          <section className="ticket-detail-approval" aria-label="Offene Rückfrage">
+            <div>
+              <h3 className="ticket-detail-section-title">Ein Agent wartet auf deine Antwort</h3>
+              <p>
+                Dieses Ticket steht, bis die Frage beantwortet ist. Die Entscheidung ist deine — das
+                Board reicht sie nur weiter und weckt danach die zuständige Rolle.
+              </p>
+            </div>
+            <div className="ticket-detail-question-actions">
+              <button
+                className="btn btn-primary"
+                type="button"
+                disabled={isResolvingQuestion}
+                onClick={() => void handleResolveQuestion('accept')}
+              >
+                {isResolvingQuestion ? 'Wird gespeichert...' : 'Ja, weitermachen'}
+              </button>
+              <button
+                className="btn btn-secondary"
+                type="button"
+                disabled={isResolvingQuestion}
+                onClick={() => void handleResolveQuestion('reject')}
+              >
+                Nein
+              </button>
+            </div>
+            {questionError && <p className="ticket-detail-approval-error" role="alert">{questionError}</p>}
+          </section>
+        )}
 
         {hasPendingProductDecision && (
           <section className="ticket-detail-approval" aria-label="Ausstehende Human Approval">

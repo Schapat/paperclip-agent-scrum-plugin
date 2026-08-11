@@ -179,6 +179,14 @@ export function KanbanCard({
     .filter(Boolean)
     .join(' ');
 
+  // Was genau fehlt: die Schaetzung, die Kriterien, oder beides.
+  const unrefinedReason =
+    task.storyPoints > 0 && criteriaTotal === 0
+      ? 'Akzeptanzkriterien fehlen'
+      : criteriaTotal > 0 && task.storyPoints === 0
+        ? 'Schätzung fehlt'
+        : 'Refinement offen';
+
   return (
     <div
       ref={cardRef}
@@ -245,10 +253,12 @@ export function KanbanCard({
         </div>
       )}
 
-      {/* Im Backlog ohne Refinement: das Ticket ist nicht sprintreif (Spec §3) */}
+      {/* Im Backlog ohne Refinement: das Ticket ist nicht sprintreif (Spec §3).
+          Welche Haelfte fehlt, gehoert dazu — "Refinement offen" an einem
+          Ticket mit sichtbaren 3 SP liest sich sonst wie ein Widerspruch. */}
       {!task.refined && task.column === 'backlog' && (
-        <div className="kanban-card-unrefined" title="Noch nicht verfeinert">
-          <span aria-hidden="true">✎</span> Refinement offen
+        <div className="kanban-card-unrefined" title={unrefinedReason}>
+          <span aria-hidden="true">✎</span> {unrefinedReason}
         </div>
       )}
 

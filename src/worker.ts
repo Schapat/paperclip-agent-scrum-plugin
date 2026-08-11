@@ -4268,6 +4268,80 @@ const plugin = definePlugin({
       };
     });
 
+    /**
+     * Beantwortet eine Rueckfrage, die ein Agent selbst gestellt hat.
+     *
+     * Aufgeloest wird sie ausschliesslich hier — auf einen Klick des Humans im
+     * Board. Das Plugin trifft die Entscheidung nicht selbst: der Host schreibt
+     * sie einem menschlichen Mitglied zu und verifiziert das. Was das Board
+     * abnimmt, ist die Suche nach dem Ticket, nicht die Entscheidung.
+     */
+    registerCompanyAction("resolveTicketInteraction", async (params) => {
+      if (!companyId) return { resolved: false, error: "No company context." };
+
+      const taskId = typeof params.taskId === "string" ? params.taskId : "";
+      const action = params.action === "reject" ? "reject" : "accept";
+      const reason = typeof params.reason === "string" && params.reason.trim()
+        ? params.reason.trim()
+        : null;
+      const task = state.tasks.find((entry) => entry.id === taskId);
+      if (!task || task.parentId !== state.projectOnboarding?.rootIssueId) {
+        return { resolved: false, error: "This ticket is not part of the active project request." };
+      }
+
+      try {
+        const interactions = await ctx.issues.listInteractions(taskId, companyId);
+        const pending = interactions.filter(
+          (interaction) => (interaction as { status?: string }).status === "pending"
+        );
+        if (pending.length === 0) {
+          clearStall(taskId);
+          await save();
+          return { resolved: false, error: "This ticket has no open question." };
+        }
+
+        let applied = 0;
+        for (const interaction of pending) {
+          const result = await ctx.issues.respondInteraction(
+            taskId,
+            (interaction as { id: string }).id,
+            { action, reason },
+            companyId
+          );
+          if (result.applied) applied += 1;
+        }
+
+        clearStall(taskId);
+        await save();
+        // Der Agent liest das Ticket, nicht das Board — die Entscheidung
+        // gehoert dorthin, wo sein naechster Lauf beginnt.
+        await postIssueNotice(
+          taskId,
+          "interaction-resolved",
+          [
+            `## The human ${action === "accept" ? "confirmed" : "declined"} your question`,
+            reason ?? "No further comment was given.",
+            "Continue within the acceptance criteria of this ticket. Do not open another board confirmation — say it in a comment instead if something genuinely exceeds the ticket scope.",
+          ].join("\n\n")
+        );
+        const wakeup = await requestIssueWakeup(taskId, "project_interaction_resolved");
+
+        ctx.logger.info("Human resolved a ticket question from the board", {
+          issueId: taskId,
+          action,
+          applied,
+          queued: wakeup.queued,
+        });
+        return { resolved: true, applied, action };
+      } catch (error) {
+        ctx.logger.warn("Could not resolve the ticket question", {
+          issueId: taskId,
+          error: String(error),
+        });
+        return { resolved: false, error: String(error) };
+      }
+    });
+
     registerCompanyAction("resolveProductDecision", async (params) => {
       if (!companyId) return { resolved: false, error: "No company context." };
 
@@ -5082,6 +5156,25 @@ const plugin = definePlugin({
 
             const changed = await refreshOrchestrationStalls();
             if (changed) await save();
+
+            // Der Wiederanlauf eines Refinements ist zeitbasiert — "seit 15
+            // Minuten nichts geliefert" ist eine Frist, kein Ereignis. Bewertet
+            // wurde sie aber nur, wenn zufaellig etwas anderes passierte. Auf
+            // einem stillen Board hiess das: nie. Zwei Tickets warteten so
+            // zwei Stunden auf einen Anlauf, der seit 105 Minuten faellig war.
+            //
+            // Dass dieser Takt jetzt gefahrlos ist, liegt an den Bremsen davor:
+            // laufender Run, Versuchsdeckel, Wartefrist und Anfragegedaechtnis.
+            // Ohne sie waere daraus wieder das Ueberholen im Minutentakt.
+            const refinement = await requestProjectRefinement("automatic");
+            if (refinement.requested) {
+              ctx.logger.info("Reconcile tick resumed a due refinement", {
+                companyId: scope,
+                taskIds: refinement.taskIds,
+              });
+            }
+            if (state.projectOnboarding?.status === "active") await requestProjectPlanning();
+
             ctx.logger.info("Reconcile tick completed", {
               companyId: scope,
               stalls: state.stalls?.length ?? 0,
