@@ -321,3 +321,53 @@ describe('project issue projection', () => {
     });
   });
 });
+/**
+ * Der Product Owner schreibt seine Akzeptanzkriterien als Given/When/Then —
+ * ein uebliches Format, und die Vorgabe an ihn verlangt keine Checkboxen. Das
+ * Board las nur Checkboxen und meldete deshalb "Refinement offen" an einem
+ * Ticket, das Schaetzung *und* ausformulierte Kriterien trug.
+ */
+describe('acceptance criteria a Product Owner actually writes', () => {
+  const withSection = (body: string) => `## User Story\n\nAls Besucher…\n\n## Akzeptanzkriterien\n\n${body}\n`;
+
+  function criteria(description: string) {
+    return projectIssueProjection({
+      issueId: 'ticket-1',
+      description,
+      comments: [],
+      agents: [],
+    }).refinement.acceptanceCriteria.map((entry) => entry.text);
+  }
+
+  it('reads Given/When/Then scenarios as one criterion each', () => {
+    const result = criteria(
+      withSection(
+        '**Given** ich bin auf der deutschen Seite\n**When** ich den Button sehe\n**Then** steht dort "Zum dunklen Modus"\n\n' +
+          '**Given** ich bin auf der englischen Seite\n**When** ich den Button sehe\n**Then** steht dort "Switch to dark mode"'
+      )
+    );
+
+    expect(result).toHaveLength(2);
+    expect(result[0]).toContain('deutschen Seite');
+    expect(result[0]).toContain('Zum dunklen Modus');
+    expect(result[1]).toContain('englischen Seite');
+  });
+
+  it('still prefers checkboxes where they exist', () => {
+    expect(criteria(withSection('- [ ] Der Toggle ist sichtbar\n- [x] Die Farbe stimmt'))).toEqual([
+      'Der Toggle ist sichtbar',
+      'Die Farbe stimmt',
+    ]);
+  });
+
+  it('accepts a plain bullet list', () => {
+    expect(criteria(withSection('- Der Toggle ist sichtbar\n- Die Farbe stimmt'))).toEqual([
+      'Der Toggle ist sichtbar',
+      'Die Farbe stimmt',
+    ]);
+  });
+
+  it('reports nothing when the section has no criteria at all', () => {
+    expect(criteria(withSection('Wird noch ergaenzt.'))).toEqual([]);
+  });
+});

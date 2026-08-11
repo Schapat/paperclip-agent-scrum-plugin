@@ -17,6 +17,7 @@ import type { ScrumAgent, ScrumTask } from '../../core/types';
 import { useDragDropOptional, isDraggable, getDragId, DragDropContextValue } from './DragDropContext';
 import { agentIcon, agentPresentation } from './agent-presentation';
 import { ticketDisplayId } from './ticket-display-id';
+import { isAgentWorkOrderTicket } from '../../core/meta-ticket';
 
 interface KanbanCardProps {
   task: ScrumTask;
@@ -179,6 +180,19 @@ export function KanbanCard({
     .filter(Boolean)
     .join(' ');
 
+  // Ein Agenten-Arbeitsauftrag ist keine Story: er wird nie verfeinert und
+  // zaehlt nicht in die Sprintreife. Sichtbar bleibt er trotzdem — verstecken
+  // hiesse wieder, Arbeit zu verschweigen.
+  const isWorkOrder = isAgentWorkOrderTicket(task);
+
+  // Was genau fehlt: die Schaetzung, die Kriterien, oder beides.
+  const unrefinedReason =
+    task.storyPoints > 0 && criteriaTotal === 0
+      ? 'Akzeptanzkriterien fehlen'
+      : criteriaTotal > 0 && task.storyPoints === 0
+        ? 'Schätzung fehlt'
+        : 'Refinement offen';
+
   return (
     <div
       ref={cardRef}
@@ -245,11 +259,19 @@ export function KanbanCard({
         </div>
       )}
 
-      {/* Im Backlog ohne Refinement: das Ticket ist nicht sprintreif (Spec §3) */}
-      {!task.refined && task.column === 'backlog' && (
-        <div className="kanban-card-unrefined" title="Noch nicht verfeinert">
-          <span aria-hidden="true">✎</span> Refinement offen
+      {/* Im Backlog ohne Refinement: das Ticket ist nicht sprintreif (Spec §3).
+          Welche Haelfte fehlt, gehoert dazu — "Refinement offen" an einem
+          Ticket mit sichtbaren 3 SP liest sich sonst wie ein Widerspruch. */}
+      {isWorkOrder ? (
+        <div className="kanban-card-work-order" title="Arbeitsauftrag eines Agenten, kein Backlog-Item">
+          <span aria-hidden="true">◷</span> Arbeitsauftrag — zählt nicht zum Sprint
         </div>
+      ) : (
+        !task.refined && task.column === 'backlog' && (
+          <div className="kanban-card-unrefined" title={unrefinedReason}>
+            <span aria-hidden="true">✎</span> {unrefinedReason}
+          </div>
+        )
       )}
 
       {/* Wohin dieses Ticket liefert — sonst steht der Branch nur in einem

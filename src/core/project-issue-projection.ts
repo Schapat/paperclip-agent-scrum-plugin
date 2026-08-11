@@ -552,16 +552,53 @@ function findStoryPoints(description: string, comments: ProjectIssueCommentSnaps
   return 0;
 }
 
+/**
+ * Liest die Akzeptanzkriterien aus der Beschreibung.
+ *
+ * Erkannt wurden nur Checkboxen. Der Product Owner schreibt seine Kriterien
+ * aber als Given/When/Then — ein voellig uebliches Format, und die Vorgabe an
+ * ihn verlangt keine Checkboxen. Die Folge war ein Ticket, das eine
+ * Schaetzung hatte, ausformulierte Kriterien trug und trotzdem dauerhaft als
+ * unverfeinert galt: das Board las genau die Haelfte.
+ */
 function extractChecklist(description: string): string[] {
   const section = extractSection(description, ['Akzeptanzkriterien', 'Acceptance Criteria']);
   if (!section) return [];
 
-  return section
-    .split('\n')
-    .flatMap((line) => {
-      const match = line.match(/^\s*[-*]\s+\[[ xX]\]\s+(.+)$/);
-      return match?.[1]?.trim() ? [match[1].trim()] : [];
-    });
+  const lines = section.split('\n');
+  const checkboxes = lines.flatMap((line) => {
+    const match = line.match(/^\s*[-*]\s+\[[ xX]\]\s+(.+)$/);
+    return match?.[1]?.trim() ? [match[1].trim()] : [];
+  });
+  if (checkboxes.length > 0) return checkboxes;
+
+  // Given/When/Then: ein Kriterium besteht aus mehreren Zeilen und endet an der
+  // naechsten Leerzeile oder am naechsten `Given`.
+  const scenarios: string[] = [];
+  let current: string[] = [];
+  const flush = () => {
+    const text = current.join(' ').replace(/\s+/g, ' ').trim();
+    if (text) scenarios.push(text);
+    current = [];
+  };
+  for (const line of lines) {
+    const text = line.trim().replace(/^[-*]\s+/, '');
+    if (!text) {
+      flush();
+      continue;
+    }
+    if (/^\*{0,2}(given|angenommen)\b/i.test(text)) flush();
+    current.push(text.replace(/\*\*/g, ''));
+  }
+  flush();
+  const givenWhenThen = scenarios.filter((scenario) => /\b(then|dann)\b/i.test(scenario));
+  if (givenWhenThen.length > 0) return givenWhenThen;
+
+  // Sonst einfache Aufzaehlungen — ohne Checkbox, aber eindeutig eine Liste.
+  return lines.flatMap((line) => {
+    const match = line.match(/^\s*[-*]\s+(?!\[)(.+)$/);
+    return match?.[1]?.trim() ? [match[1].trim()] : [];
+  });
 }
 
 function extractSection(markdown: string, headings: string[]): string | null {

@@ -53,6 +53,10 @@ interface KanbanBoardProps {
   onFetchCommitChanges?: (taskId: string, sha: string) => Promise<GitHubCommitChangesResult>;
   /** Callback that records a human product decision from the ticket details. */
   onResolveProductDecision?: (taskId: string) => Promise<boolean>;
+  /** Beantwortet eine Rueckfrage, die ein Agent im Ticket gestellt hat. */
+  onResolveTicketQuestion?: (taskId: string, action: 'accept' | 'reject') => Promise<boolean>;
+  /** Tickets, an denen eine solche Rueckfrage offen steht. */
+  pendingQuestionTaskIds?: string[];
   /** Managed team members used by cards and details to resolve assignee IDs. */
   agents?: Array<Pick<ScrumAgent, 'id' | 'name' | 'role'>>;
 }
@@ -108,6 +112,8 @@ function KanbanBoardInner({
   onFetchDecisions,
   onFetchCommitChanges,
   onResolveProductDecision,
+  onResolveTicketQuestion,
+  pendingQuestionTaskIds,
   agents = [],
 }: KanbanBoardProps) {
   // ---------------------------------------------------------------------------
@@ -479,6 +485,10 @@ function KanbanBoardInner({
         allTasks={state.tasks}
         agents={agents}
         onResolveProductDecision={onResolveProductDecision}
+        onResolveTicketQuestion={onResolveTicketQuestion}
+        hasPendingQuestion={Boolean(
+          state.selectedTask && (pendingQuestionTaskIds ?? []).includes(state.selectedTask.id)
+        )}
       />
     </div>
   );

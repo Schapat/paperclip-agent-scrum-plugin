@@ -67,6 +67,8 @@ interface BoardData {
   /** Konnte der Host ueberhaupt befragt werden? Sonst ist `liveRuns` keine Aussage. */
   liveRunsKnown: boolean;
   deliveryBranchOptions: DeliveryBranchOptions;
+  /** Darf das Board eine offene Rueckfrage beantworten? Braucht eine Freigabe. */
+  canResolveQuestions: boolean;
 }
 
 interface LogData {
@@ -149,6 +151,7 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
   const activateProjectOnboarding = usePluginAction("activateProjectOnboarding");
   const startProjectSprint = usePluginAction("startProjectSprint");
   const resetProjectWorkflow = usePluginAction("resetProjectWorkflow");
+  const resolveTicketInteraction = usePluginAction("resolveTicketInteraction");
   const listProjectBranches = usePluginAction("listProjectBranches");
   const requestProjectRefinement = usePluginAction("requestProjectRefinement");
   const retryProjectRefinement = usePluginAction("retryProjectRefinement");
@@ -362,6 +365,23 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
       setRefinementBusy(false);
     }
   }, [data?.projectOnboarding.refinementRequestedTaskIds, requestProjectRefinement, refresh, retryProjectRefinement, tasks]);
+
+  const handleResolveTicketQuestion = useCallback(
+    async (taskId: string, action: "accept" | "reject"): Promise<boolean> => {
+      const result = (await resolveTicketInteraction({ taskId, action })) as {
+        resolved?: boolean;
+        error?: string;
+      };
+      if (!result?.resolved) {
+        setNotice(result?.error ?? "Question could not be answered");
+        return false;
+      }
+      setNotice(null);
+      refreshOnboarding();
+      return true;
+    },
+    [resolveTicketInteraction, refreshOnboarding],
+  );
 
   const handleResolveProductDecision = useCallback(async (taskId: string): Promise<boolean> => {
     try {
@@ -615,6 +635,10 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
           onFetchDecisions={fetchDecisions}
           onFetchCommitChanges={fetchCommitChanges}
           onResolveProductDecision={handleResolveProductDecision}
+          onResolveTicketQuestion={data.canResolveQuestions ? handleResolveTicketQuestion : undefined}
+          pendingQuestionTaskIds={(data.stalls ?? [])
+            .filter((stall) => stall.kind === "awaiting_decision")
+            .map((stall) => stall.taskId)}
           agents={data.agents}
         />
         <TicketDetailPanel

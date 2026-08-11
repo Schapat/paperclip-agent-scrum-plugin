@@ -100,16 +100,16 @@ export function syncProjectOnboardingIssue(
     return { handled: true, changed: true, action: 'removed', taskId: issue.id };
   }
 
-  // Vor der PO-Story-Erstellung darf ein Child-Issue keine Delivery-Automation
-  // anstossen. Das Event ist trotzdem verarbeitet und soll nicht in die
-  // bestehende, lokale Event-Auswertung fallen.
-  if (
-    onboarding.status !== 'backlog_in_progress' &&
-    onboarding.status !== 'sprint_planning' &&
-    onboarding.status !== 'active'
-  ) {
-    return { handled: true, changed: false, action: 'unchanged', taskId: issue.id };
-  }
+  // Frueher wurde ein Child-Issue vor der Backlog-Phase gar nicht gespiegelt.
+  // Die Absicht war richtig — vor der Freigabe darf keine Automation
+  // anspringen — das Mittel war es nicht: der Product Owner hat die Stories
+  // trotzdem geschrieben, und das Board zeigte einen leeren Backlog neben
+  // sieben existierenden Tickets. Unsichtbare Arbeit ist die teuerste Sorte.
+  //
+  // Gespiegelt wird deshalb immer. Dass daraus nichts *laeuft*, sichern die
+  // Gates an ihren eigenen Stellen: `canRouteDelivery` fuer die Weiterleitung,
+  // `isPreDeliveryGate` fuer die Rueckholung, und Refinement wie Planung
+  // pruefen den Status ohnehin selbst.
 
   const hostFields = toHostFields(issue, agents, onboarding.refinementVoidedCommentIds);
   if (existingIndex === -1) {

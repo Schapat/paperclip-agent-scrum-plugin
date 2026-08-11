@@ -312,3 +312,33 @@ function asStringList(value: unknown): string[] {
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
 }
+
+/**
+ * Der Auftrag, den ein Refinement-Weckruf mitbringt.
+ *
+ * `requestWakeup` uebertraegt nur einen Grund-Code. Das erwartete Ergebnis —
+ * und vor allem sein exaktes Format — stand bisher ausschliesslich in der
+ * statischen AGENTS.md zwischen mehreren konkurrierenden Regelbloecken. Das
+ * Format ist aber die Bedingung dafuer, dass das Ticket ueberhaupt planbar
+ * wird, also gehoert es an die Stelle, an der die Arbeit beauftragt wird.
+ */
+export function refinementBriefComment(previousAttempts: number): string {
+  const retryHint =
+    previousAttempts > 0
+      ? `\n\n**Hinweis:** Das ist Versuch ${previousAttempts + 1}. Ein vorheriger Lauf hat keinen gueltigen Marker hinterlassen — ohne ihn bleibt das Ticket ungeplant.`
+      : "";
+
+  return [
+    "## Technical refinement requested",
+    "Ergaenze dieses Ticket um Schaetzung, Akzeptanzkriterien, technische Hinweise und Risiken.",
+    "Schliesse deinen Kommentar mit genau einem Marker ab. Er ist maschinenlesbar: ohne ihn wird das Ticket weder eingeplant noch zugewiesen.",
+    '```html\n<!-- agent-scrum:refinement:v1 {"storyPoints":5,"acceptanceCriteria":["..."],"technicalNotes":"...","risks":[],"labels":["testing","documentation"]} -->\n```',
+    "- `storyPoints`: Ganzzahl zwischen 1 und 100.\n- `acceptanceCriteria`: nicht-leere Liste pruefbarer Kriterien.\n- `labels`: optionale technische Domaenen des Tickets. Die Sprint-Planung waehlt darueber den passenden Developer aus; ohne Labels entscheidet allein die Auslastung.\n- Der Marker muss gueltiges JSON enthalten und von dir als Technical Lead stammen.",
+    // Der Watchdog hat aufgehoert, sich Lieferarbeit zu nehmen, als sein Lauf
+    // ein benanntes Ende bekam. Das Refinement braucht dasselbe: das Ticket
+    // enthaelt eine vollstaendige, umsetzbare Spezifikation und einen
+    // Workspace — ohne Schlusspunkt liegt das Implementieren naeher als das
+    // Aufhoeren.
+    "**Dein Lauf endet mit der abgegebenen Schaetzung.** Implementiere das Ticket nicht, checke nichts aus und schreibe keinen Code — auch dann nicht, wenn die Akzeptanzkriterien vollstaendig dastehen und der Workspace bereitliegt. Ein Developer bekommt das Ticket, sobald der Human den Sprint startet; ein Statuswechsel durch dich wird vom Board zurueckgenommen.",
+  ].join("\n\n") + retryHint;
+}

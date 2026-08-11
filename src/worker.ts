@@ -76,6 +76,7 @@ import {
   PRODUCT_DECISION_RESOLVED_MARKER,
   SPRINT_SCOPE_RESOLUTION_MARKER,
   hasQaReviewApproval,
+  isQaReviewRejection,
   hasSprintScopeResolution,
   isPluginAuthoredNotice,
   reviewOwnerForProjectIssue,
@@ -95,6 +96,7 @@ import {
   SUBMIT_REFINEMENT_TOOL,
   commitComment,
   qaVerdictComment,
+  refinementBriefComment,
   refinementComment,
   reviewSubmissionComment,
   validateCommit,
@@ -111,6 +113,7 @@ import {
   timedOutRunsAwaitingRecovery,
   type OrchestrationSnapshot,
 } from "./core/project-orchestration";
+import { isAgentWorkOrderTicket } from "./core/meta-ticket";
 import { migrateState } from "./core/storage";
 import { recalculateMetrics, createInitialMetrics, onStatusChange } from "./core/hooks";
 import { collectDecisions, recordDecision, sendMessage } from "./core/communication";
@@ -216,29 +219,6 @@ const REFINEMENT_RETRY_AFTER_MS = 15 * 60 * 1000;
  */
 const BRANCH_OPTIONS_TTL_MS = 2 * 60 * 1000;
 
-/**
- * Der Auftrag, den ein Refinement-Weckruf mitbringt.
- *
- * `requestWakeup` uebertraegt nur einen Grund-Code. Das erwartete Ergebnis —
- * und vor allem sein exaktes Format — stand bisher ausschliesslich in der
- * statischen AGENTS.md zwischen mehreren konkurrierenden Regelbloecken. Das
- * Format ist aber die Bedingung dafuer, dass das Ticket ueberhaupt planbar
- * wird, also gehoert es an die Stelle, an der die Arbeit beauftragt wird.
- */
-function refinementBriefComment(previousAttempts: number): string {
-  const retryHint =
-    previousAttempts > 0
-      ? `\n\n**Hinweis:** Das ist Versuch ${previousAttempts + 1}. Ein vorheriger Lauf hat keinen gueltigen Marker hinterlassen — ohne ihn bleibt das Ticket ungeplant.`
-      : "";
-
-  return [
-    "## Technical refinement requested",
-    "Ergaenze dieses Ticket um Schaetzung, Akzeptanzkriterien, technische Hinweise und Risiken.",
-    "Schliesse deinen Kommentar mit genau einem Marker ab. Er ist maschinenlesbar: ohne ihn wird das Ticket weder eingeplant noch zugewiesen.",
-    '```html\n<!-- agent-scrum:refinement:v1 {"storyPoints":5,"acceptanceCriteria":["..."],"technicalNotes":"...","risks":[],"labels":["testing","documentation"]} -->\n```',
-    "- `storyPoints`: Ganzzahl zwischen 1 und 100.\n- `acceptanceCriteria`: nicht-leere Liste pruefbarer Kriterien.\n- `labels`: optionale technische Domaenen des Tickets. Die Sprint-Planung waehlt darueber den passenden Developer aus; ohne Labels entscheidet allein die Auslastung.\n- Der Marker muss gueltiges JSON enthalten und von dir als Technical Lead stammen.",
-  ].join("\n\n") + retryHint;
-}
 
 const plugin = definePlugin({
   multiCompanyConfig: true,
@@ -494,11 +474,19 @@ const plugin = definePlugin({
      * Stories arbeitete, und ein Sprintstart haette sie ungeschaetzt
      * zurueckgelassen.
      */
+    /** Die Tickets, die tatsaechlich geliefert werden — ohne Agenten-Auftraege. */
+    function deliveryTasks(rootIssueId: string | null | undefined): ScrumTask[] {
+      if (!rootIssueId) return [];
+      return state.tasks.filter(
+        (task) => task.parentId === rootIssueId && !isAgentWorkOrderTicket(task)
+      );
+    }
+
     function canStartProjectSprint(): boolean {
       const onboarding = state.projectOnboarding;
       if (onboarding?.status !== "sprint_planning" || !onboarding.rootIssueId) return false;
 
-      const projectTasks = state.tasks.filter((task) => task.parentId === onboarding.rootIssueId);
+      const projectTasks = deliveryTasks(onboarding.rootIssueId);
       if (projectTasks.length === 0) return false;
 
       const everythingRefined = projectTasks.every((task) => task.refined);
@@ -769,6 +757,15 @@ const plugin = definePlugin({
         }
         return { queued: wakeup.queued, runId: wakeup.runId, error: null };
       } catch (error) {
+        // Ein Weckruf, den der Host wegen einer offenen Abhaengigkeit ablehnt,
+        // ist kein Stillstand, sondern die Lieferreihenfolge des Product
+        // Owners. Das Refinement behandelt das laengst so; die Planung hat
+        // daraus einen "blocked"-Header gemacht, der nach dem Blocker von
+        // selbst verschwinden muesste — und es nie tat.
+        if (String(error).includes("blocked by unresolved blockers")) {
+          ctx.logger.info("Wake-up deferred until the blocking ticket is done", { issueId, reason });
+          return { queued: false, error: null };
+        }
         recordStall(issueId, `Wake-up "${reason}" failed: ${String(error)}`);
         ctx.logger.error("Could not queue project onboarding work", {
           issueId,
@@ -880,7 +877,10 @@ const plugin = definePlugin({
         return false;
       }
 
-      const projectTasks = state.tasks.filter((task) => task.parentId === onboarding.rootIssueId);
+      // Ein Arbeitsauftrag wird nie geliefert und nie `done`. Zaehlte er mit,
+      // blieb der Sprint offen und das Projekt unabgeschlossen — beliebig
+      // lange, denn niemand wird ihn je abschliessen.
+      const projectTasks = deliveryTasks(onboarding.rootIssueId);
       if (projectTasks.length === 0 || projectTasks.some((task) => task.column !== "done")) return false;
 
       const previousSprintId = state.currentSprint?.id ?? null;
@@ -1343,6 +1343,25 @@ const plugin = definePlugin({
       const qa = state.agents.find((agent) => agent.role === "qa_engineer");
       if (!qa || issue.assigneeAgentId !== qa.id) return issue;
 
+      // "QA steht auf einem Ticket in `in_progress`" hiess bisher "QA hat
+      // abgelehnt". Es heisst aber vor allem: der Host hat den Status fuer
+      // *seinen eigenen* QA-Run gesetzt. Die Folge war auf jedem Ticket
+      // dieselbe: 20 Sekunden nach der Uebergabe an QA nahm das Board ihr das
+      // Ticket wieder weg, gab es einem Developer, und QA gab kurz darauf
+      // trotzdem ihre Freigabe. Uebrig blieb ein "Rework"-Eintrag, aus dem die
+      // Retrospektive Lehren zieht, die es nie gab.
+      //
+      // Eine Ablehnung ist etwas, das QA *schreibt*. Ohne diesen Beleg bleibt
+      // das Ticket, wo es ist.
+      const reviewComments = await readComments(issue.id);
+      const rejected = reviewComments.some((comment) =>
+        isQaReviewRejection(
+          { authorAgentId: comment.authorAgentId ?? null, body: comment.body, createdAt: comment.createdAt },
+          qa.id
+        )
+      );
+      if (!rejected) return issue;
+
       const developer = developerForProjectRework(issue.id);
       if (!developer) {
         ctx.logger.warn("Could not route QA rework because no developer is available", {
@@ -1610,19 +1629,34 @@ const plugin = definePlugin({
       if (!companyId || !isProjectOnboardingChildIssue(issue)) return issue;
 
       const scrumMaster = state.agents.find((agent) => agent.role === "scrum_master");
-      if (!scrumMaster) return issue;
+      const technicalLead = state.agents.find((agent) => agent.role === "technical_lead");
+      const productOwner = state.agents.find((agent) => agent.role === "product_owner");
 
-      // Zwei Spuren: der Watchdog hat das Ticket geaendert, oder er steht als
+      // Zwei Spuren: die Rolle hat das Ticket geaendert, oder sie steht als
       // Bearbeiter darauf. Die zweite faengt auch den Fall ab, in dem der
       // Worker das Ereignis verpasst hat und es erst beim Abgleich sieht.
-      const authored = actorId === scrumMaster.id;
-      const selfAssigned = issue.assigneeAgentId === scrumMaster.id;
-      if (!authored && !selfAssigned) return issue;
+      const claimedBy = (agent: WorkerState["agents"][number] | undefined) =>
+        Boolean(agent && (actorId === agent.id || issue.assigneeAgentId === agent.id));
+
+      // Der Scrum Master liefert ueberhaupt nicht — er ist Prozessbeobachter.
+      // Technical Lead und Product Owner duerfen ein Ticket sehr wohl halten:
+      // fuer Refinement bzw. Story-Arbeit. Was sie nicht duerfen, ist es
+      // fertigmelden. Genau das ist passiert — der Technical Lead hat sein
+      // Refinement-Ticket gleich implementiert und auf `done` gesetzt.
+      const deliveredStatus = issue.status === "done" || issue.status === "in_review";
+      const claimingAgent = claimedBy(scrumMaster)
+        ? scrumMaster
+        : deliveredStatus && claimedBy(technicalLead)
+          ? technicalLead
+          : deliveredStatus && claimedBy(productOwner)
+            ? productOwner
+            : null;
+      if (!claimingAgent) return issue;
 
       const known = state.tasks.find((task) => task.id === issue.id);
       const previousColumn = known?.column ?? "backlog";
       const previousAssignee =
-        known?.assignedAgentId && known.assignedAgentId !== scrumMaster.id
+        known?.assignedAgentId && known.assignedAgentId !== claimingAgent.id
           ? known.assignedAgentId
           : null;
       // Ein Kommentar des Scrum Masters ist erlaubt und aendert nichts.
@@ -1638,22 +1672,23 @@ const plugin = definePlugin({
         );
         await postIssueNotice(
           issue.id,
-          "scrum-master-delivery-claim",
+          "non-delivery-role-claim",
           [
-            "## The Scrum Master does not deliver",
-            `Agent Scrum reverted this ticket to \`${previousColumn}\`: the Scrum Master moved or claimed it, and the Scrum Master is a process watchdog, not a delivery role.`,
-            "Document the impediment, wake the responsible role, or escalate to the human — but do not take over a ticket.",
+            `## The ${claimingAgent.name} does not deliver`,
+            `Agent Scrum reverted this ticket to \`${previousColumn}\`: it was moved or claimed by a role that does not deliver tickets.`,
+            "Refinement, process facilitation, and story work stop short of implementation. A delivery ticket is finished by its assigned Developer and closed by QA.",
           ].join("\n\n")
         );
-        ctx.logger.warn("Reverted a Scrum Master delivery claim", {
+        ctx.logger.warn("Reverted a delivery claim by a non-delivery role", {
           issueId: issue.id,
+          role: claimingAgent.role,
           claimedStatus: issue.status,
           restoredStatus: previousColumn,
           restoredAssignee: previousAssignee,
         });
         return restored;
       } catch (error) {
-        ctx.logger.warn("Could not revert the Scrum Master delivery claim", {
+        ctx.logger.warn("Could not revert the delivery claim", {
           issueId: issue.id,
           error: String(error),
         });
@@ -1831,6 +1866,10 @@ const plugin = definePlugin({
       return state.tasks.filter(
         (task) =>
           task.parentId === rootIssueId &&
+          // Der selbst geschriebene Auftrag eines Agenten ist keine Story. Ihn
+          // zu verfeinern hat niemand vor — er haette den Sprint dauerhaft
+          // blockiert.
+          !isAgentWorkOrderTicket(task) &&
           !task.refined &&
           (
             (task.column === "backlog" && task.assignedAgentId === null) ||
@@ -2292,17 +2331,14 @@ const plugin = definePlugin({
       // setzt nur den Status, die Zuweisung fehlt. Solche Tickets werden hier
       // uebernommen — sonst wartet das Board auf einen Agenten, den es nie
       // benannt hat.
-      const orphanedTodo = state.tasks.filter(
+      const orphanedTodo = deliveryTasks(rootIssueId).filter(
         (task) =>
-          task.parentId === rootIssueId &&
           task.column === "todo" &&
           task.assignedAgentId === null &&
           isReady(task)
       );
-      const readyBacklog = state.tasks
-        .filter(
-          (task) => task.parentId === rootIssueId && task.column === "backlog" && isReady(task)
-        )
+      const readyBacklog = deliveryTasks(rootIssueId)
+        .filter((task) => task.column === "backlog" && isReady(task))
         .sort(byBusinessValue);
       const planned = [...orphanedTodo, ...readyBacklog].slice(
         0,
@@ -2527,10 +2563,22 @@ const plugin = definePlugin({
         const refined = new Set(
           state.tasks.filter((task) => task.refined).map((task) => task.id)
         );
-        const merged = mergeStalls(state.stalls ?? [], observed, settled, refined, {
-          issueId: rootIssueId,
-          phaseChangedAt: state.projectOnboarding?.updatedAt ?? new Date(0).toISOString(),
-        });
+        const moving = new Set(
+          state.tasks
+            .filter((task) => task.column === "in_progress" || task.column === "in_review")
+            .map((task) => task.id)
+        );
+        const merged = mergeStalls(
+          state.stalls ?? [],
+          observed,
+          settled,
+          refined,
+          {
+            issueId: rootIssueId,
+            phaseChangedAt: state.projectOnboarding?.updatedAt ?? new Date(0).toISOString(),
+          },
+          moving
+        );
         annotateTimeoutRecoveryStalls(merged, summary, knownTaskIds);
         if (
           !recoveryChanged &&
@@ -2650,24 +2698,49 @@ const plugin = definePlugin({
       const rootIssueId = state.projectOnboarding?.rootIssueId;
       if (!companyId || !rootIssueId) return false;
 
-      const reviewTasks = state.tasks.filter(
-        (task) => task.parentId === rootIssueId && task.column === "in_review"
+      // Frueher nur `in_review`. Beide beobachteten Faelle lagen woanders: einer
+      // im Refinement, einer in der Entwicklung. Eine Rueckfrage haelt das
+      // Ticket in *jeder* Spalte an, also wird auch in jeder gesucht.
+      const activeColumns = new Set(["todo", "in_progress", "in_review", "blocked"]);
+      const activeTasks = state.tasks.filter(
+        (task) => task.parentId === rootIssueId && activeColumns.has(task.column)
       );
-      if (reviewTasks.length === 0) return false;
+      if (activeTasks.length === 0) return false;
 
       let changed = false;
-      for (const task of reviewTasks) {
+      for (const task of activeTasks) {
         try {
           const interactions = await ctx.issues.listInteractions(task.id, companyId);
           const blocking = interactions.find(
             (interaction) => (interaction as { status?: string }).status === "pending"
           );
-          if (!blocking) continue;
+          if (!blocking) {
+            // Die Frage ist beantwortet — der Vermerk gehoert weg, sonst meldet
+            // das Board weiter "blocked" auf einem laufenden Ticket.
+            if (state.stalls?.some((s) => s.taskId === task.id && s.kind === "awaiting_decision")) {
+              clearStall(task.id);
+              changed = true;
+            }
+            continue;
+          }
 
+          const label = task.identifier ?? task.title;
           recordStall(
             task.id,
-            "A board confirmation is pending. QA cannot take this review until it is resolved.",
-            "awaiting_approval"
+            `${label} is waiting for a decision that an agent asked for inside the ticket.`,
+            "awaiting_decision"
+          );
+          // Der Agent bekommt die Regel dort, wo er sie liest: im Ticket. Die
+          // Instruktion verbietet eigene Confirmations laengst — sie steht nur
+          // in 12 KB Bundle, und der naechste Run beginnt hier.
+          await postIssueNotice(
+            task.id,
+            "self-authored-confirmation",
+            [
+              "## This ticket is waiting on a confirmation you created",
+              "A board confirmation stops the ticket until a human clicks it — and nobody is watching for that click, so the ticket simply stops.",
+              "Inside an approved sprint you decide within the acceptance criteria; you do not ask for a confirmation. If a question genuinely exceeds the ticket scope, say so in a comment and let the Scrum Master escalate it.",
+            ].join("\n\n")
           );
           changed = true;
         } catch (error) {
@@ -2761,17 +2834,11 @@ const plugin = definePlugin({
       const route = options.route !== false;
       if (route) lastFullSyncAt = Date.now();
       const onboarding = state.projectOnboarding;
-      if (
-        !companyId ||
-        !onboarding?.projectId ||
-        !onboarding.rootIssueId ||
-        (
-          onboarding.status !== "backlog_in_progress" &&
-          onboarding.status !== "sprint_planning" &&
-          onboarding.status !== "active" &&
-          onboarding.status !== "completed"
-        )
-      ) {
+      // Sobald ein Kickoff existiert, spiegelt das Board seine Kinder. Der
+      // Phasenfilter stand frueher hier und hat sieben fertig geschriebene
+      // Stories unsichtbar gemacht, weil eine Freigabe ausstand. Was die Phase
+      // steuert, ist die Automation — und die pruefen die Gates selbst.
+      if (!companyId || !onboarding?.projectId || !onboarding.rootIssueId) {
         return false;
       }
 
@@ -3627,9 +3694,7 @@ const plugin = definePlugin({
       await hydrateTaskIdentifiers();
       const rootIssueId = state.projectOnboarding?.rootIssueId;
       const kickoffTask = await projectKickoffTask();
-      const projectTasks = rootIssueId
-        ? state.tasks.filter((task) => task.parentId === rootIssueId)
-        : [];
+      const projectTasks = deliveryTasks(rootIssueId);
       return {
         tasks: state.tasks,
         agents: state.agents,
@@ -3645,6 +3710,9 @@ const plugin = definePlugin({
         stalls: state.stalls ?? [],
         liveRuns: state.liveRuns ?? [],
         liveRunsKnown: orchestrationReadable,
+        // Ohne das Recht, eine Rueckfrage zu beantworten, waere der Knopf im
+        // Ticket ein Versprechen, das der Host einloest, indem er ablehnt.
+        canResolveQuestions: manifest.capabilities.includes("issue.interactions.respond"),
         deliveryBranchOptions: await deliveryBranchOptions(),
       };
     });
@@ -3840,23 +3908,34 @@ const plugin = definePlugin({
       if (!productOwner) return { started: false, error: "The Product Owner is not available." };
 
       const next = transitionProjectOnboarding(onboarding, "backlog_in_progress");
-      await ctx.issues.update(
-        onboarding.rootIssueId,
-        {
-          description: createBacklogDiscoveryPrompt(next),
-          status: "todo",
-          assigneeAgentId: productOwner.id,
-        },
-        companyId
-      );
+      // Der Product Owner ist der Freigabe gelegentlich zuvorgekommen und hat
+      // die Stories schon geschrieben. Ihn dann erneut loszuschicken bedeutet:
+      // ein zweiter Lauf, der dieselbe Arbeit noch einmal erfindet. Existiert
+      // ein Backlog, uebernimmt das Board es und ueberlaesst dem Human die
+      // Freigabe.
+      const existingStories = deliveryTasks(onboarding.rootIssueId);
       state.projectOnboarding = next;
       await save();
+
+      if (existingStories.length === 0) {
+        await ctx.issues.update(
+          onboarding.rootIssueId,
+          {
+            description: createBacklogDiscoveryPrompt(next),
+            status: "todo",
+            assigneeAgentId: productOwner.id,
+          },
+          companyId
+        );
+      }
 
       let commentError: string | null = null;
       try {
         await createIssueComment(
           onboarding.rootIssueId,
-          "## Technical analysis approved\n\nA human approved the Technical Lead analysis and started Product Owner story discovery.",
+          existingStories.length > 0
+            ? `## Technical analysis approved\n\nA human approved the Technical Lead analysis. ${existingStories.length} stor${existingStories.length === 1 ? "y" : "ies"} already exist from an earlier Product Owner run — the board adopts them instead of asking for the same work twice. Review and approve the backlog when it is ready.`
+            : "## Technical analysis approved\n\nA human approved the Technical Lead analysis and started Product Owner story discovery.",
           companyId
         );
       } catch (error) {
@@ -3867,8 +3946,20 @@ const plugin = definePlugin({
         });
       }
 
-      const wakeup = await requestIssueWakeup(onboarding.rootIssueId, "project_onboarding_backlog");
-      return { started: true, projectOnboarding: state.projectOnboarding, wakeup, commentError };
+      const wakeup = existingStories.length > 0
+        ? { queued: false, error: null }
+        : await requestIssueWakeup(onboarding.rootIssueId, "project_onboarding_backlog");
+      ctx.logger.info("Technical analysis approved", {
+        issueId: onboarding.rootIssueId,
+        adoptedStories: existingStories.length,
+      });
+      return {
+        started: true,
+        adoptedStories: existingStories.length,
+        projectOnboarding: state.projectOnboarding,
+        wakeup,
+        commentError,
+      };
     });
 
     registerCompanyAction("rejectTechnicalAnalysis", async (params) => {
@@ -4068,7 +4159,8 @@ const plugin = definePlugin({
       const rootIssueId = onboarding.rootIssueId;
 
       await syncOnboardingProjectIssues();
-      const projectTasks = state.tasks.filter((task) => task.parentId === rootIssueId);
+      // Ein Arbeitsauftrag gehoert keinem Sprint an; der Reset fasst ihn nicht an.
+      const projectTasks = deliveryTasks(rootIssueId);
       const returnedTaskIds: string[] = [];
       // Genau der Kommentar, der die aktuelle Schaetzung traegt, wird entwertet
       // — nicht ein Zeitfenster. Ein neuer Marker zaehlt dadurch sofort, auch
@@ -4184,6 +4276,80 @@ const plugin = definePlugin({
         wakeup,
         refinement,
       };
+    });
+
+    /**
+     * Beantwortet eine Rueckfrage, die ein Agent selbst gestellt hat.
+     *
+     * Aufgeloest wird sie ausschliesslich hier — auf einen Klick des Humans im
+     * Board. Das Plugin trifft die Entscheidung nicht selbst: der Host schreibt
+     * sie einem menschlichen Mitglied zu und verifiziert das. Was das Board
+     * abnimmt, ist die Suche nach dem Ticket, nicht die Entscheidung.
+     */
+    registerCompanyAction("resolveTicketInteraction", async (params) => {
+      if (!companyId) return { resolved: false, error: "No company context." };
+
+      const taskId = typeof params.taskId === "string" ? params.taskId : "";
+      const action = params.action === "reject" ? "reject" : "accept";
+      const reason = typeof params.reason === "string" && params.reason.trim()
+        ? params.reason.trim()
+        : null;
+      const task = state.tasks.find((entry) => entry.id === taskId);
+      if (!task || task.parentId !== state.projectOnboarding?.rootIssueId) {
+        return { resolved: false, error: "This ticket is not part of the active project request." };
+      }
+
+      try {
+        const interactions = await ctx.issues.listInteractions(taskId, companyId);
+        const pending = interactions.filter(
+          (interaction) => (interaction as { status?: string }).status === "pending"
+        );
+        if (pending.length === 0) {
+          clearStall(taskId);
+          await save();
+          return { resolved: false, error: "This ticket has no open question." };
+        }
+
+        let applied = 0;
+        for (const interaction of pending) {
+          const result = await ctx.issues.respondInteraction(
+            taskId,
+            (interaction as { id: string }).id,
+            { action, reason },
+            companyId
+          );
+          if (result.applied) applied += 1;
+        }
+
+        clearStall(taskId);
+        await save();
+        // Der Agent liest das Ticket, nicht das Board — die Entscheidung
+        // gehoert dorthin, wo sein naechster Lauf beginnt.
+        await postIssueNotice(
+          taskId,
+          "interaction-resolved",
+          [
+            `## The human ${action === "accept" ? "confirmed" : "declined"} your question`,
+            reason ?? "No further comment was given.",
+            "Continue within the acceptance criteria of this ticket. Do not open another board confirmation — say it in a comment instead if something genuinely exceeds the ticket scope.",
+          ].join("\n\n")
+        );
+        const wakeup = await requestIssueWakeup(taskId, "project_interaction_resolved");
+
+        ctx.logger.info("Human resolved a ticket question from the board", {
+          issueId: taskId,
+          action,
+          applied,
+          queued: wakeup.queued,
+        });
+        return { resolved: true, applied, action };
+      } catch (error) {
+        ctx.logger.warn("Could not resolve the ticket question", {
+          issueId: taskId,
+          error: String(error),
+        });
+        return { resolved: false, error: String(error) };
+      }
     });
 
     registerCompanyAction("resolveProductDecision", async (params) => {
@@ -4762,7 +4928,9 @@ const plugin = definePlugin({
         clearStall(auth.issueId);
         await save();
         return {
-          content: `Refinement recorded: ${parsed.value.storyPoints} points, ${parsed.value.acceptanceCriteria.length} acceptance criteria. The ticket is now eligible for sprint planning.`,
+          content:
+            `Refinement recorded: ${parsed.value.storyPoints} points, ${parsed.value.acceptanceCriteria.length} acceptance criteria. ` +
+            'The ticket is now eligible for sprint planning. Your run is complete — do not implement this ticket; a Developer gets it when the human starts the sprint.',
         };
       }
     );
@@ -4834,7 +5002,9 @@ const plugin = definePlugin({
           reconcileProjectRefinementRequests();
           await save();
           return {
-            content: `Batch refinement recorded for ${parsed.value.refinements.length} tickets. Every ticket is now eligible for sprint planning.`,
+            content:
+              `Batch refinement recorded for ${parsed.value.refinements.length} tickets. ` +
+              'Every ticket is now eligible for sprint planning. Your run is complete — do not implement any of them; a Developer gets them when the human starts the sprint.',
           };
         } catch (error) {
           return { error: `Could not record the refinement batch: ${String(error)}` };
@@ -5000,6 +5170,25 @@ const plugin = definePlugin({
 
             const changed = await refreshOrchestrationStalls();
             if (changed) await save();
+
+            // Der Wiederanlauf eines Refinements ist zeitbasiert — "seit 15
+            // Minuten nichts geliefert" ist eine Frist, kein Ereignis. Bewertet
+            // wurde sie aber nur, wenn zufaellig etwas anderes passierte. Auf
+            // einem stillen Board hiess das: nie. Zwei Tickets warteten so
+            // zwei Stunden auf einen Anlauf, der seit 105 Minuten faellig war.
+            //
+            // Dass dieser Takt jetzt gefahrlos ist, liegt an den Bremsen davor:
+            // laufender Run, Versuchsdeckel, Wartefrist und Anfragegedaechtnis.
+            // Ohne sie waere daraus wieder das Ueberholen im Minutentakt.
+            const refinement = await requestProjectRefinement("automatic");
+            if (refinement.requested) {
+              ctx.logger.info("Reconcile tick resumed a due refinement", {
+                companyId: scope,
+                taskIds: refinement.taskIds,
+              });
+            }
+            if (state.projectOnboarding?.status === "active") await requestProjectPlanning();
+
             ctx.logger.info("Reconcile tick completed", {
               companyId: scope,
               stalls: state.stalls?.length ?? 0,

@@ -182,3 +182,26 @@ describe('a stall on the kickoff issue', () => {
     ).toEqual([ticketStall]);
   });
 });
+
+describe('a failed wake-up that has been overtaken', () => {
+  const failedWakeup = {
+    taskId: 'ticket-1',
+    kind: 'wakeup_failed' as const,
+    reason: 'Wake-up "project_sprint_planning" failed.',
+    detectedAt: RUN_STARTED_AT,
+    retriedAt: null,
+  };
+
+  it('is void once the ticket is being worked on', () => {
+    // "Niemand konnte geweckt werden" ist widerlegt, sobald jemand arbeitet.
+    expect(
+      mergeStalls([failedWakeup], [], new Set(), new Set(), null, new Set(['ticket-1']))
+    ).toEqual([]);
+  });
+
+  it('stays while the ticket has not moved', () => {
+    expect(mergeStalls([failedWakeup], [], new Set(), new Set(), null, new Set())).toEqual([
+      failedWakeup,
+    ]);
+  });
+});

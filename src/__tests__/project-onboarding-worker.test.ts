@@ -22,6 +22,7 @@ import {
   PRODUCT_DECISION_REQUIRED_MARKER,
   PRODUCT_DECISION_RESOLVED_MARKER,
   QA_REVIEW_APPROVED_MARKER,
+  QA_REVIEW_REJECTED_MARKER,
   QA_REWORK_ROUTED_MARKER,
 } from '../core/review-routing';
 import { COMMIT_MARKER, DECISION_MARKER, REFINEMENT_MARKER } from '../core/project-issue-projection';
@@ -263,6 +264,9 @@ describe('project onboarding worker actions', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    // Spione auf Globals — etwa `Date.now` fuer eine verstrichene Wartefrist —
+    // ueberleben den Harness sonst und faerben den naechsten Test ein.
+    vi.restoreAllMocks();
   });
 
   it('creates a project-bound kickoff issue and queues the Technical Lead', async () => {
@@ -508,6 +512,13 @@ describe('project onboarding worker actions', () => {
     await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
 
     const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const workOrder = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Product Owner Backlog Discovery: Tetris',
+      status: 'backlog',
+    });
     const developer = board.agents.find((agent) => agent.role === 'developer');
     const child = await harness.ctx.issues.create({
       companyId: COMPANY_ID,
@@ -1285,6 +1296,120 @@ describe('project onboarding worker actions', () => {
 
     board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
     expect(board.tasks).toEqual([]);
+  });
+
+  /**
+   * Der Product Owner ist der Freigabe zuvorgekommen: sieben Stories lagen
+   * fertig da, waehrend die Analyse noch auf den Klick wartete. Ihn danach
+   * erneut loszuschicken hiesse, dieselbe Arbeit ein zweites Mal erfinden zu
+   * lassen — und bis dahin laesst sich nichts verfeinern.
+   */
+  /**
+   * Der Sprint blieb offen, weil ein Arbeitsauftrag im Backlog lag: die
+   * Abschlussbedingung will jedes Ticket in `done` sehen, und ein Auftrag wird
+   * nie geliefert. Das Projekt haette beliebig lange offen gestanden.
+   */
+  it('completes a project whose only open ticket is an agent work order', async () => {
+    const kickoff = await startApprovedDelivery(harness);
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const qa = board.agents.find((agent) => agent.role === 'qa_engineer');
+
+    const developer = board.agents.find((agent) => agent.role === 'developer');
+    const workOrder = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Product Owner Backlog Discovery: Tetris',
+      status: 'backlog',
+    });
+    const story = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Tetris Core Game Loop',
+      status: 'done',
+      assigneeAgentId: qa?.id,
+    });
+    // Ohne Commit-Nachweis und QA-Freigabe schickt das Board die Story zurueck
+    // in die Entwicklung — dann prueft der Test etwas anderes als gemeint.
+    await recordDeveloperCommit(harness, story.id, developer?.id);
+    await harness.ctx.issues.createComment(
+      story.id,
+      `## QA approved\n\n${QA_REVIEW_APPROVED_MARKER}`,
+      COMPANY_ID,
+      { authorAgentId: qa?.id }
+    );
+    // Der Auftrag kommt zuerst: sonst schliesst das Projekt schon beim
+    // Story-Event ab und der Test prueft nur die Reihenfolge.
+    for (const issue of [workOrder, story]) {
+      await harness.emit(
+        'issue.created',
+        { issueId: issue.id },
+        { companyId: COMPANY_ID, entityId: issue.id, entityType: 'issue' }
+      );
+    }
+
+    const after = await harness.getData<BoardData>('board', { companyId: COMPANY_ID, force: true });
+    expect(after.projectOnboarding.status, 'the work order must not hold the project open').toBe(
+      'completed'
+    );
+  });
+
+  it('adopts a backlog the Product Owner wrote before the approval', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build Tetris.' },
+      { companyId: COMPANY_ID }
+    );
+
+    // Stories entstehen, bevor der Human die Analyse freigibt.
+    for (const title of ['Tetris Core Game Loop', 'Tetris Scoring']) {
+      const issue = await harness.ctx.issues.create({
+        companyId: COMPANY_ID,
+        projectId: PROJECT_ID,
+        parentId: kickoff.rootIssueId,
+        title,
+        status: 'backlog',
+      });
+      await harness.emit(
+        'issue.created',
+        { issueId: issue.id },
+        { companyId: COMPANY_ID, entityId: issue.id, entityType: 'issue' }
+      );
+    }
+    // Und ein Arbeitsauftrag, den sich ein Agent selbst geschrieben hat.
+    const workOrder = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Product Owner Backlog Discovery: Tetris',
+      status: 'backlog',
+    });
+    await harness.emit(
+      'issue.created',
+      { issueId: workOrder.id },
+      { companyId: COMPANY_ID, entityId: workOrder.id, entityType: 'issue' }
+    );
+
+    const beforeApproval = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    expect(beforeApproval.tasks, 'the work is visible even before the gate').toHaveLength(3);
+    expect(
+      beforeApproval.projectProgress.totalTasks,
+      'but the agent work order is not a story'
+    ).toBe(2);
+
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    const started = await harness.performAction<{ adoptedStories: number }>(
+      'startBacklogDiscovery',
+      {},
+      { companyId: COMPANY_ID }
+    );
+
+    expect(started.adoptedStories).toBe(2);
+    // Der Kickoff wird nicht erneut an den Product Owner gegeben.
+    const productOwner = beforeApproval.agents.find((agent) => agent.role === 'product_owner');
+    const root = await harness.ctx.issues.get(kickoff.rootIssueId, COMPANY_ID);
+    expect(root?.assigneeAgentId).not.toBe(productOwner?.id);
   });
 
   it('returns delivery that an agent started before the sprint to the backlog', async () => {
@@ -2408,6 +2533,31 @@ describe('project onboarding worker actions', () => {
       expect(wakeups, 'a live run must not be overtaken by a second wake-up').toEqual([]);
     });
 
+    it('picks a due retry up again on a board where nothing else happens', async () => {
+      const { harness, children } = await boardWithTwoUnrefinedStories();
+
+      const wakeups: string[] = [];
+      vi.spyOn(harness.ctx.issues, 'requestWakeup').mockImplementation(async (issueId) => {
+        wakeups.push(issueId as string);
+        return { queued: true, runId: 'run-1' };
+      });
+
+      const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+      expect(board.projectOnboarding.refinementAttempts?.length ?? 0).toBeGreaterThan(0);
+
+      // Der Technical Lead liefert nichts, und danach passiert auf dem Board
+      // nichts mehr. Die Wartefrist verstreicht — bewertet wurde sie bisher
+      // nur, wenn zufaellig ein Ereignis kam. Auf einem stillen Board: nie.
+      const realNow = Date.now();
+      vi.spyOn(Date, 'now').mockReturnValue(realNow + 20 * 60 * 1000);
+
+      wakeups.length = 0;
+      await harness.runJob('reconcile-stalled-work');
+
+      expect(children.length).toBe(2);
+      expect(wakeups.length, 'a quiet board must still resume a due refinement').toBeGreaterThan(0);
+    });
+
     it('refines a whole blocker chain through the kickoff when no ticket is free', async () => {
       const { harness, children } = await boardWithTwoUnrefinedStories();
       const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
@@ -2735,6 +2885,114 @@ describe('project onboarding worker actions', () => {
     expect(comments.some((comment) => comment.body.includes('feature/image-slider'))).toBe(true);
   });
 
+  /**
+   * Die Sprint-Planung stellt auch verkettete Tickets nach TODO. Der Host weckt
+   * sie nicht, solange ihr Vorgaenger offen ist — und das Board hat daraus
+   * einen Stillstand gemacht, der nie von selbst verschwand. Warten auf einen
+   * Blocker ist Reihenfolge, kein Defekt.
+   */
+  it('does not record a stall when a wake-up waits for a blocking ticket', async () => {
+    const kickoff = await startApprovedDelivery(harness);
+    const child = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Translate the header',
+      status: 'backlog',
+    });
+    await harness.emit(
+      'issue.created',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
+    );
+
+    vi.spyOn(harness.ctx.issues, 'requestWakeup').mockRejectedValue(
+      new Error('JsonRpcCallError: Issue is blocked by unresolved blockers')
+    );
+    await harness.performAction('retryProjectRefinement', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    expect(
+      board.stalls.filter((stall) => stall.kind === 'wakeup_failed'),
+      'an ordering constraint is not an impediment'
+    ).toEqual([]);
+  });
+
+  /**
+   * Ein Agent stellt eine eigene Board-Rueckfrage. Der Host haelt das Ticket
+   * daraufhin an, bis ein Mensch klickt — und niemand erwartet den Klick, weil
+   * die Frage nur im Issue steht. Beobachtet wurde das zweimal: einmal im
+   * Refinement, einmal in der Entwicklung. Gesucht hat das Board bis dahin nur
+   * in `in_review`.
+   */
+  describe('a confirmation an agent asked for itself', () => {
+    /**
+     * Das Plugin darf Interactions nur *lesen* — antworten hiesse, in fremdem
+     * Namen zu entscheiden. Der Test spiegelt deshalb die Leseschnittstelle,
+     * statt dem Plugin Rechte zu geben, die es nicht haben soll.
+     */
+    async function ticketWithPendingConfirmation(column: 'in_progress' | 'in_review') {
+      const kickoff = await startApprovedDelivery(harness);
+      const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+      const developer = board.agents.find((agent) => agent.role === 'developer');
+      const child = await harness.ctx.issues.create({
+        companyId: COMPANY_ID,
+        projectId: PROJECT_ID,
+        parentId: kickoff.rootIssueId,
+        title: 'Slider markup',
+        status: column,
+        assigneeAgentId: developer?.id,
+      });
+      await harness.emit(
+        'issue.created',
+        { issueId: child.id },
+        { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
+      );
+
+      const pending = { id: 'interaction-1', status: 'pending', kind: 'request_confirmation' };
+      const listInteractions = vi
+        .spyOn(harness.ctx.issues, 'listInteractions')
+        .mockImplementation(async (issueId) => (issueId === child.id ? [pending as never] : []));
+      return { child, listInteractions };
+    }
+
+    it('names the ticket that is waiting, whatever column it sits in', async () => {
+      const { child } = await ticketWithPendingConfirmation('in_progress');
+
+      const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID, force: true });
+      const stall = board.stalls.find((entry) => entry.taskId === child.id);
+      expect(stall?.kind, 'a confirmation in development was invisible before').toBe(
+        'awaiting_decision'
+      );
+      expect(stall?.reason, 'the human has to find the ticket').toContain('waiting for a decision');
+    });
+
+    it('tells the agent in the ticket that this is not how it asks', async () => {
+      const { child } = await ticketWithPendingConfirmation('in_review');
+      await harness.getData<BoardData>('board', { companyId: COMPANY_ID, force: true });
+
+      const comments = await harness.ctx.issues.listComments(child.id, COMPANY_ID);
+      expect(
+        comments.some((comment) => comment.body.includes('waiting on a confirmation you created'))
+      ).toBe(true);
+    });
+
+    it('withdraws the stall once the question has been answered', async () => {
+      const { child, listInteractions } = await ticketWithPendingConfirmation('in_progress');
+      await harness.getData<BoardData>('board', { companyId: COMPANY_ID, force: true });
+      expect(
+        (await harness.getData<BoardData>('board', { companyId: COMPANY_ID })).stalls.length
+      ).toBeGreaterThan(0);
+
+      // Der Mensch hat geklickt: die Frage ist weg.
+      listInteractions.mockResolvedValue([]);
+
+      const after = await harness.getData<BoardData>('board', { companyId: COMPANY_ID, force: true });
+      expect(after.stalls.filter((entry) => entry.kind === 'awaiting_decision')).toEqual([]);
+      expect(child.id).toBeTruthy();
+    });
+  });
+
   it('rejects a branch name that Git would not take', async () => {
     const { harness } = await startSprintReadyBoard();
 
@@ -2913,9 +3171,55 @@ describe('project onboarding worker actions', () => {
 
     const comments = await harness.ctx.issues.listComments(child.id, COMPANY_ID);
     expect(
-      comments.some((comment) => comment.body.includes('The Scrum Master does not deliver')),
+      comments.some((comment) => comment.body.includes('does not deliver')),
       'the watchdog learns why its change was reverted'
     ).toBe(true);
+  });
+
+  /**
+   * Der Technical Lead hat sein Refinement-Ticket gleich implementiert und auf
+   * `done` gesetzt. Vor dem Sprint hat das Gate ihn gestoppt — im laufenden
+   * Sprint haette ihn nichts gestoppt.
+   */
+  it('takes a finished ticket back off the Technical Lead but leaves its refinement alone', async () => {
+    const kickoff = await startApprovedDelivery(harness);
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const technicalLead = board.agents.find((agent) => agent.role === 'technical_lead');
+    const child = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Slider markup',
+      status: 'todo',
+      assigneeAgentId: technicalLead?.id,
+    });
+    await harness.emit(
+      'issue.created',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
+    );
+
+    // Das Refinement selbst bleibt unangetastet: dafuer haelt er das Ticket.
+    expect(await harness.ctx.issues.get(child.id, COMPANY_ID)).toMatchObject({
+      status: 'todo',
+      assigneeAgentId: technicalLead?.id,
+    });
+
+    // Fertigmelden darf er es nicht.
+    await harness.ctx.issues.update(child.id, { status: 'done' }, COMPANY_ID);
+    await harness.emit(
+      'issue.updated',
+      { issueId: child.id },
+      {
+        companyId: COMPANY_ID,
+        entityId: child.id,
+        entityType: 'issue',
+        actorId: technicalLead?.id,
+      }
+    );
+
+    expect(await harness.ctx.issues.get(child.id, COMPANY_ID)).toMatchObject({ status: 'todo' });
   });
 
   it('reverts a Scrum Master claim mid-sprint without losing the assigned developer', async () => {
@@ -3213,6 +3517,14 @@ describe('project onboarding worker actions', () => {
       { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
     );
 
+    // Eine Ablehnung ist etwas, das QA schreibt — der Status allein sagt es
+    // nicht.
+    await harness.ctx.issues.createComment(
+      child.id,
+      `## Changes Requested\n\nDie Tastaturnavigation fehlt.\n${QA_REVIEW_REJECTED_MARKER}`,
+      COMPANY_ID,
+      { authorAgentId: qa?.id }
+    );
     await harness.ctx.issues.update(child.id, { status: 'in_progress' }, COMPANY_ID);
     await harness.emit(
       'issue.updated',
@@ -3229,6 +3541,48 @@ describe('project onboarding worker actions', () => {
         expect.objectContaining({ body: expect.stringContaining('QA rework routed') }),
       ])
     );
+  });
+
+  /**
+   * Der Host setzt ein Ticket fuer *seinen eigenen* QA-Run auf `in_progress`.
+   * Das Board las darin eine Ablehnung: es nahm QA das Ticket 20 Sekunden nach
+   * der Uebergabe wieder weg, gab es einem Developer — und QA gab kurz darauf
+   * trotzdem ihre Freigabe. Zurueck blieb ein Rework-Eintrag, aus dem die
+   * Retrospektive Lehren zog, die es nie gab.
+   */
+  it('leaves the ticket with QA while its review run is merely starting', async () => {
+    const kickoff = await startApprovedDelivery(harness);
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const qa = board.agents.find((agent) => agent.role === 'qa_engineer');
+    const child = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Verify the image slider',
+      status: 'in_review',
+      assigneeAgentId: qa?.id,
+    });
+    await harness.emit(
+      'issue.created',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
+    );
+
+    // Kein Ablehnungskommentar — nur der Statuswechsel, den der Host beim
+    // Start des QA-Runs setzt.
+    await harness.ctx.issues.update(child.id, { status: 'in_progress' }, COMPANY_ID);
+    await harness.emit(
+      'issue.updated',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue', actorId: qa?.id }
+    );
+
+    expect(await harness.ctx.issues.get(child.id, COMPANY_ID)).toMatchObject({
+      assigneeAgentId: qa?.id,
+    });
+    const comments = await harness.ctx.issues.listComments(child.id, COMPANY_ID);
+    expect(comments.some((comment) => comment.body.includes('QA rework routed'))).toBe(false);
   });
 
   it('returns a direct developer completion to QA review before it can remain done', async () => {

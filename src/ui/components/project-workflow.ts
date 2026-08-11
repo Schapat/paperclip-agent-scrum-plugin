@@ -2,6 +2,8 @@ import type { ProjectOnboarding, ProjectRefinementWait, TicketStall } from '../.
 
 export interface ProjectWorkflowProgress {
   unrefinedTasks: number;
+  /** Wie viele Stories bereits existieren — auch vor ihrer Freigabe. */
+  totalTasks?: number;
 }
 
 /** Wie lange eine Phase laufen darf, bevor sie erklaerungsbeduerftig wird. */
@@ -75,6 +77,10 @@ export function describeStall(stall: TicketStall, now = Date.now()): string {
       return `Waiting for a human approval outside the board${suffix}.`;
     case 'budget':
       return `A budget incident stopped this agent${suffix}.`;
+    case 'awaiting_decision':
+      // Der Satz nennt das Ticket, weil der Klick sonst nicht zu finden ist:
+      // die Frage steht im Issue, nicht im Board.
+      return `${stall.reason}${suffix} Open the ticket and answer it — the board cannot decide this for you.`;
     case 'refinement_invalid':
       return `Refinement did not produce a usable estimate${suffix}.`;
   }
@@ -210,7 +216,12 @@ function describeBaseWorkflow(
         phase: 'technical_analysis_approval',
         actor: 'You',
         title: 'Technical analysis needs your approval',
-        detail: 'The Technical Lead has completed the analysis and is waiting for a product decision.',
+        // Der Product Owner schreibt manchmal schon los, bevor die Freigabe da
+        // ist. Das Board hat diese Stories frueher verschwiegen — sichtbar sind
+        // sie jetzt, und der Satz sagt, woran sie haengen.
+        detail: progress.totalTasks
+          ? `The Technical Lead has completed the analysis and is waiting for a product decision. The Product Owner has already written ${progress.totalTasks} ${progress.totalTasks === 1 ? 'story' : 'stories'} — they stay out of delivery until you approve.`
+          : 'The Technical Lead has completed the analysis and is waiting for a product decision.',
         nextStep: 'Approve the analysis or request concrete changes.',
         attentionRequired: true,
         ticketLinkLabel: 'Open approval',
