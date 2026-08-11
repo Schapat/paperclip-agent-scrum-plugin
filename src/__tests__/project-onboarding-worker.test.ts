@@ -22,6 +22,7 @@ import {
   PRODUCT_DECISION_REQUIRED_MARKER,
   PRODUCT_DECISION_RESOLVED_MARKER,
   QA_REVIEW_APPROVED_MARKER,
+  QA_REVIEW_REJECTED_MARKER,
   QA_REWORK_ROUTED_MARKER,
 } from '../core/review-routing';
 import { COMMIT_MARKER, DECISION_MARKER, REFINEMENT_MARKER } from '../core/project-issue-projection';
@@ -2735,6 +2736,39 @@ describe('project onboarding worker actions', () => {
     expect(comments.some((comment) => comment.body.includes('feature/image-slider'))).toBe(true);
   });
 
+  /**
+   * Die Sprint-Planung stellt auch verkettete Tickets nach TODO. Der Host weckt
+   * sie nicht, solange ihr Vorgaenger offen ist — und das Board hat daraus
+   * einen Stillstand gemacht, der nie von selbst verschwand. Warten auf einen
+   * Blocker ist Reihenfolge, kein Defekt.
+   */
+  it('does not record a stall when a wake-up waits for a blocking ticket', async () => {
+    const kickoff = await startApprovedDelivery(harness);
+    const child = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Translate the header',
+      status: 'backlog',
+    });
+    await harness.emit(
+      'issue.created',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
+    );
+
+    vi.spyOn(harness.ctx.issues, 'requestWakeup').mockRejectedValue(
+      new Error('JsonRpcCallError: Issue is blocked by unresolved blockers')
+    );
+    await harness.performAction('retryProjectRefinement', {}, { companyId: COMPANY_ID });
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    expect(
+      board.stalls.filter((stall) => stall.kind === 'wakeup_failed'),
+      'an ordering constraint is not an impediment'
+    ).toEqual([]);
+  });
+
   it('rejects a branch name that Git would not take', async () => {
     const { harness } = await startSprintReadyBoard();
 
@@ -2913,9 +2947,55 @@ describe('project onboarding worker actions', () => {
 
     const comments = await harness.ctx.issues.listComments(child.id, COMPANY_ID);
     expect(
-      comments.some((comment) => comment.body.includes('The Scrum Master does not deliver')),
+      comments.some((comment) => comment.body.includes('does not deliver')),
       'the watchdog learns why its change was reverted'
     ).toBe(true);
+  });
+
+  /**
+   * Der Technical Lead hat sein Refinement-Ticket gleich implementiert und auf
+   * `done` gesetzt. Vor dem Sprint hat das Gate ihn gestoppt — im laufenden
+   * Sprint haette ihn nichts gestoppt.
+   */
+  it('takes a finished ticket back off the Technical Lead but leaves its refinement alone', async () => {
+    const kickoff = await startApprovedDelivery(harness);
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const technicalLead = board.agents.find((agent) => agent.role === 'technical_lead');
+    const child = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Slider markup',
+      status: 'todo',
+      assigneeAgentId: technicalLead?.id,
+    });
+    await harness.emit(
+      'issue.created',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
+    );
+
+    // Das Refinement selbst bleibt unangetastet: dafuer haelt er das Ticket.
+    expect(await harness.ctx.issues.get(child.id, COMPANY_ID)).toMatchObject({
+      status: 'todo',
+      assigneeAgentId: technicalLead?.id,
+    });
+
+    // Fertigmelden darf er es nicht.
+    await harness.ctx.issues.update(child.id, { status: 'done' }, COMPANY_ID);
+    await harness.emit(
+      'issue.updated',
+      { issueId: child.id },
+      {
+        companyId: COMPANY_ID,
+        entityId: child.id,
+        entityType: 'issue',
+        actorId: technicalLead?.id,
+      }
+    );
+
+    expect(await harness.ctx.issues.get(child.id, COMPANY_ID)).toMatchObject({ status: 'todo' });
   });
 
   it('reverts a Scrum Master claim mid-sprint without losing the assigned developer', async () => {
@@ -3213,6 +3293,14 @@ describe('project onboarding worker actions', () => {
       { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
     );
 
+    // Eine Ablehnung ist etwas, das QA schreibt — der Status allein sagt es
+    // nicht.
+    await harness.ctx.issues.createComment(
+      child.id,
+      `## Changes Requested\n\nDie Tastaturnavigation fehlt.\n${QA_REVIEW_REJECTED_MARKER}`,
+      COMPANY_ID,
+      { authorAgentId: qa?.id }
+    );
     await harness.ctx.issues.update(child.id, { status: 'in_progress' }, COMPANY_ID);
     await harness.emit(
       'issue.updated',
@@ -3229,6 +3317,48 @@ describe('project onboarding worker actions', () => {
         expect.objectContaining({ body: expect.stringContaining('QA rework routed') }),
       ])
     );
+  });
+
+  /**
+   * Der Host setzt ein Ticket fuer *seinen eigenen* QA-Run auf `in_progress`.
+   * Das Board las darin eine Ablehnung: es nahm QA das Ticket 20 Sekunden nach
+   * der Uebergabe wieder weg, gab es einem Developer — und QA gab kurz darauf
+   * trotzdem ihre Freigabe. Zurueck blieb ein Rework-Eintrag, aus dem die
+   * Retrospektive Lehren zog, die es nie gab.
+   */
+  it('leaves the ticket with QA while its review run is merely starting', async () => {
+    const kickoff = await startApprovedDelivery(harness);
+
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const qa = board.agents.find((agent) => agent.role === 'qa_engineer');
+    const child = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Verify the image slider',
+      status: 'in_review',
+      assigneeAgentId: qa?.id,
+    });
+    await harness.emit(
+      'issue.created',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
+    );
+
+    // Kein Ablehnungskommentar — nur der Statuswechsel, den der Host beim
+    // Start des QA-Runs setzt.
+    await harness.ctx.issues.update(child.id, { status: 'in_progress' }, COMPANY_ID);
+    await harness.emit(
+      'issue.updated',
+      { issueId: child.id },
+      { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue', actorId: qa?.id }
+    );
+
+    expect(await harness.ctx.issues.get(child.id, COMPANY_ID)).toMatchObject({
+      assigneeAgentId: qa?.id,
+    });
+    const comments = await harness.ctx.issues.listComments(child.id, COMPANY_ID);
+    expect(comments.some((comment) => comment.body.includes('QA rework routed'))).toBe(false);
   });
 
   it('returns a direct developer completion to QA review before it can remain done', async () => {

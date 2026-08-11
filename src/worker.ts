@@ -76,6 +76,7 @@ import {
   PRODUCT_DECISION_RESOLVED_MARKER,
   SPRINT_SCOPE_RESOLUTION_MARKER,
   hasQaReviewApproval,
+  isQaReviewRejection,
   hasSprintScopeResolution,
   isPluginAuthoredNotice,
   reviewOwnerForProjectIssue,
@@ -769,6 +770,15 @@ const plugin = definePlugin({
         }
         return { queued: wakeup.queued, runId: wakeup.runId, error: null };
       } catch (error) {
+        // Ein Weckruf, den der Host wegen einer offenen Abhaengigkeit ablehnt,
+        // ist kein Stillstand, sondern die Lieferreihenfolge des Product
+        // Owners. Das Refinement behandelt das laengst so; die Planung hat
+        // daraus einen "blocked"-Header gemacht, der nach dem Blocker von
+        // selbst verschwinden muesste — und es nie tat.
+        if (String(error).includes("blocked by unresolved blockers")) {
+          ctx.logger.info("Wake-up deferred until the blocking ticket is done", { issueId, reason });
+          return { queued: false, error: null };
+        }
         recordStall(issueId, `Wake-up "${reason}" failed: ${String(error)}`);
         ctx.logger.error("Could not queue project onboarding work", {
           issueId,
@@ -1343,6 +1353,25 @@ const plugin = definePlugin({
       const qa = state.agents.find((agent) => agent.role === "qa_engineer");
       if (!qa || issue.assigneeAgentId !== qa.id) return issue;
 
+      // "QA steht auf einem Ticket in `in_progress`" hiess bisher "QA hat
+      // abgelehnt". Es heisst aber vor allem: der Host hat den Status fuer
+      // *seinen eigenen* QA-Run gesetzt. Die Folge war auf jedem Ticket
+      // dieselbe: 20 Sekunden nach der Uebergabe an QA nahm das Board ihr das
+      // Ticket wieder weg, gab es einem Developer, und QA gab kurz darauf
+      // trotzdem ihre Freigabe. Uebrig blieb ein "Rework"-Eintrag, aus dem die
+      // Retrospektive Lehren zieht, die es nie gab.
+      //
+      // Eine Ablehnung ist etwas, das QA *schreibt*. Ohne diesen Beleg bleibt
+      // das Ticket, wo es ist.
+      const reviewComments = await readComments(issue.id);
+      const rejected = reviewComments.some((comment) =>
+        isQaReviewRejection(
+          { authorAgentId: comment.authorAgentId ?? null, body: comment.body, createdAt: comment.createdAt },
+          qa.id
+        )
+      );
+      if (!rejected) return issue;
+
       const developer = developerForProjectRework(issue.id);
       if (!developer) {
         ctx.logger.warn("Could not route QA rework because no developer is available", {
@@ -1610,19 +1639,34 @@ const plugin = definePlugin({
       if (!companyId || !isProjectOnboardingChildIssue(issue)) return issue;
 
       const scrumMaster = state.agents.find((agent) => agent.role === "scrum_master");
-      if (!scrumMaster) return issue;
+      const technicalLead = state.agents.find((agent) => agent.role === "technical_lead");
+      const productOwner = state.agents.find((agent) => agent.role === "product_owner");
 
-      // Zwei Spuren: der Watchdog hat das Ticket geaendert, oder er steht als
+      // Zwei Spuren: die Rolle hat das Ticket geaendert, oder sie steht als
       // Bearbeiter darauf. Die zweite faengt auch den Fall ab, in dem der
       // Worker das Ereignis verpasst hat und es erst beim Abgleich sieht.
-      const authored = actorId === scrumMaster.id;
-      const selfAssigned = issue.assigneeAgentId === scrumMaster.id;
-      if (!authored && !selfAssigned) return issue;
+      const claimedBy = (agent: WorkerState["agents"][number] | undefined) =>
+        Boolean(agent && (actorId === agent.id || issue.assigneeAgentId === agent.id));
+
+      // Der Scrum Master liefert ueberhaupt nicht — er ist Prozessbeobachter.
+      // Technical Lead und Product Owner duerfen ein Ticket sehr wohl halten:
+      // fuer Refinement bzw. Story-Arbeit. Was sie nicht duerfen, ist es
+      // fertigmelden. Genau das ist passiert — der Technical Lead hat sein
+      // Refinement-Ticket gleich implementiert und auf `done` gesetzt.
+      const deliveredStatus = issue.status === "done" || issue.status === "in_review";
+      const claimingAgent = claimedBy(scrumMaster)
+        ? scrumMaster
+        : deliveredStatus && claimedBy(technicalLead)
+          ? technicalLead
+          : deliveredStatus && claimedBy(productOwner)
+            ? productOwner
+            : null;
+      if (!claimingAgent) return issue;
 
       const known = state.tasks.find((task) => task.id === issue.id);
       const previousColumn = known?.column ?? "backlog";
       const previousAssignee =
-        known?.assignedAgentId && known.assignedAgentId !== scrumMaster.id
+        known?.assignedAgentId && known.assignedAgentId !== claimingAgent.id
           ? known.assignedAgentId
           : null;
       // Ein Kommentar des Scrum Masters ist erlaubt und aendert nichts.
@@ -1638,22 +1682,23 @@ const plugin = definePlugin({
         );
         await postIssueNotice(
           issue.id,
-          "scrum-master-delivery-claim",
+          "non-delivery-role-claim",
           [
-            "## The Scrum Master does not deliver",
-            `Agent Scrum reverted this ticket to \`${previousColumn}\`: the Scrum Master moved or claimed it, and the Scrum Master is a process watchdog, not a delivery role.`,
-            "Document the impediment, wake the responsible role, or escalate to the human — but do not take over a ticket.",
+            `## The ${claimingAgent.name} does not deliver`,
+            `Agent Scrum reverted this ticket to \`${previousColumn}\`: it was moved or claimed by a role that does not deliver tickets.`,
+            "Refinement, process facilitation, and story work stop short of implementation. A delivery ticket is finished by its assigned Developer and closed by QA.",
           ].join("\n\n")
         );
-        ctx.logger.warn("Reverted a Scrum Master delivery claim", {
+        ctx.logger.warn("Reverted a delivery claim by a non-delivery role", {
           issueId: issue.id,
+          role: claimingAgent.role,
           claimedStatus: issue.status,
           restoredStatus: previousColumn,
           restoredAssignee: previousAssignee,
         });
         return restored;
       } catch (error) {
-        ctx.logger.warn("Could not revert the Scrum Master delivery claim", {
+        ctx.logger.warn("Could not revert the delivery claim", {
           issueId: issue.id,
           error: String(error),
         });
