@@ -112,6 +112,7 @@ import {
   timedOutRunsAwaitingRecovery,
   type OrchestrationSnapshot,
 } from "./core/project-orchestration";
+import { isAgentWorkOrderTicket } from "./core/meta-ticket";
 import { migrateState } from "./core/storage";
 import { recalculateMetrics, createInitialMetrics, onStatusChange } from "./core/hooks";
 import { collectDecisions, recordDecision, sendMessage } from "./core/communication";
@@ -495,11 +496,19 @@ const plugin = definePlugin({
      * Stories arbeitete, und ein Sprintstart haette sie ungeschaetzt
      * zurueckgelassen.
      */
+    /** Die Tickets, die tatsaechlich geliefert werden — ohne Agenten-Auftraege. */
+    function deliveryTasks(rootIssueId: string | null | undefined): ScrumTask[] {
+      if (!rootIssueId) return [];
+      return state.tasks.filter(
+        (task) => task.parentId === rootIssueId && !isAgentWorkOrderTicket(task)
+      );
+    }
+
     function canStartProjectSprint(): boolean {
       const onboarding = state.projectOnboarding;
       if (onboarding?.status !== "sprint_planning" || !onboarding.rootIssueId) return false;
 
-      const projectTasks = state.tasks.filter((task) => task.parentId === onboarding.rootIssueId);
+      const projectTasks = deliveryTasks(onboarding.rootIssueId);
       if (projectTasks.length === 0) return false;
 
       const everythingRefined = projectTasks.every((task) => task.refined);
@@ -1876,6 +1885,10 @@ const plugin = definePlugin({
       return state.tasks.filter(
         (task) =>
           task.parentId === rootIssueId &&
+          // Der selbst geschriebene Auftrag eines Agenten ist keine Story. Ihn
+          // zu verfeinern hat niemand vor — er haette den Sprint dauerhaft
+          // blockiert.
+          !isAgentWorkOrderTicket(task) &&
           !task.refined &&
           (
             (task.column === "backlog" && task.assignedAgentId === null) ||
@@ -3703,9 +3716,7 @@ const plugin = definePlugin({
       await hydrateTaskIdentifiers();
       const rootIssueId = state.projectOnboarding?.rootIssueId;
       const kickoffTask = await projectKickoffTask();
-      const projectTasks = rootIssueId
-        ? state.tasks.filter((task) => task.parentId === rootIssueId)
-        : [];
+      const projectTasks = deliveryTasks(rootIssueId);
       return {
         tasks: state.tasks,
         agents: state.agents,
@@ -3919,23 +3930,34 @@ const plugin = definePlugin({
       if (!productOwner) return { started: false, error: "The Product Owner is not available." };
 
       const next = transitionProjectOnboarding(onboarding, "backlog_in_progress");
-      await ctx.issues.update(
-        onboarding.rootIssueId,
-        {
-          description: createBacklogDiscoveryPrompt(next),
-          status: "todo",
-          assigneeAgentId: productOwner.id,
-        },
-        companyId
-      );
+      // Der Product Owner ist der Freigabe gelegentlich zuvorgekommen und hat
+      // die Stories schon geschrieben. Ihn dann erneut loszuschicken bedeutet:
+      // ein zweiter Lauf, der dieselbe Arbeit noch einmal erfindet. Existiert
+      // ein Backlog, uebernimmt das Board es und ueberlaesst dem Human die
+      // Freigabe.
+      const existingStories = deliveryTasks(onboarding.rootIssueId);
       state.projectOnboarding = next;
       await save();
+
+      if (existingStories.length === 0) {
+        await ctx.issues.update(
+          onboarding.rootIssueId,
+          {
+            description: createBacklogDiscoveryPrompt(next),
+            status: "todo",
+            assigneeAgentId: productOwner.id,
+          },
+          companyId
+        );
+      }
 
       let commentError: string | null = null;
       try {
         await createIssueComment(
           onboarding.rootIssueId,
-          "## Technical analysis approved\n\nA human approved the Technical Lead analysis and started Product Owner story discovery.",
+          existingStories.length > 0
+            ? `## Technical analysis approved\n\nA human approved the Technical Lead analysis. ${existingStories.length} stor${existingStories.length === 1 ? "y" : "ies"} already exist from an earlier Product Owner run — the board adopts them instead of asking for the same work twice. Review and approve the backlog when it is ready.`
+            : "## Technical analysis approved\n\nA human approved the Technical Lead analysis and started Product Owner story discovery.",
           companyId
         );
       } catch (error) {
@@ -3946,8 +3968,20 @@ const plugin = definePlugin({
         });
       }
 
-      const wakeup = await requestIssueWakeup(onboarding.rootIssueId, "project_onboarding_backlog");
-      return { started: true, projectOnboarding: state.projectOnboarding, wakeup, commentError };
+      const wakeup = existingStories.length > 0
+        ? { queued: false, error: null }
+        : await requestIssueWakeup(onboarding.rootIssueId, "project_onboarding_backlog");
+      ctx.logger.info("Technical analysis approved", {
+        issueId: onboarding.rootIssueId,
+        adoptedStories: existingStories.length,
+      });
+      return {
+        started: true,
+        adoptedStories: existingStories.length,
+        projectOnboarding: state.projectOnboarding,
+        wakeup,
+        commentError,
+      };
     });
 
     registerCompanyAction("rejectTechnicalAnalysis", async (params) => {

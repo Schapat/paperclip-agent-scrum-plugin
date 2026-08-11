@@ -1291,6 +1291,69 @@ describe('project onboarding worker actions', () => {
     expect(board.tasks).toEqual([]);
   });
 
+  /**
+   * Der Product Owner ist der Freigabe zuvorgekommen: sieben Stories lagen
+   * fertig da, waehrend die Analyse noch auf den Klick wartete. Ihn danach
+   * erneut loszuschicken hiesse, dieselbe Arbeit ein zweites Mal erfinden zu
+   * lassen — und bis dahin laesst sich nichts verfeinern.
+   */
+  it('adopts a backlog the Product Owner wrote before the approval', async () => {
+    const kickoff = await harness.performAction<{ rootIssueId: string }>(
+      'startProjectOnboarding',
+      { projectId: PROJECT_ID, brief: 'Build Tetris.' },
+      { companyId: COMPANY_ID }
+    );
+
+    // Stories entstehen, bevor der Human die Analyse freigibt.
+    for (const title of ['Tetris Core Game Loop', 'Tetris Scoring']) {
+      const issue = await harness.ctx.issues.create({
+        companyId: COMPANY_ID,
+        projectId: PROJECT_ID,
+        parentId: kickoff.rootIssueId,
+        title,
+        status: 'backlog',
+      });
+      await harness.emit(
+        'issue.created',
+        { issueId: issue.id },
+        { companyId: COMPANY_ID, entityId: issue.id, entityType: 'issue' }
+      );
+    }
+    // Und ein Arbeitsauftrag, den sich ein Agent selbst geschrieben hat.
+    const workOrder = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Product Owner Backlog Discovery: Tetris',
+      status: 'backlog',
+    });
+    await harness.emit(
+      'issue.created',
+      { issueId: workOrder.id },
+      { companyId: COMPANY_ID, entityId: workOrder.id, entityType: 'issue' }
+    );
+
+    const beforeApproval = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    expect(beforeApproval.tasks, 'the work is visible even before the gate').toHaveLength(3);
+    expect(
+      beforeApproval.projectProgress.totalTasks,
+      'but the agent work order is not a story'
+    ).toBe(2);
+
+    await completeTechnicalAnalysis(harness, kickoff.rootIssueId);
+    const started = await harness.performAction<{ adoptedStories: number }>(
+      'startBacklogDiscovery',
+      {},
+      { companyId: COMPANY_ID }
+    );
+
+    expect(started.adoptedStories).toBe(2);
+    // Der Kickoff wird nicht erneut an den Product Owner gegeben.
+    const productOwner = beforeApproval.agents.find((agent) => agent.role === 'product_owner');
+    const root = await harness.ctx.issues.get(kickoff.rootIssueId, COMPANY_ID);
+    expect(root?.assigneeAgentId).not.toBe(productOwner?.id);
+  });
+
   it('returns delivery that an agent started before the sprint to the backlog', async () => {
     const sprintHarness = createTestHarness({ manifest, config: { enableTeam: true } });
     sprintHarness.seed({ projects: [project()], projectWorkspaces: [workspace()] });
