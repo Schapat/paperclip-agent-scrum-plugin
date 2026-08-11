@@ -20,6 +20,7 @@ import {
 } from './review-routing';
 
 export const SUBMIT_REFINEMENT_TOOL = 'submit_refinement';
+export const SUBMIT_REFINEMENT_BATCH_TOOL = 'submit_refinement_batch';
 export const SUBMIT_QA_VERDICT_TOOL = 'submit_qa_verdict';
 export const RECORD_COMMIT_TOOL = 'record_commit';
 export const SUBMIT_FOR_REVIEW_TOOL = 'submit_for_review';
@@ -86,6 +87,15 @@ export interface RefinementInput {
   labels?: string[];
 }
 
+export interface RefinementBatchEntry {
+  issueId: string;
+  refinement: RefinementInput;
+}
+
+export interface RefinementBatchInput {
+  refinements: RefinementBatchEntry[];
+}
+
 export interface QaVerdictInput {
   approved: boolean;
   criteria: Array<{ text: string; met: boolean }>;
@@ -149,6 +159,33 @@ export function validateRefinement(input: unknown): ToolValidation<RefinementInp
       labels: [...new Set(asStringList(record.labels).map((label) => label.toLowerCase()))],
     },
   };
+}
+
+/** Validates all entries before the worker writes any refinement marker. */
+export function validateRefinementBatch(input: unknown): ToolValidation<RefinementBatchInput> {
+  const record = asRecord(input);
+  if (!Array.isArray(record.refinements) || record.refinements.length === 0) {
+    return { ok: false, error: 'refinements must contain at least one ticket.' };
+  }
+
+  const issueIds = new Set<string>();
+  const refinements: RefinementBatchEntry[] = [];
+  for (const rawEntry of record.refinements) {
+    const entry = asRecord(rawEntry);
+    const issueId = typeof entry.issueId === 'string' ? entry.issueId.trim() : '';
+    if (!issueId) return { ok: false, error: 'Every batch refinement needs an issueId.' };
+    if (issueIds.has(issueId)) {
+      return { ok: false, error: `Batch refinement contains duplicate issueId ${issueId}.` };
+    }
+
+    const refinement = validateRefinement(entry);
+    if (!refinement.ok) return { ok: false, error: `${issueId}: ${refinement.error}` };
+
+    issueIds.add(issueId);
+    refinements.push({ issueId, refinement: refinement.value });
+  }
+
+  return { ok: true, value: { refinements } };
 }
 
 export function validateQaVerdict(input: unknown): ToolValidation<QaVerdictInput> {

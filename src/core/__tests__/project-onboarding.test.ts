@@ -2,18 +2,23 @@ import { describe, expect, it } from 'vitest';
 
 import {
   canStartNewProjectOnboarding,
+  canRouteDelivery,
   canRunAutomaticDelivery,
   createProjectSprint,
   createBacklogDiscoveryPrompt,
   createInitialProjectOnboarding,
   createTechnicalAnalysisPrompt,
+  isPreDeliveryGate,
   isTechnicalAnalysisComplete,
+  normalizeBranchName,
   parseProjectOnboardingInput,
+  suggestDeliveryBranch,
   startProjectOnboarding,
   TECHNICAL_ANALYSIS_COMPLETION_MARKER,
   transitionProjectOnboarding,
 } from '../project-onboarding';
 import { migrateState } from '../storage';
+import type { ProjectOnboarding } from '../types';
 
 describe('project onboarding', () => {
   it('requires a project and a concrete work request', () => {
@@ -43,8 +48,30 @@ describe('project onboarding', () => {
         brief: 'Build an image slider',
         constraints: 'Use the design system',
         skipSprintPlanning: true,
+        // Ohne Angabe entscheidet das Team weiter selbst.
+        deliveryBranch: null,
       },
     });
+  });
+
+  it('accepts a delivery branch with the request and repairs its spelling', () => {
+    // Die Frage gehoert an den Sprintstart — aber eine kleine Umsetzung
+    // ueberspringt ihn, und dann muss sie hier gestellt werden.
+    expect(
+      parseProjectOnboardingInput({
+        projectId: 'project-bmw',
+        brief: 'Build an image slider',
+        deliveryBranch: ' feature/image slider ',
+      })
+    ).toMatchObject({ valid: true, value: { deliveryBranch: 'feature/image-slider' } });
+
+    expect(
+      parseProjectOnboardingInput({
+        projectId: 'project-bmw',
+        brief: 'Build an image slider',
+        deliveryBranch: '..',
+      })
+    ).toMatchObject({ valid: true, value: { deliveryBranch: null } });
   });
 
   it('requires human-approved transitions before automatic delivery starts', () => {
@@ -242,5 +269,75 @@ describe('project onboarding', () => {
         'technical-lead'
       )
     ).toBe(true);
+  });
+});
+/**
+ * Vor dem Sprintstart darf das Plugin ein Ticket verfeinern lassen — aber nicht
+ * liefern. Ein Agent, der sich selbst ein Ticket greift, hat den Sprint sonst
+ * schon gestartet, bevor der Human ihn freigegeben hat.
+ */
+describe('the delivery gate', () => {
+  const gate = (status: ProjectOnboarding['status']): ProjectOnboarding => ({
+    ...createInitialProjectOnboarding('2026-08-10T12:00:00.000Z'),
+    status,
+  });
+
+  it('routes delivery only in an approved sprint', () => {
+    expect(canRouteDelivery(gate('active'))).toBe(true);
+    expect(canRouteDelivery(gate('sprint_planning'))).toBe(false);
+    expect(canRouteDelivery(gate('backlog_in_progress'))).toBe(false);
+    expect(canRouteDelivery(undefined)).toBe(false);
+  });
+
+  it('recognises the phases in which started work belongs back in the backlog', () => {
+    expect(isPreDeliveryGate(gate('backlog_in_progress'))).toBe(true);
+    expect(isPreDeliveryGate(gate('sprint_planning'))).toBe(true);
+    expect(isPreDeliveryGate(gate('active'))).toBe(false);
+    expect(isPreDeliveryGate(gate('analysis_in_progress'))).toBe(false);
+  });
+});
+
+/**
+ * Der Lieferbranch ist eine Sprintentscheidung des Humans. Was er eintippt,
+ * muss Git akzeptieren — ein Branch mit Leerzeichen bricht jeden Push.
+ */
+describe('the delivery branch', () => {
+  it('keeps a usable branch name and repairs an awkward one', () => {
+    expect(normalizeBranchName('feature/dev-script')).toBe('feature/dev-script');
+    expect(normalizeBranchName('  feature/dev script ')).toBe('feature/dev-script');
+    expect(normalizeBranchName('feature//nested///name')).toBe('feature/nested/name');
+    expect(normalizeBranchName('/feature/trailing/')).toBe('feature/trailing');
+  });
+
+  it('rejects what Git will not take', () => {
+    expect(normalizeBranchName('')).toBeNull();
+    expect(normalizeBranchName('   ')).toBeNull();
+    expect(normalizeBranchName('feature/../escape')).toBeNull();
+    expect(normalizeBranchName('feature/branch.lock')).toBeNull();
+    expect(normalizeBranchName(42)).toBeNull();
+  });
+
+  it('suggests a branch that names the project and the sprint', () => {
+    expect(
+      suggestDeliveryBranch({ projectName: 'BMW Website', brief: null }, 2)
+    ).toBe('feature/bmw-website-sprint-2');
+    expect(suggestDeliveryBranch({ projectName: null, brief: null })).toBe('feature/delivery-sprint-1');
+  });
+
+  it('carries the human decision into the sprint', () => {
+    const sprint = createProjectSprint({
+      onboarding: {
+        ...createInitialProjectOnboarding('2026-08-10T12:00:00.000Z'),
+        status: 'sprint_planning',
+        projectName: 'Website',
+        deliveryBranch: 'feature/website-sprint-1',
+      },
+      id: 'sprint-1',
+      sprintNumber: 1,
+      lengthWeeks: 2,
+      now: '2026-08-10T12:00:00.000Z',
+    });
+
+    expect(sprint.deliveryBranch).toBe('feature/website-sprint-1');
   });
 });

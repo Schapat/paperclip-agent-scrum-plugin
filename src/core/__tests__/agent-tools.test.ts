@@ -5,6 +5,7 @@ import {
   qaVerdictComment,
   refinementComment,
   reviewSubmissionComment,
+  validateRefinementBatch,
   validateCommit,
   validateReviewSubmission,
   validateQaVerdict,
@@ -77,6 +78,32 @@ describe('refinement tool input', () => {
       labels: ['css'],
     });
     expect(projection.refinement.acceptanceCriteria).toHaveLength(2);
+  });
+});
+
+describe('refinement batch tool input', () => {
+  it('rejects an empty or duplicate batch before any marker can be written', () => {
+    expect(validateRefinementBatch({ refinements: [] })).toMatchObject({ ok: false });
+    expect(validateRefinementBatch({
+      refinements: [
+        { issueId: 'issue-1', storyPoints: 3, acceptanceCriteria: ['Works'] },
+        { issueId: 'issue-1', storyPoints: 5, acceptanceCriteria: ['Also works'] },
+      ],
+    })).toMatchObject({ ok: false });
+  });
+
+  it('validates every ticket with the same refinement rules as the single-ticket tool', () => {
+    const batch = validateRefinementBatch({
+      refinements: [
+        { issueId: 'issue-1', storyPoints: 3, acceptanceCriteria: ['Markup works'] },
+        { issueId: 'issue-2', storyPoints: 5, acceptanceCriteria: ['Controls work'], labels: ['React'] },
+      ],
+    });
+
+    expect(batch).toMatchObject({ ok: true });
+    if (!batch.ok) return;
+    expect(batch.value.refinements).toHaveLength(2);
+    expect(batch.value.refinements[1]).toMatchObject({ issueId: 'issue-2', refinement: { labels: ['react'] } });
   });
 });
 

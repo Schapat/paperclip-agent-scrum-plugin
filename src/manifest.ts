@@ -144,6 +144,108 @@ const manifest: PaperclipPluginManifestV1 = {
       },
     },
     {
+      name: "submit_refinement_batch",
+      displayName: "Submit complete refinement batch",
+      description:
+        "Record every estimate and acceptance-criteria set from the current project refinement batch in one call. Only the Technical Lead may call it.",
+      parametersSchema: {
+        type: "object",
+        required: ["refinements"],
+        properties: {
+          refinements: {
+            type: "array",
+            minItems: 1,
+            description: "One complete refinement for every ticket named in the current refinement batch.",
+            items: {
+              type: "object",
+              required: ["issueId", "storyPoints", "acceptanceCriteria"],
+              properties: {
+                issueId: { type: "string", description: "UUID of the ticket being refined." },
+                storyPoints: {
+                  type: "number",
+                  minimum: 1,
+                  maximum: 100,
+                  description: "Whole-number effort estimate.",
+                },
+                acceptanceCriteria: {
+                  type: "array",
+                  minItems: 1,
+                  items: { type: "string" },
+                  description: "Verifiable criteria QA will check one by one.",
+                },
+                technicalNotes: { type: "string", description: "Implementation guidance for the developer." },
+                labels: {
+                  type: "array",
+                  items: { type: "string" },
+                  description: "Technical domains used for developer assignment.",
+                },
+                risks: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    required: ["description"],
+                    properties: {
+                      description: { type: "string" },
+                      severity: { type: "string", enum: ["low", "medium", "high"] },
+                      mitigation: { type: "string" },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    {
+      name: "get_watchdog_agenda",
+      displayName: "Read the watchdog agenda",
+      description:
+        "Return exactly what the board wants a Scrum Master watchdog run to look at: blocked tickets, stalled tickets, reviews waiting too long, unassigned work, and idle developers. Only the Scrum Master may call it. An empty agenda means the run is over.",
+      parametersSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "submit_watchdog_report",
+      displayName: "Submit the watchdog report",
+      description:
+        "The single, final act of a Scrum Master watchdog run: report the impediments from the agenda so the board can wake the responsible role. Only the Scrum Master may call it. The watchdog never changes a ticket's status or assignee — reporting is its whole job.",
+      parametersSchema: {
+        type: "object",
+        required: ["clear"],
+        properties: {
+          clear: {
+            type: "boolean",
+            description: "True when the agenda was empty and nothing is stuck.",
+          },
+          findings: {
+            type: "array",
+            description: "One entry per impediment from the agenda. Empty when clear is true.",
+            items: {
+              type: "object",
+              required: ["kind", "note"],
+              properties: {
+                kind: {
+                  type: "string",
+                  enum: [
+                    "blocked_ticket",
+                    "stalled_ticket",
+                    "idle_developer",
+                    "unassigned_work",
+                    "review_waiting",
+                  ],
+                },
+                taskId: { type: "string", description: "UUID of the affected ticket, when there is one." },
+                note: {
+                  type: "string",
+                  description: "What is stuck and what the responsible role has to do about it.",
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    {
       name: "submit_qa_verdict",
       displayName: "Submit QA verdict",
       description:

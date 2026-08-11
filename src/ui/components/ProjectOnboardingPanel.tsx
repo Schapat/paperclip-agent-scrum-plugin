@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 
 import type { ProjectOnboarding, TicketStall } from "../../core/types";
 import type { ProjectProgress } from "../../core/project-issue-projection";
@@ -8,6 +8,18 @@ export interface ProjectOption {
   id: string;
   name: string;
 }
+
+/** Die Branch-Auswahl, die das Board vor dem Sprintstart anbietet. */
+export interface DeliveryBranchOptions {
+  selected: string | null;
+  suggestion: string;
+  branches: string[];
+  defaultBranch: string | null;
+  error: string | null;
+}
+
+const NEW_BRANCH_OPTION = "__new__";
+const NO_BRANCH_OPTION = "";
 
 interface ProjectOnboardingPanelProps {
   onboarding: ProjectOnboarding;
@@ -22,15 +34,24 @@ interface ProjectOnboardingPanelProps {
   canStartSprint: boolean;
   /** Tickets, die nachweislich stehen — speist die Begruendung im Header. */
   stalls?: TicketStall[];
+  /** Laeuft gerade ein Agent-Run? `undefined`, wenn der Host es nicht sagt. */
+  agentRunning?: boolean;
+  /** Auswaehlbare Lieferbranches fuer den ersten Sprint. */
+  branchOptions?: DeliveryBranchOptions;
   scopeHoldBusyId: string | null;
   onStart: (input: {
     projectId: string;
     brief: string;
     constraints: string;
     skipSprintPlanning: boolean;
+    deliveryBranch: string;
   }) => Promise<void>;
+  /** Laedt die Branches des im Formular gewaehlten Projekts. */
+  onLoadBranches?: (projectId: string) => Promise<DeliveryBranchOptions>;
   onActivate: () => Promise<void>;
-  onStartSprint: () => Promise<void>;
+  onStartSprint: (input: { deliveryBranch: string }) => Promise<void>;
+  /** Setzt den Ablauf auf Story-Arbeit oder auf das technische Refinement zurueck. */
+  onResetWorkflow: (input: { target: "stories" | "refinement" }) => Promise<void>;
   onApproveScopeHold: (issueId: string) => Promise<void>;
   onStartScopeHoldFollowUp: (issueId: string) => Promise<void>;
   onDismissScopeHold: (issueId: string) => Promise<void>;
@@ -48,10 +69,14 @@ export function ProjectOnboardingPanel({
   latestEventSummary,
   canStartSprint,
   stalls,
+  agentRunning,
+  branchOptions,
   scopeHoldBusyId,
   onStart,
+  onLoadBranches,
   onActivate,
   onStartSprint,
+  onResetWorkflow,
   onApproveScopeHold,
   onStartScopeHoldFollowUp,
   onDismissScopeHold,
@@ -61,15 +86,52 @@ export function ProjectOnboardingPanel({
   const [constraints, setConstraints] = useState("");
   const [skipSprintPlanning, setSkipSprintPlanning] = useState(false);
   const [startingNextProject, setStartingNextProject] = useState(false);
+  // `null` heisst "der Human hat noch nicht angefasst" — dann gilt die
+  // gespeicherte Wahl, sonst kein Branch.
+  const [branchChoice, setBranchChoice] = useState<string | null>(null);
+  const [customBranch, setCustomBranch] = useState("");
+  // Die Branches haengen am *im Formular* gewaehlten Projekt, nicht am
+  // Onboarding — das gibt es zu diesem Zeitpunkt noch gar nicht.
+  const [formBranchOptions, setFormBranchOptions] = useState<DeliveryBranchOptions | null>(null);
   const planningNextFeature = onboarding.status === "completed";
   const workflow = describeProjectWorkflow(onboarding, progress, {
     stalls,
     phaseSince: onboarding.updatedAt,
+    agentRunning,
+    refinementWaits: onboarding.refinementWaits,
   });
+  // Im Startformular gilt das dort gewaehlte Projekt, sonst das Onboarding.
+  const activeBranchOptions = formBranchOptions ?? branchOptions;
+  const suggestedBranch = activeBranchOptions?.suggestion ?? "";
+  const storedBranch = activeBranchOptions?.selected ?? onboarding.deliveryBranch ?? null;
+  // Kein Branch ist die Vorgabe. Einen zu erfinden hiesse, die Agents auf einen
+  // Branch zu schicken, den niemand entschieden hat.
+  const selectedBranch = branchChoice ?? storedBranch ?? NO_BRANCH_OPTION;
+  const deliveryBranch =
+    selectedBranch === NO_BRANCH_OPTION
+      ? ""
+      : selectedBranch === NEW_BRANCH_OPTION
+        ? customBranch.trim()
+        : selectedBranch;
+
+  useEffect(() => {
+    if (!projectId || !onLoadBranches) {
+      setFormBranchOptions(null);
+      return;
+    }
+
+    let cancelled = false;
+    void onLoadBranches(projectId).then((options) => {
+      if (!cancelled) setFormBranchOptions(options);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, onLoadBranches]);
 
   function submitStart(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    void onStart({ projectId, brief, constraints, skipSprintPlanning });
+    void onStart({ projectId, brief, constraints, skipSprintPlanning, deliveryBranch });
   }
 
   function startNextFeature() {
@@ -143,6 +205,18 @@ export function ProjectOnboardingPanel({
             </span>
           </label>
 
+          <div className="project-onboarding-field-wide">
+            <DeliveryBranchPicker
+              busy={busy || !projectId}
+              options={activeBranchOptions}
+              selected={selectedBranch}
+              customBranch={customBranch}
+              suggestion={suggestedBranch}
+              onSelect={setBranchChoice}
+              onCustomChange={setCustomBranch}
+            />
+          </div>
+
           <div className="project-onboarding-actions project-onboarding-field-wide">
             <button className="btn btn-primary" type="submit" disabled={busy || projects.length === 0}>
               {busy ? "Starting…" : planningNextFeature ? "Start feature analysis" : "Start technical analysis"}
@@ -159,7 +233,7 @@ export function ProjectOnboardingPanel({
           run: onActivate,
         }
       : onboarding.status === "sprint_planning"
-        ? { label: "Start first sprint", run: onStartSprint }
+        ? { label: "Start first sprint", run: () => onStartSprint({ deliveryBranch }) }
       : onboarding.status === "completed" && canStart
         ? { label: "Plan next feature", run: startNextFeature }
       : null;
@@ -179,7 +253,8 @@ export function ProjectOnboardingPanel({
   const actionReady = backlogInProgress
     ? progress.totalTasks > 0
     : onboarding.status === "sprint_planning"
-      ? canStartSprint
+      ? // Der Branch ist optional; nur eine angefangene, leere Eingabe haelt auf.
+        canStartSprint && !(selectedBranch === NEW_BRANCH_OPTION && deliveryBranch.length === 0)
       : true;
   const actionBlockedReason = backlogInProgress
     ? "The Product Owner has not created any stories yet."
@@ -196,6 +271,9 @@ export function ProjectOnboardingPanel({
     onboarding.status === "backlog_in_progress" ||
     onboarding.status === "sprint_planning" ||
     onboarding.status === "active";
+  // Ein Ablauf, der schon Stories hat, laesst sich zurueckstellen. Vor der
+  // Analyse gibt es nichts, worauf man zurueckstellen koennte.
+  const canReset = canApproveScope;
 
   return (
     <section className="project-onboarding project-onboarding-status" aria-labelledby="project-onboarding-title">
@@ -330,6 +408,18 @@ export function ProjectOnboardingPanel({
           </p>
         )}
 
+        {sprintPlanning && (
+          <DeliveryBranchPicker
+            busy={busy}
+            options={branchOptions}
+            selected={selectedBranch}
+            customBranch={customBranch}
+            suggestion={suggestedBranch}
+            onSelect={setBranchChoice}
+            onCustomChange={setCustomBranch}
+          />
+        )}
+
         {action && (
           <div className="project-onboarding-actions">
             <button
@@ -343,8 +433,171 @@ export function ProjectOnboardingPanel({
             </button>
           </div>
         )}
+
+        {canReset && (
+          <WorkflowReset
+            busy={busy}
+            sprintRunning={onboarding.status === "active"}
+            onReset={onResetWorkflow}
+          />
+        )}
       </div>
     </section>
+  );
+}
+
+interface WorkflowResetProps {
+  busy: boolean;
+  sprintRunning: boolean;
+  onReset: (input: { target: "stories" | "refinement" }) => Promise<void>;
+}
+
+/**
+ * Der Rueckweg im Ablauf.
+ *
+ * Stories → Refinement → Sprint laeuft sonst nur vorwaerts: ein Sprint auf
+ * falscher Grundlage liess sich nur aussitzen. Der Reset ist bewusst
+ * zweistufig — er beendet einen laufenden Sprint und entwertet alle
+ * Schaetzungen, und das soll kein Klick aus Versehen sein.
+ */
+function WorkflowReset({ busy, sprintRunning, onReset }: WorkflowResetProps) {
+  const [pending, setPending] = useState<"stories" | "refinement" | null>(null);
+
+  const label = {
+    stories: "back to story work",
+    refinement: "back to technical refinement",
+  };
+
+  return (
+    <div className="project-onboarding-reset">
+      <p className="project-onboarding-reset-note">
+        <strong>Start the workflow over</strong>
+        <span>
+          {sprintRunning
+            ? "Cancels the running sprint, returns every ticket to the backlog, and drops the current estimates. Comments stay on the tickets."
+            : "Returns every ticket to the backlog and drops the current estimates. Comments stay on the tickets."}
+        </span>
+      </p>
+
+      {pending ? (
+        <div className="project-onboarding-reset-actions">
+          <span className="project-onboarding-reset-confirm">Reset {label[pending]}?</span>
+          <button
+            className="btn btn-primary"
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              const target = pending;
+              setPending(null);
+              void onReset({ target });
+            }}
+          >
+            {busy ? "Working…" : "Yes, reset"}
+          </button>
+          <button
+            className="btn btn-secondary"
+            type="button"
+            disabled={busy}
+            onClick={() => setPending(null)}
+          >
+            Keep going
+          </button>
+        </div>
+      ) : (
+        <div className="project-onboarding-reset-actions">
+          <button
+            className="btn btn-secondary"
+            type="button"
+            disabled={busy}
+            onClick={() => setPending("stories")}
+          >
+            Revise stories
+          </button>
+          <button
+            className="btn btn-secondary"
+            type="button"
+            disabled={busy}
+            onClick={() => setPending("refinement")}
+          >
+            Refine again
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface DeliveryBranchPickerProps {
+  busy: boolean;
+  options?: DeliveryBranchOptions;
+  selected: string;
+  customBranch: string;
+  suggestion: string;
+  onSelect: (value: string) => void;
+  onCustomChange: (value: string) => void;
+}
+
+/**
+ * Die Branchentscheidung des Humans, vor dem Sprintstart.
+ *
+ * Ohne sie erfindet jeder Developer-Run seinen eigenen Feature-Branch: die
+ * Tickets eines Sprints liegen dann auf mehreren Branches, und der
+ * abschliessende Pull Request findet seine Commits nicht wieder.
+ */
+function DeliveryBranchPicker({
+  busy,
+  options,
+  selected,
+  customBranch,
+  suggestion,
+  onSelect,
+  onCustomChange,
+}: DeliveryBranchPickerProps) {
+  const branches = options?.branches ?? [];
+  const creatingBranch = selected === NEW_BRANCH_OPTION;
+  const noBranch = selected === NO_BRANCH_OPTION;
+
+  return (
+    <div className="project-onboarding-branch">
+      <label className="project-onboarding-field">
+        <span>Delivery branch (optional)</span>
+        <select
+          value={selected}
+          onChange={(event) => onSelect(event.target.value)}
+          disabled={busy}
+        >
+          <option value={NO_BRANCH_OPTION}>No branch — leave it to the team</option>
+          <option value={NEW_BRANCH_OPTION}>Create a new branch…</option>
+          {branches.map((branch) => (
+            <option key={branch} value={branch}>
+              {branch}
+              {branch === options?.defaultBranch ? " (default)" : ""}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {creatingBranch && (
+        <label className="project-onboarding-field">
+          <span>Branch name</span>
+          <input
+            type="text"
+            value={customBranch}
+            placeholder={suggestion}
+            onChange={(event) => onCustomChange(event.target.value)}
+            disabled={busy}
+          />
+        </label>
+      )}
+
+      <p className="project-onboarding-branch-note">
+        {options?.error && !noBranch
+          ? options.error
+          : noBranch
+            ? "Without a branch the developers keep deciding for themselves, as before. Pick one to hold the whole sprint on a single branch."
+            : "Every ticket of this sprint is delivered on this branch — one pull request for the whole sprint, not one per ticket."}
+      </p>
+    </div>
   );
 }
 

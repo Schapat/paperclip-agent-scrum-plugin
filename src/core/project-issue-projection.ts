@@ -39,6 +39,16 @@ export interface ProjectIssueProjectionInput {
   description: string | null;
   comments: ProjectIssueCommentSnapshot[];
   agents: Array<Pick<ScrumAgent, 'id' | 'name' | 'role'>>;
+  /**
+   * Kommentare, deren Refinement der Human fuer ungueltig erklaert hat.
+   *
+   * Setzt er den Workflow zurueck, sollen die Tickets erneut verfeinert werden.
+   * Die alten Marker aus dem Ticket zu loeschen waere Geschichtsfaelschung —
+   * sie bleiben stehen und gelten nur nicht mehr. Bewusst ueber Kommentar-IDs
+   * statt ueber einen Zeitpunkt: ein Marker, der in derselben Millisekunde wie
+   * der Reset entsteht, waere sonst stillschweigend verloren.
+   */
+  voidedRefinementCommentIds?: readonly string[];
 }
 
 export interface ProjectRefinementProjection {
@@ -125,6 +135,7 @@ export function projectIssueProjection({
   description,
   comments,
   agents,
+  voidedRefinementCommentIds,
 }: ProjectIssueProjectionInput): ProjectIssueProjection {
   const activeComments = comments
     .filter((comment) => !comment.deletedAt)
@@ -132,7 +143,13 @@ export function projectIssueProjection({
   const projectedComments = activeComments.map((comment) => toTicketComment(issueId, comment, agents));
   const commits = uniqueCommits(activeComments.flatMap((comment) => toCommitEvidence(comment, agents)));
   const decisions = activeComments.flatMap((comment) => toDecision(issueId, comment, agents));
-  const refinement = toRefinement(issueId, description ?? '', activeComments, agents);
+  // Kommentare bleiben vollstaendig sichtbar; nur die entwertete Schaetzung
+  // zaehlt nicht mehr.
+  const voided = new Set(voidedRefinementCommentIds ?? []);
+  const refinementComments = voided.size
+    ? activeComments.filter((comment) => !voided.has(comment.id))
+    : activeComments;
+  const refinement = toRefinement(issueId, description ?? '', refinementComments, agents);
 
   return { comments: projectedComments, commits, decisions, refinement };
 }

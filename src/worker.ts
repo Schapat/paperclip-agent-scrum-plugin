@@ -25,21 +25,35 @@ import {
   heartbeatAwareInstructions,
 } from "./agent-instructions";
 import manifest from "./manifest";
-import type { CeremonyType, ScrumTask, TaskStatus, TicketStall, WorkerState } from "./core/types";
+import type {
+  CeremonyType,
+  ProjectRefinementWait,
+  ScrumTask,
+  TaskStatus,
+  TicketStall,
+  WorkerState,
+} from "./core/types";
 import { createDefaultSettings } from "./core/types";
 import { createCeremonyRecord, createId, createScrumTask } from "./core/factories";
 import {
+  canResetProjectWorkflow,
   canStartNewProjectOnboarding,
+  canRouteDelivery,
   canRunAutomaticDelivery,
   createBacklogDiscoveryPrompt,
   createInitialProjectOnboarding,
   createProjectSprint,
   createTechnicalAnalysisPrompt,
+  isPreDeliveryGate,
   isTechnicalAnalysisComplete,
+  normalizeBranchName,
   parseProjectOnboardingInput,
+  resetProjectOnboarding,
   startProjectOnboarding,
+  suggestDeliveryBranch,
   TECHNICAL_ANALYSIS_CHANGES_REQUESTED_MARKER,
   transitionProjectOnboarding,
+  type ProjectWorkflowResetTarget,
 } from "./core/project-onboarding";
 import {
   projectIssueDetailTask,
@@ -53,6 +67,7 @@ import {
   projectProgress,
 } from "./core/project-issue-projection";
 import {
+  fetchGitHubBranches,
   fetchGitHubCommitChanges,
   parseGitHubRepositoryUrl,
 } from "./core/github-repository";
@@ -66,21 +81,32 @@ import {
   reviewOwnerForProjectIssue,
 } from "./core/review-routing";
 import {
+  GET_WATCHDOG_AGENDA_TOOL,
+  SUBMIT_WATCHDOG_REPORT_TOOL,
+  validateWatchdogReport,
+  watchdogAgenda,
+  watchdogReportSummary,
+} from "./core/watchdog";
+import {
   RECORD_COMMIT_TOOL,
   SUBMIT_FOR_REVIEW_TOOL,
   SUBMIT_QA_VERDICT_TOOL,
+  SUBMIT_REFINEMENT_BATCH_TOOL,
   SUBMIT_REFINEMENT_TOOL,
   commitComment,
   qaVerdictComment,
   refinementComment,
   reviewSubmissionComment,
   validateCommit,
+  validateRefinementBatch,
   validateReviewSubmission,
   validateQaVerdict,
   validateRefinement,
 } from "./core/agent-tools";
 import {
+  LIVE_RUN_STALL_AFTER_MS,
   mergeStalls,
+  liveRunsFromOrchestration,
   stallsFromOrchestration,
   timedOutRunsAwaitingRecovery,
   type OrchestrationSnapshot,
@@ -173,9 +199,6 @@ function declaredCapabilities(description: string): string[] {
  */
 const MAX_REFINEMENT_ATTEMPTS = 3;
 
-/** Wie viele Tickets gleichzeitig beim Technical Lead liegen duerfen. */
-const MAX_CONCURRENT_REFINEMENTS = 2;
-
 /**
  * Wartezeit vor einem automatischen Refinement-Wiederanlauf.
  *
@@ -184,6 +207,14 @@ const MAX_CONCURRENT_REFINEMENTS = 2;
  * Host-Event denselben Auftrag erneut stellen.
  */
 const REFINEMENT_RETRY_AFTER_MS = 15 * 60 * 1000;
+
+/**
+ * Wie lange die Branch-Liste wiederverwendet wird.
+ *
+ * Die Ansicht pollt alle 20 Sekunden; Branches entstehen nicht in dieser
+ * Taktung, und jeder Abruf ist ein GitHub-Aufruf.
+ */
+const BRANCH_OPTIONS_TTL_MS = 2 * 60 * 1000;
 
 /**
  * Der Auftrag, den ein Refinement-Weckruf mitbringt.
@@ -475,6 +506,106 @@ const plugin = definePlugin({
         (task) => task.column === "backlog" && isReady(task)
       );
       return everythingRefined && hasPlannableWork;
+    }
+
+    /** Die Branch-Auswahl, die der Human vor dem Sprintstart trifft. */
+    interface DeliveryBranchOptions {
+      /** Aktuell gewaehlter Branch, sonst `null`. */
+      selected: string | null;
+      /** Vorschlag, solange nichts gewaehlt ist. */
+      suggestion: string;
+      /** Branches des verknuepften Repositories, aelteste Seite zuerst. */
+      branches: string[];
+      defaultBranch: string | null;
+      /** Warum die Liste leer ist — ein leeres Dropdown erklaert sich sonst nicht. */
+      error: string | null;
+    }
+
+    const branchOptionsCache = new Map<string, { at: number; value: DeliveryBranchOptions }>();
+
+    /** Liefert die Branches eines Projekts, gedrosselt und pro Projekt gecacht. */
+    async function branchOptionsForProject(
+      projectId: string,
+      selected: string | null,
+      suggestion: string
+    ): Promise<DeliveryBranchOptions> {
+      const cached = branchOptionsCache.get(projectId);
+      if (cached && Date.now() - cached.at < BRANCH_OPTIONS_TTL_MS) {
+        return { ...cached.value, selected, suggestion };
+      }
+
+      const value = await loadDeliveryBranchOptions(projectId, selected, suggestion);
+      branchOptionsCache.set(projectId, { at: Date.now(), value });
+      return value;
+    }
+
+    /**
+     * Liefert der Host einen lesbaren Orchestrierungs-Snapshot?
+     *
+     * Der Unterschied zwischen "kein Lauf" und "keine Information" entscheidet,
+     * ob die Ansicht "no agent run" schreiben darf. Ohne ihn wuerde ein
+     * fehlendes Recht als untaetiger Agent erscheinen.
+     */
+    let orchestrationReadable = false;
+
+    /**
+     * Liefert die waehlbaren Lieferbranches.
+     *
+     * Der GitHub-Aufruf haengt an einer Ansicht, die alle 20 Sekunden pollt —
+     * deshalb ein kurzer Cache. Ohne verknuepftes Repository bleibt der
+     * Vorschlag uebrig; eintippen kann der Human ihn immer.
+     */
+    async function deliveryBranchOptions(): Promise<DeliveryBranchOptions> {
+      const onboarding = state.projectOnboarding;
+      const selected = onboarding?.deliveryBranch ?? state.currentSprint?.deliveryBranch ?? null;
+      const suggestion = onboarding
+        ? suggestDeliveryBranch(onboarding, state.completedSprints.length + 1)
+        : "feature/delivery-sprint-1";
+
+      // Am Sprint-Gate stellt sich die Frage zuletzt. Fuer das Startformular
+      // laedt die Ansicht die Branches gezielt zum gewaehlten Projekt — dort
+      // steht das Projekt noch gar nicht im Onboarding.
+      if (!companyId || onboarding?.status !== "sprint_planning" || !onboarding.projectId) {
+        return { selected, suggestion, branches: [], defaultBranch: null, error: null };
+      }
+
+      return branchOptionsForProject(onboarding.projectId, selected, suggestion);
+    }
+
+    async function loadDeliveryBranchOptions(
+      projectId: string,
+      selected: string | null,
+      suggestion: string
+    ): Promise<DeliveryBranchOptions> {
+      const empty = { selected, suggestion, branches: [], defaultBranch: null };
+      if (!companyId) return { ...empty, error: null };
+
+      try {
+        const workspace = await ctx.projects.getPrimaryWorkspace(projectId, companyId);
+        const repository = parseGitHubRepositoryUrl(workspace?.repoUrl);
+        if (!repository) {
+          return {
+            ...empty,
+            error: "The project workspace is not linked to a GitHub repository. Type the branch name instead.",
+          };
+        }
+
+        const config = await readConfig();
+        const result = await fetchGitHubBranches(repository, {
+          token: String(config.githubToken ?? "").trim(),
+        });
+        if (!result.valid) return { ...empty, error: result.error };
+
+        return {
+          selected,
+          suggestion,
+          branches: result.branches,
+          defaultBranch: result.defaultBranch,
+          error: null,
+        };
+      } catch (error) {
+        return { ...empty, error: `Could not read the project branches: ${String(error)}` };
+      }
     }
 
     /**
@@ -1046,6 +1177,7 @@ const plugin = definePlugin({
           description: issue.description ?? "",
           comments,
           agents: state.agents,
+          voidedRefinementCommentIds: state.projectOnboarding?.refinementVoidedCommentIds,
         });
         const commits = projection.commits;
         if (commits.length === 0) {
@@ -1176,6 +1308,7 @@ const plugin = definePlugin({
           description: issue.description ?? "",
           comments,
           agents: state.agents,
+          voidedRefinementCommentIds: state.projectOnboarding?.refinementVoidedCommentIds,
         });
         const hasCommitEvidence = projection.commits.length > 0;
         const criteriaVerified = projection.refinement.acceptanceCriteria.every((criterion) => criterion.met);
@@ -1252,26 +1385,63 @@ const plugin = definePlugin({
       }
     }
 
-    /** Restores ready work that was incorrectly assigned to the Technical Lead before sprint approval. */
-    async function returnMisassignedSprintPlanningIssueToBacklog(issue: Issue): Promise<Issue> {
+    /**
+     * Holt Lieferarbeit zurueck, die vor der Sprintfreigabe begonnen wurde.
+     *
+     * Der Sprint ist die Freigabe des Humans, nicht eine Beschriftung. Ein
+     * Agent kann sich trotzdem selbst ein Ticket greifen — ein Heartbeat-Run
+     * hat genau das getan und ein frisch verfeinertes Ticket implementiert und
+     * auf `done` gesetzt, waehrend das Board noch "Sprint planning" zeigte.
+     * Alles, was dabei ausserhalb des Refinements passiert, gehoert unbesetzt
+     * ins Backlog: die Commits bleiben im Ticket dokumentiert, geplant wird das
+     * Ticket erst wieder mit dem Sprint.
+     */
+    async function returnPreSprintDeliveryToBacklog(issue: Issue): Promise<Issue> {
       const onboarding = state.projectOnboarding;
-      if (!companyId || onboarding?.status !== "sprint_planning" || !isProjectOnboardingChildIssue(issue)) {
+      if (!companyId || !isPreDeliveryGate(onboarding) || !isProjectOnboardingChildIssue(issue)) {
         return issue;
       }
 
-      // Vor dem Sprintstart gehoert ein fertig verfeinertes Ticket ins Backlog.
-      // Ein herrenloses TODO waere hier doppelt falsch: die Sprint-Planung darf
-      // noch niemanden zuweisen, und die Uebernahme laeuft erst im aktiven
-      // Sprint — das Ticket bliebe also ohne Besitzer liegen.
-      if (issue.status === "todo" && issue.assigneeAgentId === null) {
+      const technicalLeadId = state.agents.find((agent) => agent.role === "technical_lead")?.id ?? null;
+      // Der Technical Lead *darf* vor dem Sprint an einem Ticket stehen: das
+      // Refinement laeuft ueber genau diese Zuweisung.
+      const isRefinementRun =
+        technicalLeadId !== null &&
+        issue.assigneeAgentId === technicalLeadId &&
+        (issue.status === "todo" || issue.status === "in_progress");
+      const startedDelivery =
+        issue.status === "todo" ||
+        issue.status === "in_progress" ||
+        issue.status === "in_review" ||
+        issue.status === "done";
+
+      if (startedDelivery && !isRefinementRun) {
         try {
-          const returned = await ctx.issues.update(issue.id, { status: "backlog" }, companyId);
-          ctx.logger.info("Returned an unowned sprint-planning ticket to backlog", {
+          const returned = await ctx.issues.update(
+            issue.id,
+            { status: "backlog", assigneeAgentId: null },
+            companyId
+          );
+          // Ein stiller Rueckzug sieht fuer den Agenten wie ein verlorener Lauf
+          // aus und wird beim naechsten Heartbeat wiederholt.
+          await postIssueNotice(
+            issue.id,
+            "pre-sprint-delivery",
+            [
+              "## Delivery starts with the sprint",
+              `Agent Scrum returned this ticket to the backlog: it was in \`${issue.status}\` before the human started the sprint.`,
+              "Nothing here is lost — refinement, comments, and any recorded commits stay on the ticket. Sprint planning assigns a Developer once the human starts the sprint.",
+              "Do not pick up project tickets without an assignment from the Scrum Board.",
+            ].join("\n\n")
+          );
+          ctx.logger.warn("Returned pre-sprint delivery work to backlog", {
             issueId: returned.id,
+            previousStatus: issue.status,
+            previousAssignee: issue.assigneeAgentId ?? null,
           });
           return returned;
         } catch (error) {
-          ctx.logger.warn("Could not return an unowned sprint-planning ticket", {
+          ctx.logger.warn("Could not return pre-sprint delivery work", {
             issueId: issue.id,
             error: String(error),
           });
@@ -1279,7 +1449,7 @@ const plugin = definePlugin({
         }
       }
 
-      if (issue.status !== "blocked") return issue;
+      if (issue.status !== "blocked" || onboarding?.status !== "sprint_planning") return issue;
 
       const technicalLead = state.agents.find((agent) => agent.role === "technical_lead");
       if (!technicalLead || issue.assigneeAgentId !== technicalLead.id) return issue;
@@ -1296,6 +1466,7 @@ const plugin = definePlugin({
           description: issue.description ?? "",
           comments,
           agents: state.agents,
+          voidedRefinementCommentIds: state.projectOnboarding?.refinementVoidedCommentIds,
         });
         const refinement = projection.refinement;
         const readyForSprint =
@@ -1337,7 +1508,11 @@ const plugin = definePlugin({
 
     /** Returns a Technical Lead refinement task to the backlog after its marker is recorded. */
     async function returnRefinedTechnicalLeadIssueToBacklog(issue: Issue): Promise<Issue> {
-      if (!companyId || !isProjectOnboardingChildIssue(issue) || issue.status !== "todo") {
+      if (
+        !companyId ||
+        !isProjectOnboardingChildIssue(issue) ||
+        (issue.status !== "todo" && issue.status !== "in_progress")
+      ) {
         return issue;
       }
 
@@ -1351,6 +1526,7 @@ const plugin = definePlugin({
           description: issue.description ?? "",
           comments,
           agents: state.agents,
+          voidedRefinementCommentIds: state.projectOnboarding?.refinementVoidedCommentIds,
         });
         if (!projection.refinement.refined) {
           // Ein vorhandener, aber unlesbarer Marker ist eine andere Lage als
@@ -1379,6 +1555,10 @@ const plugin = definePlugin({
           return issue;
         }
 
+        // Die Schaetzung ist da. Ein Vermerk "es fehlt eine Schaetzung" gilt
+        // damit nicht mehr — auch wenn der Marker als Kommentar kam statt
+        // durch das Tool, das ihn sonst zuruecknimmt.
+        clearStall(issue.id);
         const returned = await ctx.issues.update(
           issue.id,
           { status: "backlog", assigneeAgentId: null },
@@ -1396,6 +1576,110 @@ const plugin = definePlugin({
         });
         return issue;
       }
+    }
+
+    /**
+     * Fuehrt ein Host-Issue durch die Weiterleitungen, die zu seiner Phase passen.
+     *
+     * Die Kette lief bisher bei jedem Issue-Event ungeprueft — inklusive der
+     * Regel "ein `done` ohne Commit-Nachweis geht mit Developer zurueck nach
+     * Development". Vor dem Sprintstart hat genau diese Regel die Lieferung
+     * gestartet, die das Sprint-Gate verhindern sollte. Sie gilt jetzt nur noch
+     * fuer freigegebene Lieferung; davor greift ausschliesslich die Rueckholung.
+     */
+    /**
+     * Nimmt zurueck, was der Scrum Master an einem Lieferticket veraendert hat.
+     *
+     * Der Scrum Master ist der einzige zeitgesteuerte Watchdog: er laeuft alle
+     * 30 Minuten, auch wenn ihm nichts zugewiesen ist. Genau dabei hat er ein
+     * frisch verfeinertes Ticket ausgecheckt, implementiert und auf `done`
+     * gesetzt — waehrend das Board noch "Sprint planning" zeigte.
+     *
+     * Seine Instruktion verbietet das bereits ("beanspruche keine
+     * Delivery-Arbeit"), aber eine Prosaregel ist keine Durchsetzung. Der
+     * Rueckbau haengt deshalb am Urheber, nicht an der Phase: auch im laufenden
+     * Sprint gehoert ein Ticket dem zugewiesenen Developer, nicht dem
+     * Watchdog. Rueckfallpunkt ist der zuletzt gespiegelte Board-Zustand — er
+     * ist noch nicht ueberschrieben, weil die Spiegelung erst nach dem Routing
+     * laeuft.
+     */
+    async function revertScrumMasterDeliveryClaim(
+      issue: Issue,
+      actorId: string | null
+    ): Promise<Issue> {
+      if (!companyId || !isProjectOnboardingChildIssue(issue)) return issue;
+
+      const scrumMaster = state.agents.find((agent) => agent.role === "scrum_master");
+      if (!scrumMaster) return issue;
+
+      // Zwei Spuren: der Watchdog hat das Ticket geaendert, oder er steht als
+      // Bearbeiter darauf. Die zweite faengt auch den Fall ab, in dem der
+      // Worker das Ereignis verpasst hat und es erst beim Abgleich sieht.
+      const authored = actorId === scrumMaster.id;
+      const selfAssigned = issue.assigneeAgentId === scrumMaster.id;
+      if (!authored && !selfAssigned) return issue;
+
+      const known = state.tasks.find((task) => task.id === issue.id);
+      const previousColumn = known?.column ?? "backlog";
+      const previousAssignee =
+        known?.assignedAgentId && known.assignedAgentId !== scrumMaster.id
+          ? known.assignedAgentId
+          : null;
+      // Ein Kommentar des Scrum Masters ist erlaubt und aendert nichts.
+      if (issue.status === previousColumn && issue.assigneeAgentId === previousAssignee) {
+        return issue;
+      }
+
+      try {
+        const restored = await ctx.issues.update(
+          issue.id,
+          { status: previousColumn, assigneeAgentId: previousAssignee },
+          companyId
+        );
+        await postIssueNotice(
+          issue.id,
+          "scrum-master-delivery-claim",
+          [
+            "## The Scrum Master does not deliver",
+            `Agent Scrum reverted this ticket to \`${previousColumn}\`: the Scrum Master moved or claimed it, and the Scrum Master is a process watchdog, not a delivery role.`,
+            "Document the impediment, wake the responsible role, or escalate to the human — but do not take over a ticket.",
+          ].join("\n\n")
+        );
+        ctx.logger.warn("Reverted a Scrum Master delivery claim", {
+          issueId: issue.id,
+          claimedStatus: issue.status,
+          restoredStatus: previousColumn,
+          restoredAssignee: previousAssignee,
+        });
+        return restored;
+      } catch (error) {
+        ctx.logger.warn("Could not revert the Scrum Master delivery claim", {
+          issueId: issue.id,
+          error: String(error),
+        });
+        return issue;
+      }
+    }
+
+    async function routeProjectIssue(issue: Issue, actorId: string | null): Promise<Issue> {
+      // Zuerst, in jeder Phase: der Watchdog liefert nicht. Stuende diese
+      // Pruefung weiter unten, haette das Commit-Nachweis-Gate den vom Scrum
+      // Master auf `done` gesetzten Ticket schon einen Developer zugewiesen.
+      const owned = await revertScrumMasterDeliveryClaim(issue, actorId);
+
+      if (!canRouteDelivery(state.projectOnboarding)) {
+        // Das Refinement laeuft auch vor dem Sprint — es ist die Vorbedingung
+        // dafuer, dass der Human ihn ueberhaupt starten kann.
+        const refined = await returnRefinedTechnicalLeadIssueToBacklog(owned);
+        return returnPreSprintDeliveryToBacklog(refined);
+      }
+
+      let current = await routeProjectCompletionToQa(owned, actorId);
+      current = await completeFinalQaProjectReview(current);
+      current = await routeProjectReworkToDeveloper(current);
+      current = await returnRefinedTechnicalLeadIssueToBacklog(current);
+      current = await returnPreSprintDeliveryToBacklog(current);
+      return routeProjectReview(current);
     }
 
     function developerForProjectRework(issueId: string): WorkerState["agents"][number] | null {
@@ -1550,34 +1834,63 @@ const plugin = definePlugin({
           !task.refined &&
           (
             (task.column === "backlog" && task.assignedAgentId === null) ||
-            (task.column === "todo" && task.assignedAgentId === technicalLeadId)
+            ((task.column === "todo" || task.column === "in_progress") &&
+              task.assignedAgentId === technicalLeadId)
           )
       );
     }
 
     /**
-     * Haelt Tickets zurueck, die der Host gar nicht wecken wuerde.
+     * Laeuft fuer dieses Ticket ein Run, der sein Zeitbudget noch einhaelt?
+     *
+     * Der Host meldet einen abgestuerzten Run weiter als "running". Genau
+     * dafuer gibt es `LIVE_RUN_STALL_AFTER_MS`: danach ist er ein Stillstand
+     * und darf keine Anfrage mehr aufhalten.
+     */
+    function isRunningWithinBudget(taskId: string): boolean {
+      const run = state.liveRuns?.find((entry) => entry.taskId === taskId);
+      if (!run) return false;
+
+      const startedAt = Date.parse(run.startedAt);
+      if (!Number.isFinite(startedAt)) return false;
+      return Date.now() - startedAt < LIVE_RUN_STALL_AFTER_MS;
+    }
+
+    interface DeferredRefinement {
+      task: ScrumTask;
+      blockedBy: string[];
+    }
+
+    /**
+     * Trennt Refinement-Kandidaten nach dem, was der Host zulaesst.
      *
      * Der Product Owner verknuepft Stories mit Abhaengigkeiten. Ein Weckruf auf
      * ein blockiertes Issue lehnt der Host mit "Issue is blocked by unresolved
-     * blockers" ab — der Worker hat das als Stillstand vermerkt, das Ticket nie
-     * verfeinert, und damit blieb der Sprint dauerhaft nicht startbar. Die
-     * Abhaengigkeit ist aber kein Fehler, sondern eine Reihenfolge.
+     * blockers" ab. Die Abhaengigkeit ist aber eine *Liefer*reihenfolge — eine
+     * Schaetzung braucht sie nicht. Blockierte Tickets fallen deshalb nicht
+     * mehr stillschweigend heraus, sondern reisen als Zusatzauftrag auf dem
+     * Weckruf eines freien Tickets mit.
      */
-    async function withoutBlockedCandidates(tasks: ScrumTask[]): Promise<ScrumTask[]> {
-      if (!companyId || tasks.length === 0) return tasks;
+    async function partitionRefinementCandidates(
+      tasks: ScrumTask[]
+    ): Promise<{ open: ScrumTask[]; deferred: DeferredRefinement[] }> {
+      const deferred: DeferredRefinement[] = [];
+      if (!companyId || tasks.length === 0) return { open: tasks, deferred };
 
       const open: ScrumTask[] = [];
       for (const task of tasks) {
         try {
           const relations = await ctx.issues.relations.get(task.id, companyId);
-          const blocked = relations.blockedBy.some((blocker) => blocker.status !== "done");
-          if (blocked) {
+          const blockers = relations.blockedBy.filter((blocker) => blocker.status !== "done");
+          if (blockers.length > 0) {
+            deferred.push({
+              task,
+              blockedBy: blockers.map((blocker) => blocker.identifier ?? blocker.title),
+            });
             // Auf eine Abhaengigkeit zu warten ist kein Stillstand, sondern
             // Reihenfolge. Ein frueher vermerkter Weckruf-Fehler an diesem
             // Ticket war genau dieser Fall und wird zurueckgenommen.
             clearStall(task.id);
-            ctx.logger.info("Refinement deferred until blockers clear", { issueId: task.id });
             continue;
           }
         } catch (error) {
@@ -1588,7 +1901,57 @@ const plugin = definePlugin({
         }
         open.push(task);
       }
-      return open;
+      return { open, deferred };
+    }
+
+    /**
+     * Haelt fest, welche Tickets hinter welchem Blocker auf ihr Refinement
+     * warten — und ob ein anderer Weckruf sie mitnimmt.
+     */
+    function recordRefinementWaits(
+      deferred: DeferredRefinement[],
+      carrierTaskId: string | null
+    ): boolean {
+      const onboarding = state.projectOnboarding;
+      if (!onboarding) return false;
+
+      const previous = onboarding.refinementWaits ?? [];
+      const now = new Date().toISOString();
+      const waits: ProjectRefinementWait[] = deferred.map(({ task, blockedBy }) => ({
+        taskId: task.id,
+        blockedBy,
+        carriedBy: carrierTaskId,
+        // Die Wartezeit gehoert dem Ticket, nicht dem Durchlauf: sonst stuende
+        // im Header nach jeder Auswertung wieder "seit weniger als einer Minute".
+        since: previous.find((entry) => entry.taskId === task.id)?.since ?? now,
+      }));
+
+      if (JSON.stringify(waits) === JSON.stringify(previous)) return false;
+
+      state.projectOnboarding = { ...onboarding, refinementWaits: waits, updatedAt: now };
+      return true;
+    }
+
+    /** Gibt dem einzelnen Technical-Lead-Run seinen vollstaendigen Refinement-Batch. */
+    function batchRefinementBrief(tasks: ScrumTask[], deferred: DeferredRefinement[]): string {
+      const entries = [
+        ...tasks.map((task) => ({ task, blockedBy: [] as string[] })),
+        ...deferred,
+      ];
+      const lines = entries.map(({ task, blockedBy }) => {
+        const label = task.identifier ?? task.title;
+        const dependency = blockedBy.length > 0
+          ? ` (Lieferreihenfolge: ${blockedBy.join(", ")})`
+          : "";
+        return `- **${label}** (\`${task.id}\`) — ${task.title}${dependency}`;
+      });
+
+      return [
+        "### Vollstaendiger Refinement-Batch",
+        "Schliesse jedes der folgenden Tickets in diesem einen Run ab. Rufe genau einmal `submit_refinement_batch` auf und uebergib darin jede exakte `issueId` mit einer Schaetzung und mindestens einem pruefbaren Akzeptanzkriterium. Ein unvollstaendiger Batch wird abgelehnt.",
+        lines.join("\n"),
+        "Aendere weder Status noch Zuweisung eines Tickets; der Plugin-Worker fuehrt gueltig verfeinerte Tickets anschliessend ins Backlog zurueck.",
+      ].join("\n\n");
     }
 
     function reconcileProjectRefinementRequests(): boolean {
@@ -1597,12 +1960,21 @@ const plugin = definePlugin({
 
       const candidates = new Set(refinementCandidates().map((task) => task.id));
       const requested = onboarding.refinementRequestedTaskIds ?? [];
-      const next = requested.filter((taskId) => candidates.has(taskId));
-      if (next.length === requested.length) return false;
+      const restartRemainingBatch =
+        !refinementBatchSubmissionInFlight &&
+        requested.some((taskId) => state.tasks.some((task) => task.id === taskId && task.refined));
+      const next = restartRemainingBatch ? [] : requested.filter((taskId) => candidates.has(taskId));
+      // Ein verfeinertes Ticket wartet auf nichts mehr. Ohne diese Bereinigung
+      // meldete der Header die Wartelage weiter, obwohl die Schaetzung laengst
+      // im Ticket steht.
+      const waits = onboarding.refinementWaits ?? [];
+      const nextWaits = waits.filter((wait) => candidates.has(wait.taskId));
+      if (next.length === requested.length && nextWaits.length === waits.length) return false;
 
       state.projectOnboarding = {
         ...onboarding,
         refinementRequestedTaskIds: next,
+        refinementWaits: nextWaits,
         updatedAt: new Date().toISOString(),
       };
       return true;
@@ -1615,6 +1987,7 @@ const plugin = definePlugin({
     };
 
     let projectRefinementPromise: Promise<ProjectRefinementResult> | null = null;
+    let refinementBatchSubmissionInFlight = false;
     /**
      * True, solange die Refinement-Routine auf diesem Aufrufpfad laeuft.
      *
@@ -1687,26 +2060,9 @@ const plugin = definePlugin({
       );
       const requestedTaskIds = new Set(onboarding.refinementRequestedTaskIds ?? []);
 
-      // Der Technical Lead laeuft mit `maxConcurrentRuns: 1`. Alle offenen
-      // Tickets gleichzeitig zu wecken erzeugt keine Parallelitaet, sondern
-      // eine Warteschlange, hinter der die gesamte Lieferung steht.
-      const openRefinements = state.tasks.filter(
-        (task) =>
-          task.column === "todo" &&
-          task.assignedAgentId === technicalLead.id &&
-          !task.refined
-      ).length;
-      const refinementSlots = Math.max(0, MAX_CONCURRENT_REFINEMENTS - openRefinements);
-      if (refinementSlots === 0 && !force) {
-        if (requestStateChanged) await save();
-        return {
-          requested: false,
-          error: "The Technical Lead is already refining the maximum number of tickets.",
-          taskIds: [] as string[],
-        };
-      }
-
-      const candidates = await withoutBlockedCandidates(refinementCandidates());
+      const { open: candidates, deferred } = await partitionRefinementCandidates(
+        refinementCandidates()
+      );
 
       // Erschoepfte Tickets werden gemeldet, nicht verschwiegen. Der Technical
       // Lead liefert hier dauerhaft kein verwertbares Refinement; das ist eine
@@ -1733,6 +2089,24 @@ const plugin = definePlugin({
       }
       const taskIds = candidates
         .filter((task) => {
+          // Ein laufender Run ist das staerkste "frag nicht nochmal": ein
+          // zweiter Weckruf ueberholt ihn, und der Technical Lead faengt von
+          // vorne an. Genau so hat ein Ticket sechs Anlaeufe verbraucht, ohne
+          // je fertig zu werden — im Minutentakt des Reconcile-Jobs.
+          //
+          // Nur zaehlt "laufend" nicht unbegrenzt: ein Run jenseits seines
+          // Zeitbudgets ist ein Stillstand, kein Fortschritt. Ohne diese Frist
+          // haette die Bremse aus einem haengenden Run eine Dauersperre
+          // gemacht — dieselbe Sorte Deadlock, gegen die sie gebaut ist.
+          if (isRunningWithinBudget(task.id)) return false;
+
+          // Der Deckel gehoert vor die Gedaechtnispruefung. Stand er dahinter,
+          // liess ihn jedes Leeren der Anfrageliste ins Leere laufen: das
+          // Ticket galt als "noch nie gefragt" und wurde erneut gefragt,
+          // waehrend der Zaehler weiterlief.
+          const attempt = attempts.get(task.id);
+          if (!force && attempt && attempt.attempts >= MAX_REFINEMENT_ATTEMPTS) return false;
+
           if (force) return true;
           if (!requestedTaskIds.has(task.id)) return true;
 
@@ -1740,8 +2114,7 @@ const plugin = definePlugin({
           // erkennbar nichts geliefert hat — entweder weil er gescheitert ist
           // oder weil die Frist verstrichen ist. Bisher war jedes Ticket nach
           // genau einem Versuch endgueltig verloren.
-          const attempt = attempts.get(task.id);
-          if (!attempt || attempt.attempts >= MAX_REFINEMENT_ATTEMPTS) return false;
+          if (!attempt) return false;
 
           const failedRun = state.stalls?.some(
             (entry) => entry.taskId === task.id && entry.kind === "run_failed"
@@ -1751,38 +2124,76 @@ const plugin = definePlugin({
           const waitedFor = Date.now() - Date.parse(attempt.lastRequestedAt);
           return Number.isFinite(waitedFor) && waitedFor >= REFINEMENT_RETRY_AFTER_MS;
         })
-        .slice(0, force ? undefined : refinementSlots)
         .map((task) => task.id);
-      if (taskIds.length === 0) {
-        if (requestStateChanged) await save();
+      // Eine Kette blockierter Tickets hat keinen freien Traeger. Genau so
+      // entsteht der Stillstand: der Product Owner reiht die Stories der Reihe
+      // nach auf, das erste Ticket wird verfeinert — und die uebrigen warten
+      // auf ein `done`, das ohne Sprint nie kommt, waehrend der Sprint auf ihre
+      // Schaetzung wartet. Der Kickoff ist nie blockiert und traegt den Batch
+      // deshalb, wenn sonst niemand kann.
+      const carrierTaskId = taskIds[0] ?? (deferred.length > 0 ? rootIssueId : null);
+      if (carrierTaskId === null) {
+        // Auch ohne freies Ticket bleibt die Wartelage eine Tatsache: ohne
+        // diesen Vermerk behauptet der Header weiter, jemand verfeinere gerade.
+        const waitsChanged = recordRefinementWaits(deferred, null);
+        if (requestStateChanged || waitsChanged) await save();
         return { requested: false, error: "No project tickets need technical refinement.", taskIds };
       }
+      const carrierIsKickoff = carrierTaskId === rootIssueId;
 
       try {
-        const wakeups: Array<{ taskId: string; queued: boolean; error: string | null }> = [];
-        for (const taskId of taskIds) {
-          await ctx.issues.update(
-            taskId,
-            { status: "todo", assigneeAgentId: technicalLead.id },
-            refinementCompanyId
-          );
-          // Der Weckruf traegt nur einen Grund-Code. Das erwartete Ergebnis
-          // gehoert ins Ticket, sonst muss der Agent es aus 12 KB Instruktionen
-          // erraten — und genau daran scheitert der Marker.
-          await postIssueNotice(
-            taskId,
-            "refinement-brief",
-            refinementBriefComment(attempts.get(taskId)?.attempts ?? 0)
-          );
-          const wakeup = await requestIssueWakeup(taskId, "project_refinement");
-          wakeups.push({ taskId, queued: wakeup.queued, error: wakeup.error ?? null });
+        // Der Technical Lead darf nur einen Run gleichzeitig ausfuehren. Ein
+        // Carrier vermeidet eine Host-Warteschlange und gibt dem einen Run alle
+        // offenen Stories samt ihrer exakten Tool-IDs mit.
+        // Ein neu aufgetauchtes Ticket ist auch der Anlass, noch unverfeinerte
+        // Tickets aus einer frueheren Einzelwarteschlange mitzunehmen. So
+        // erholt ein bereits vor dem Batch-Fix gestartetes Feature sofort,
+        // statt bis zum zeitbasierten Retry zu warten.
+        const batchTasks = carrierIsKickoff ? [] : candidates;
+        const carriedTaskIds = deferred.map((entry) => entry.task.id);
+        const batchTaskIds = [...batchTasks.map((task) => task.id), ...carriedTaskIds];
+        // Der Kickoff traegt den Auftrag nur; er wird nicht Teil des Batches
+        // und bleibt fuer die Lieferkette unberuehrt.
+        await ctx.issues.update(
+          carrierTaskId,
+          { status: "todo", assigneeAgentId: technicalLead.id },
+          refinementCompanyId
+        );
+        // Der Weckruf traegt nur einen Grund-Code. Das erwartete Ergebnis
+        // gehoert ins Carrier-Ticket, sonst muss der Agent es aus 12 KB
+        // Instruktionen erraten — und genau daran scheitert der Batch.
+        const brief = refinementBriefComment(attempts.get(carrierTaskId)?.attempts ?? 0);
+        const kickoffNote = carrierIsKickoff
+          ? "\n\nJedes Ticket dieses Batches ist durch eine Lieferreihenfolge blockiert und laesst sich nicht einzeln wecken. Der Auftrag steht deshalb hier am Kickoff. Verfeinere die genannten Tickets; an diesem Kickoff-Issue selbst aenderst du nichts."
+          : "";
+        const briefPosted = await postIssueNotice(
+          carrierTaskId,
+          "refinement-brief",
+          `${brief}\n\n${batchRefinementBrief(batchTasks, deferred)}${kickoffNote}`
+        );
+        // Ohne zugestellten Auftrag ist der Weckruf schaedlich: der Technical
+        // Lead startet, findet die erwartete Batch-Liste nicht im Ticket,
+        // liefert keinen gueltigen Marker — und das zaehlt ihm als
+        // Fehlversuch. Die Notizbremse hatte den Auftrag unterdrueckt, der
+        // Weckruf ging trotzdem raus.
+        if (!briefPosted) {
+          ctx.logger.warn("Skipped a refinement wake-up because its brief was suppressed", {
+            issueId: carrierTaskId,
+            taskIds: batchTaskIds,
+          });
+          if (requestStateChanged) await save();
+          return {
+            requested: false,
+            error: "The refinement brief could not be posted; waking the Technical Lead without it would only burn an attempt.",
+            taskIds,
+          };
         }
-        const failedWakeup = wakeups.find((wakeup) => !wakeup.queued);
-        if (failedWakeup) {
-          throw new Error(failedWakeup.error ?? "Could not queue project refinement.");
+        const wakeup = await requestIssueWakeup(carrierTaskId, "project_refinement");
+        if (!wakeup.queued) {
+          throw new Error(wakeup.error ?? "Could not queue project refinement.");
         }
         const now = new Date().toISOString();
-        for (const taskId of taskIds) {
+        for (const taskId of batchTaskIds) {
           const previous = attempts.get(taskId);
           attempts.set(taskId, {
             taskId,
@@ -1792,21 +2203,30 @@ const plugin = definePlugin({
         }
         state.projectOnboarding = {
           ...onboarding,
-          refinementRequestedTaskIds: [...new Set([...requestedTaskIds, ...taskIds])],
+          refinementRequestedTaskIds: [...new Set([...requestedTaskIds, ...batchTaskIds])],
           refinementAttempts: [...attempts.values()],
           updatedAt: now,
         };
+        recordRefinementWaits(deferred, carrierTaskId);
         state.ceremonies.push(
           createCeremonyRecord(
             "backlog_refinement",
             state.currentSprint?.id ?? null,
-            `Paperclip refinement requested for ${taskIds.length} ticket(s).`,
-            { taskIds }
+            carriedTaskIds.length > 0
+              ? `Paperclip batch refinement requested for ${batchTaskIds.length} ticket(s); ${carriedTaskIds.length} delivery-blocked ticket(s) are included.`
+              : `Paperclip batch refinement requested for ${batchTaskIds.length} ticket(s).`,
+            { taskIds: batchTaskIds }
           )
         );
         await save();
-        ctx.logger.info("Project refinement requested", { taskIds, technicalLeadId: technicalLead.id, source });
-        return { requested: true, error: null, taskIds };
+        ctx.logger.info("Project refinement requested", {
+          taskIds: batchTaskIds,
+          carrierTaskId,
+          carriedTaskIds,
+          technicalLeadId: technicalLead.id,
+          source,
+        });
+        return { requested: true, error: null, taskIds: batchTaskIds };
       } catch (error) {
         ctx.logger.warn("Could not request project refinement", {
           taskIds,
@@ -1922,6 +2342,23 @@ const plugin = definePlugin({
               state.currentSprint.taskIds.push(plannedTask.id);
             }
             state.currentSprint.updatedAt = new Date().toISOString();
+          }
+          // Der Lieferbranch steht im Ticket, nicht nur im Sprint: der Agent
+          // liest das Ticket, nicht den Board-State — und der Human sieht am
+          // Ticket, wohin es geliefert wird.
+          const deliveryBranch =
+            state.currentSprint?.deliveryBranch ?? state.projectOnboarding?.deliveryBranch ?? null;
+          if (plannedTask) plannedTask.deliveryBranch = deliveryBranch;
+          if (deliveryBranch) {
+            await postIssueNotice(
+              task.id,
+              "delivery-branch",
+              [
+                "## Sprint assignment",
+                `**Delivery branch:** \`${deliveryBranch}\``,
+                "Work on this branch and push the ticket commits there. Do not create a branch or a pull request per ticket — the whole sprint delivers on this one branch.",
+              ].join("\n\n")
+            );
           }
           plannedTaskIds.push(task.id);
           await requestIssueWakeup(task.id, "project_sprint_planning");
@@ -2067,8 +2504,18 @@ const plugin = definePlugin({
           companyId,
           includeSubtree: true,
         });
+        // Ab hier ist "kein laufender Run" eine Aussage und keine Luecke.
+        orchestrationReadable = true;
         const knownTaskIds = new Set(state.tasks.map((task) => task.id));
         const recoveryChanged = await recoverTimedOutAgentRuns(summary, knownTaskIds);
+        // Der Kickoff ist kein Kanban-Ticket, traegt aber die Analyse- und
+        // Backlog-Laeufe. Ohne ihn haette die Ansicht in genau den Phasen keine
+        // Belege, in denen sie am meisten behauptet.
+        const runScope = new Set([...knownTaskIds, rootIssueId]);
+        const liveRuns = liveRunsFromOrchestration(summary, runScope);
+        const liveRunsChanged =
+          JSON.stringify(liveRuns) !== JSON.stringify(state.liveRuns ?? []);
+        if (liveRunsChanged) state.liveRuns = liveRuns;
         const observed = stallsFromOrchestration(
           summary,
           knownTaskIds
@@ -2077,9 +2524,21 @@ const plugin = definePlugin({
         const settled = new Set(
           state.tasks.filter((task) => task.column === "done").map((task) => task.id)
         );
-        const merged = mergeStalls(state.stalls ?? [], observed, settled);
+        const refined = new Set(
+          state.tasks.filter((task) => task.refined).map((task) => task.id)
+        );
+        const merged = mergeStalls(state.stalls ?? [], observed, settled, refined, {
+          issueId: rootIssueId,
+          phaseChangedAt: state.projectOnboarding?.updatedAt ?? new Date(0).toISOString(),
+        });
         annotateTimeoutRecoveryStalls(merged, summary, knownTaskIds);
-        if (!recoveryChanged && JSON.stringify(merged) === JSON.stringify(state.stalls ?? [])) return false;
+        if (
+          !recoveryChanged &&
+          !liveRunsChanged &&
+          JSON.stringify(merged) === JSON.stringify(state.stalls ?? [])
+        ) {
+          return false;
+        }
 
         state.stalls = merged;
         if (observed.length > 0) {
@@ -2093,6 +2552,7 @@ const plugin = definePlugin({
         // Fehlt die Capability oder antwortet der Host nicht, bleibt die
         // ereignisbasierte Erfassung die Grundlage. Das ist weniger, aber nicht
         // falsch — deshalb nur eine Warnung.
+        orchestrationReadable = false;
         ctx.logger.warn("Could not read host orchestration summary", { error: String(error) });
         return false;
       }
@@ -2331,14 +2791,7 @@ const plugin = definePlugin({
             offset
           );
           for (const issue of issues) {
-            let current = issue;
-            if (route) {
-              current = await routeProjectCompletionToQa(current, null);
-              current = await completeFinalQaProjectReview(current);
-              current = await routeProjectReworkToDeveloper(current);
-              current = await returnMisassignedSprintPlanningIssueToBacklog(current);
-              current = await routeProjectReview(current);
-            }
+            const current = route ? await routeProjectIssue(issue, null) : issue;
             const result = syncProjectOnboardingIssue(
               state.tasks,
               onboarding,
@@ -3010,12 +3463,7 @@ const plugin = definePlugin({
         const issue = await ctx.issues.get(event.entityId, companyId);
         if (!issue) return false;
 
-        const completionGatedIssue = await routeProjectCompletionToQa(issue, event.actorId ?? null);
-        const qaCompletedIssue = await completeFinalQaProjectReview(completionGatedIssue);
-        const reworkRoutedIssue = await routeProjectReworkToDeveloper(qaCompletedIssue);
-        const refinedIssue = await returnRefinedTechnicalLeadIssueToBacklog(reworkRoutedIssue);
-        const recoveredIssue = await returnMisassignedSprintPlanningIssueToBacklog(refinedIssue);
-        const routedIssue = await routeProjectReview(recoveredIssue);
+        const routedIssue = await routeProjectIssue(issue, event.actorId ?? null);
         const result = syncProjectOnboardingIssue(
           state.tasks,
           state.projectOnboarding,
@@ -3195,6 +3643,9 @@ const plugin = definePlugin({
         canStartProjectSprint: canStartProjectSprint(),
         projectProgress: projectProgress(projectTasks),
         stalls: state.stalls ?? [],
+        liveRuns: state.liveRuns ?? [],
+        liveRunsKnown: orchestrationReadable,
+        deliveryBranchOptions: await deliveryBranchOptions(),
       };
     });
 
@@ -3259,6 +3710,7 @@ const plugin = definePlugin({
         brief: params.brief,
         constraints: params.constraints,
         skipSprintPlanning: params.skipSprintPlanning,
+        deliveryBranch: params.deliveryBranch,
       });
       if (!parsed.valid) return { started: false, error: parsed.error };
 
@@ -3321,6 +3773,27 @@ const plugin = definePlugin({
         projectOnboarding: state.projectOnboarding,
         wakeup,
       };
+    });
+
+    /**
+     * Die Branches eines Projekts, bevor es ein Onboarding dafuer gibt.
+     *
+     * Das Startformular fragt danach, sobald der Human ein Projekt waehlt —
+     * dort steht das Projekt noch nirgends im State. Ohne diesen Weg bliebe die
+     * Branchwahl an das Sprint-Gate gebunden, und eine kleine Umsetzung, die es
+     * ueberspringt, wuerde nie danach gefragt.
+     */
+    registerCompanyAction("listProjectBranches", async (params) => {
+      if (!companyId) return { branches: [], error: "No company context." };
+
+      const projectId = typeof params.projectId === "string" ? params.projectId.trim() : "";
+      if (!projectId) return { branches: [], error: "Choose a Paperclip project first." };
+
+      const onboarding = state.projectOnboarding;
+      const suggestion = onboarding
+        ? suggestDeliveryBranch(onboarding, state.completedSprints.length + 1)
+        : "feature/delivery-sprint-1";
+      return branchOptionsForProject(projectId, onboarding?.deliveryBranch ?? null, suggestion);
     });
 
     registerCompanyAction("fetchTicketCommitChanges", async (params) => {
@@ -3497,7 +3970,7 @@ const plugin = definePlugin({
       };
     });
 
-    registerCompanyAction("startProjectSprint", async () => {
+    registerCompanyAction("startProjectSprint", async (params) => {
       if (!companyId) return { started: false, error: "No company context." };
 
       await syncOnboardingProjectIssues();
@@ -3515,20 +3988,43 @@ const plugin = definePlugin({
         };
       }
 
+      // Der Branch ist optional: waehlt der Human keinen, bleibt es beim
+      // bisherigen Verhalten des Teams. Waehlt er einen, gilt er fuer alle
+      // Tickets des Sprints. Was nicht passieren darf: dass das Board ihm
+      // ungefragt einen erfindet und die Agents auf einen Branch schickt, den
+      // niemand entschieden hat.
+      const requestedBranch = params.deliveryBranch ?? onboarding.deliveryBranch ?? null;
+      const hasBranchRequest = typeof requestedBranch === "string" && requestedBranch.trim() !== "";
+      if (hasBranchRequest && !normalizeBranchName(requestedBranch)) {
+        return { started: false, error: "That is not a usable Git branch name." };
+      }
+      const deliveryBranch = hasBranchRequest ? normalizeBranchName(requestedBranch) : null;
+
       const sprint = createProjectSprint({
-        onboarding,
+        onboarding: { ...onboarding, deliveryBranch },
         id: createId(),
         sprintNumber: state.completedSprints.length + 1,
         lengthWeeks: state.settings.sprint.lengthWeeks,
       });
       state.currentSprint = sprint;
-      state.projectOnboarding = transitionProjectOnboarding(onboarding, "active");
+      state.projectOnboarding = {
+        ...transitionProjectOnboarding(onboarding, "active"),
+        deliveryBranch,
+      };
       await save();
 
       try {
         await createIssueComment(
           onboarding.rootIssueId,
-          `## ${sprint.name} started\n\nThe human approved the first sprint. Agent Scrum will plan refined backlog issues through the Paperclip workflow.`,
+          [
+            `## ${sprint.name} started`,
+            "The human approved the first sprint. Agent Scrum will plan refined backlog issues through the Paperclip workflow.",
+            deliveryBranch
+              ? `**Delivery branch:** \`${deliveryBranch}\` — every ticket of this sprint is delivered on this branch. Do not open a branch per ticket.`
+              : null,
+          ]
+            .filter((part): part is string => part !== null)
+            .join("\n\n"),
           companyId
         );
       } catch (error) {
@@ -3543,6 +4039,150 @@ const plugin = definePlugin({
         started: true,
         sprint: state.currentSprint,
         projectOnboarding: state.projectOnboarding,
+      };
+    });
+
+    /**
+     * Stellt den Projektablauf auf eine fruehere Stufe zurueck.
+     *
+     * Ein Sprint, der auf falschen Stories oder falschen Schaetzungen laeuft,
+     * war bisher nicht zurueckzuholen: die Statusuebergaenge laufen nur
+     * vorwaerts, und die alten Refinement-Marker haetten jede Story sofort
+     * wieder als sprintreif ausgewiesen. Der Reset raeumt beides — er beendet
+     * den Sprint, holt jedes Ticket unbesetzt ins Backlog und entwertet die
+     * bisherigen Schaetzungen ueber einen Zeitstempel, ohne einen einzigen
+     * Kommentar zu loeschen.
+     */
+    registerCompanyAction("resetProjectWorkflow", async (params) => {
+      if (!companyId) return { reset: false, error: "No company context." };
+
+      const target: ProjectWorkflowResetTarget =
+        params.target === "stories" ? "stories" : "refinement";
+      const onboarding = state.projectOnboarding;
+      if (!onboarding?.rootIssueId || !canResetProjectWorkflow(onboarding)) {
+        return {
+          reset: false,
+          error: "There is no running project workflow to reset.",
+        };
+      }
+      const rootIssueId = onboarding.rootIssueId;
+
+      await syncOnboardingProjectIssues();
+      const projectTasks = state.tasks.filter((task) => task.parentId === rootIssueId);
+      const returnedTaskIds: string[] = [];
+      // Genau der Kommentar, der die aktuelle Schaetzung traegt, wird entwertet
+      // — nicht ein Zeitfenster. Ein neuer Marker zaehlt dadurch sofort, auch
+      // wenn er in derselben Millisekunde entsteht.
+      const voidedCommentIds: string[] = [];
+      for (const task of projectTasks) {
+        try {
+          const comments = await readComments(task.id);
+          const sourceCommentId = projectIssueProjection({
+            issueId: task.id,
+            description: task.description,
+            comments,
+            agents: state.agents,
+            voidedRefinementCommentIds: onboarding.refinementVoidedCommentIds,
+          }).refinement.sourceCommentId;
+          if (sourceCommentId) voidedCommentIds.push(sourceCommentId);
+
+          const returned = await ctx.issues.update(
+            task.id,
+            { status: "backlog", assigneeAgentId: null },
+            companyId
+          );
+          syncProjectOnboardingIssue(state.tasks, onboarding, await withHostComments(returned), null, state.agents);
+          returnedTaskIds.push(task.id);
+        } catch (error) {
+          ctx.logger.warn("Could not return a project ticket during the workflow reset", {
+            issueId: task.id,
+            error: String(error),
+          });
+        }
+      }
+
+      // Ein abgebrochener Sprint ist kein abgeschlossener: er wandert nicht in
+      // die Historie, aus der die Velocity gerechnet wird.
+      const cancelledSprint = state.currentSprint?.name ?? null;
+      state.currentSprint = null;
+      state.projectOnboarding = resetProjectOnboarding(onboarding, target, voidedCommentIds);
+      for (const task of state.tasks) {
+        if (task.parentId !== rootIssueId) continue;
+        task.sprintId = null;
+        task.refined = false;
+        task.storyPoints = 0;
+        task.acceptanceCriteria = [];
+      }
+      state.metrics = recalculateMetrics(state);
+      state.ceremonies.push(
+        createCeremonyRecord(
+          "sprint_planning",
+          null,
+          target === "stories"
+            ? `Human reset the workflow to Product Owner story work for ${returnedTaskIds.length} ticket(s).`
+            : `Human reset the workflow to technical refinement for ${returnedTaskIds.length} ticket(s).`,
+          { taskIds: returnedTaskIds }
+        )
+      );
+      await save();
+
+      try {
+        await createIssueComment(
+          rootIssueId,
+          [
+            `## Workflow reset to ${target === "stories" ? "story work" : "technical refinement"}`,
+            cancelledSprint
+              ? `The human cancelled **${cancelledSprint}** and returned every ticket to the backlog.`
+              : "The human returned every ticket to the backlog.",
+            "Earlier estimates and acceptance criteria no longer count. The comments stay on the tickets as history; sprint planning waits for a fresh refinement.",
+            target === "stories"
+              ? "Product Owner: revise the stories first — split, drop, or rewrite them to match the current request."
+              : "Technical Lead: estimate the existing stories again.",
+          ].join("\n\n"),
+          companyId
+        );
+      } catch (error) {
+        ctx.logger.warn("Could not record the workflow reset", {
+          issueId: rootIssueId,
+          error: String(error),
+        });
+      }
+
+      // Die naechste Stufe faengt selbst wieder an zu laufen: Stories ueber den
+      // Product Owner, Schaetzungen ueber den Technical Lead.
+      let wakeup: { queued: boolean; error?: string | null } = { queued: false };
+      let refinement: ProjectRefinementResult | null = null;
+      if (target === "stories") {
+        const productOwner = state.agents.find((agent) => agent.role === "product_owner");
+        if (productOwner) {
+          await ctx.issues.update(
+            rootIssueId,
+            {
+              description: createBacklogDiscoveryPrompt(state.projectOnboarding),
+              status: "todo",
+              assigneeAgentId: productOwner.id,
+            },
+            companyId
+          );
+          wakeup = await requestIssueWakeup(rootIssueId, "project_onboarding_backlog_reset");
+        }
+      } else {
+        refinement = await requestProjectRefinement("automatic", true);
+      }
+
+      ctx.logger.info("Project workflow reset", {
+        target,
+        cancelledSprint,
+        taskIds: returnedTaskIds,
+      });
+      return {
+        reset: true,
+        target,
+        cancelledSprint,
+        taskIds: returnedTaskIds,
+        projectOnboarding: state.projectOnboarding,
+        wakeup,
+        refinement,
       };
     });
 
@@ -3614,10 +4254,10 @@ const plugin = definePlugin({
 
       try {
         const issue = await ctx.issues.get(issueId, companyId);
-        if (!issue || issue.projectId !== onboarding.projectId) {
+        if (!issue) {
           return {
             approved: false,
-            error: "Only tickets from the active Paperclip project can join this project request.",
+            error: "The held ticket is no longer available.",
           };
         }
 
@@ -3682,10 +4322,10 @@ const plugin = definePlugin({
 
       try {
         const issue = await ctx.issues.get(issueId, companyId);
-        if (!issue || issue.projectId !== onboarding.projectId) {
+        if (!issue) {
           return {
             dismissed: false,
-            error: "Only held tickets from this Paperclip project can be dismissed.",
+            error: "The held ticket is no longer available.",
           };
         }
 
@@ -3764,7 +4404,15 @@ const plugin = definePlugin({
         ].filter(Boolean).join("\n\n");
         const constraints = `Follow-up created from held ticket ${heldIssue.id}.`;
         const provisionalOnboarding = startProjectOnboarding({
-          input: { projectId: project.id, brief, constraints, skipSprintPlanning: false },
+          input: {
+            projectId: project.id,
+            brief,
+            constraints,
+            skipSprintPlanning: false,
+            // Eine Nachfassaktion erbt die Branchwahl des Projekts, statt sie
+            // stillschweigend fallen zu lassen.
+            deliveryBranch: state.projectOnboarding?.deliveryBranch ?? null,
+          },
           projectName: project.name,
           rootIssueId: "pending",
           requiresSprint,
@@ -3802,7 +4450,15 @@ const plugin = definePlugin({
         );
 
         const followUpOnboarding = startProjectOnboarding({
-          input: { projectId: project.id, brief, constraints, skipSprintPlanning: false },
+          input: {
+            projectId: project.id,
+            brief,
+            constraints,
+            skipSprintPlanning: false,
+            // Eine Nachfassaktion erbt die Branchwahl des Projekts, statt sie
+            // stillschweigend fallen zu lassen.
+            deliveryBranch: state.projectOnboarding?.deliveryBranch ?? null,
+          },
           projectName: project.name,
           rootIssueId: rootIssue.id,
           requiresSprint,
@@ -3945,6 +4601,133 @@ const plugin = definePlugin({
       return { ok: true, issueId };
     }
 
+    function expectedRefinementBatchTaskIds(): string[] {
+      const requested = new Set(state.projectOnboarding?.refinementRequestedTaskIds ?? []);
+      return refinementCandidates()
+        .filter((task) => requested.has(task.id))
+        .map((task) => task.id);
+    }
+
+    /** Nur der Scrum Master fuehrt einen Watchdog-Lauf. */
+    function authorizeWatchdogCall(
+      runCtx: ToolRunContext
+    ): { ok: true } | { ok: false; error: string } {
+      const agent = state.agents.find((entry) => entry.id === runCtx.agentId);
+      if (!agent || agent.role !== 'scrum_master') {
+        return { ok: false, error: 'Only the Scrum Master may use this tool.' };
+      }
+      return { ok: true };
+    }
+
+    ctx.tools.register(
+      GET_WATCHDOG_AGENDA_TOOL,
+      {
+        displayName: 'Read the watchdog agenda',
+        description:
+          'Return the impediments a Scrum Master watchdog run has to look at. An empty agenda ends the run.',
+        parametersSchema: toolSchema(GET_WATCHDOG_AGENDA_TOOL),
+      },
+      async (_params, runCtx) => {
+        const auth = authorizeWatchdogCall(runCtx);
+        if (!auth.ok) return { error: auth.error };
+
+        const agenda = watchdogAgenda(state);
+        if (agenda.clear) {
+          return {
+            content: [
+              'Agenda: empty.',
+              `Nothing on this board is stuck (${agenda.checkedTasks} ticket(s) checked).`,
+              'Your run ends here. Call submit_watchdog_report with clear=true and stop. Do not look for other work.',
+            ].join('\n\n'),
+          };
+        }
+
+        const lines = agenda.items.map((item) => {
+          const label = item.identifier ?? item.taskId ?? 'board';
+          const title = item.title ? ` — ${item.title}` : '';
+          return `- [${item.kind}] ${label}${title}\n  ${item.detail}\n  Responsible: ${item.owner}${item.taskId ? `\n  taskId: ${item.taskId}` : ''}`;
+        });
+
+        return {
+          content: [
+            `Agenda: ${agenda.items.length} item(s).`,
+            lines.join('\n'),
+            'Read the named tickets, then call submit_watchdog_report exactly once with one finding per item. Do not change any ticket status or assignee, and do not implement anything — the board wakes the responsible role from your report.',
+          ].join('\n\n'),
+        };
+      }
+    );
+
+    ctx.tools.register(
+      SUBMIT_WATCHDOG_REPORT_TOOL,
+      {
+        displayName: 'Submit the watchdog report',
+        description:
+          'The single final act of a watchdog run: report impediments so the board can wake the responsible role.',
+        parametersSchema: toolSchema(SUBMIT_WATCHDOG_REPORT_TOOL),
+      },
+      async (params, runCtx) => {
+        const auth = authorizeWatchdogCall(runCtx);
+        if (!auth.ok) return { error: auth.error };
+
+        const parsed = validateWatchdogReport(params);
+        if (!parsed.ok) return { error: parsed.error };
+
+        const rootIssueId = state.projectOnboarding?.rootIssueId ?? null;
+        const findings = parsed.value.findings.filter(
+          (finding) =>
+            !finding.taskId ||
+            state.tasks.some((task) => task.id === finding.taskId && task.parentId === rootIssueId)
+        );
+
+        state.ceremonies.push(
+          createCeremonyRecord(
+            'impediment_resolution',
+            state.currentSprint?.id ?? null,
+            watchdogReportSummary({ ...parsed.value, findings }),
+            { taskIds: findings.flatMap((finding) => (finding.taskId ? [finding.taskId] : [])) }
+          )
+        );
+        await save();
+
+        // Wecken ist Sache des Boards: der Watchdog benennt nur, was steht. So
+        // bleibt die Zustaendigkeit dort, wo sie nachvollziehbar ist.
+        const woken: string[] = [];
+        for (const finding of findings) {
+          if (!finding.taskId) continue;
+          try {
+            await postIssueNotice(
+              finding.taskId,
+              'watchdog-finding',
+              [
+                '## Scrum Master watchdog',
+                finding.note,
+                'Reported by the process watchdog. The responsible role owns the next step; the watchdog does not take the ticket over.',
+              ].join('\n\n')
+            );
+            const wakeup = await requestIssueWakeup(finding.taskId, 'project_watchdog_finding');
+            if (wakeup.queued) woken.push(finding.taskId);
+          } catch (error) {
+            ctx.logger.warn('Could not act on a watchdog finding', {
+              issueId: finding.taskId,
+              error: String(error),
+            });
+          }
+        }
+
+        ctx.logger.info('Watchdog report recorded', {
+          clear: parsed.value.clear,
+          findings: findings.length,
+          woken: woken.length,
+        });
+        return {
+          content: parsed.value.clear
+            ? 'Report recorded: nothing is stuck. Your run is complete.'
+            : `Report recorded for ${findings.length} impediment(s); the board woke ${woken.length} responsible agent(s). Your run is complete.`,
+        };
+      }
+    );
+
     ctx.tools.register(
       SUBMIT_REFINEMENT_TOOL,
       {
@@ -3957,6 +4740,13 @@ const plugin = definePlugin({
         const record = params as Record<string, unknown>;
         const auth = await authorizeToolCall(runCtx, record.issueId, 'technical_lead');
         if (!auth.ok) return { error: auth.error };
+
+        const expectedBatchTaskIds = expectedRefinementBatchTaskIds();
+        if (expectedBatchTaskIds.length > 1 && expectedBatchTaskIds.includes(auth.issueId)) {
+          return {
+            error: 'This ticket belongs to an active refinement batch. Use submit_refinement_batch for every batch ticket in one call.',
+          };
+        }
 
         const parsed = validateRefinement(record);
         if (!parsed.ok) return { error: parsed.error };
@@ -3974,6 +4764,83 @@ const plugin = definePlugin({
         return {
           content: `Refinement recorded: ${parsed.value.storyPoints} points, ${parsed.value.acceptanceCriteria.length} acceptance criteria. The ticket is now eligible for sprint planning.`,
         };
+      }
+    );
+
+    ctx.tools.register(
+      SUBMIT_REFINEMENT_BATCH_TOOL,
+      {
+        displayName: 'Submit complete refinement batch',
+        description:
+          'Record every estimate and acceptance-criteria set from the active project refinement batch in one call.',
+        parametersSchema: toolSchema(SUBMIT_REFINEMENT_BATCH_TOOL),
+      },
+      async (params, runCtx) => {
+        const record = params as Record<string, unknown>;
+        const agent = state.agents.find((entry) => entry.id === runCtx.agentId);
+        if (!agent || agent.role !== 'technical_lead') {
+          return { error: 'Only the technical lead may use this tool.' };
+        }
+
+        const parsed = validateRefinementBatch(record);
+        if (!parsed.ok) return { error: parsed.error };
+
+        const expectedTaskIds = expectedRefinementBatchTaskIds();
+        const submittedTaskIds = parsed.value.refinements.map((entry) => entry.issueId);
+        const submitted = new Set(submittedTaskIds);
+        const expected = new Set(expectedTaskIds);
+        const missing = expectedTaskIds.filter((issueId) => !submitted.has(issueId));
+        const unexpected = submittedTaskIds.filter((issueId) => !expected.has(issueId));
+        if (expectedTaskIds.length === 0) {
+          return { error: 'There is no active project refinement batch.' };
+        }
+        if (missing.length > 0 || unexpected.length > 0) {
+          return {
+            error: `Batch refinement is incomplete. Missing: ${missing.join(', ') || 'none'}. Unexpected: ${unexpected.join(', ') || 'none'}.`,
+          };
+        }
+
+        for (const entry of parsed.value.refinements) {
+          const auth = await authorizeToolCall(runCtx, entry.issueId, 'technical_lead');
+          if (!auth.ok) return { error: auth.error };
+        }
+
+        refinementBatchSubmissionInFlight = true;
+        try {
+          for (const entry of parsed.value.refinements) {
+            await createIssueComment(
+              entry.issueId,
+              refinementComment(entry.refinement),
+              runCtx.companyId,
+              { authorAgentId: runCtx.agentId }
+            );
+            clearStall(entry.issueId);
+          }
+
+          for (const entry of parsed.value.refinements) {
+            const issue = await ctx.issues.get(entry.issueId, runCtx.companyId);
+            if (!issue) throw new Error(`Could not load refined ticket ${entry.issueId}.`);
+
+            const returned = await returnRefinedTechnicalLeadIssueToBacklog(issue);
+            syncProjectOnboardingIssue(
+              state.tasks,
+              state.projectOnboarding,
+              await withHostComments(returned),
+              runCtx.agentId,
+              state.agents
+            );
+          }
+
+          reconcileProjectRefinementRequests();
+          await save();
+          return {
+            content: `Batch refinement recorded for ${parsed.value.refinements.length} tickets. Every ticket is now eligible for sprint planning.`,
+          };
+        } catch (error) {
+          return { error: `Could not record the refinement batch: ${String(error)}` };
+        } finally {
+          refinementBatchSubmissionInFlight = false;
+        }
       }
     );
 

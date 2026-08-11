@@ -8,6 +8,8 @@ import {
   HEARTBEAT_QUEUE_MARKER,
   MANAGED_AGENT_INSTRUCTIONS,
   LEGACY_REPORTING_LINE_MARKER,
+  PROJECT_REFINEMENT_RUN_MARKER,
+  WATCHDOG_PROTOCOL_MARKER,
   REPORTING_LINE_INSTRUCTIONS,
   REPORTING_LINE_MARKER,
   SPRINT_AUTONOMY_MARKER,
@@ -82,6 +84,63 @@ describe('managed agent instruction upgrades', () => {
     expect(upgraded).toContain('`nohup`, `disown`, `setsid`, `screen` oder `tmux`');
     expect(upgraded).toContain('`npm run dev`, `next dev`, `vite` oder einen anderen Dauerprozess');
     expect(heartbeatAwareInstructions('developer-1', upgraded)).toBe(upgraded);
+  });
+
+  it('permits a host-managed project refinement run for the Technical Lead', () => {
+    const upgraded = heartbeatAwareInstructions('technical-lead', '# Existing Technical Lead guidance\n');
+
+    expect(upgraded).toContain(PROJECT_REFINEMENT_RUN_MARKER);
+    expect(upgraded).toContain('`todo` oder `in_progress`');
+    expect(upgraded).toContain('Vollstaendiger Refinement-Batch');
+    expect(upgraded).toContain('`submit_refinement_batch`');
+    expect(upgraded).toContain('weder Status noch Zuweisung');
+    expect(heartbeatAwareInstructions('technical-lead', upgraded)).toBe(upgraded);
+  });
+
+  it('upgrades the earlier single-ticket refinement rule to the batch rule', () => {
+    const existing = '# Existing Technical Lead guidance\n\n## Issue-bound project refinement\n\nRefine only the assigned ticket.\n';
+    const upgraded = heartbeatAwareInstructions('technical-lead', existing);
+
+    expect(upgraded).toContain(PROJECT_REFINEMENT_RUN_MARKER);
+    expect(upgraded).toContain('hat Vorrang vor allen frueheren Issue-bound-Refinement-Regeln');
+    expect(upgraded).toContain('genau einem `submit_refinement_batch`-Aufruf');
+    expect(heartbeatAwareInstructions('technical-lead', upgraded)).toBe(upgraded);
+  });
+
+  it('upgrades the previous batch rule to the enforced atomic batch rule', () => {
+    const existing = '# Existing Technical Lead guidance\n\n## Batch project refinement v3\n\nUse the batch tool when possible.\n';
+    const upgraded = heartbeatAwareInstructions('technical-lead', existing);
+
+    expect(upgraded).toContain(PROJECT_REFINEMENT_RUN_MARKER);
+    expect(upgraded).toContain('`submit_refinement` lehnt ein einzelnes Batch-Ticket ab');
+    expect(heartbeatAwareInstructions('technical-lead', upgraded)).toBe(upgraded);
+  });
+
+  /**
+   * Der Watchdog ist die einzige Rolle mit Timer und damit die einzige, die
+   * ohne Auftrag startet. Ein Verbotssatz hat nicht gereicht — er braucht eine
+   * Aufgabe mit Anfang und Ende.
+   */
+  it('gives the Scrum Master a watchdog run with a beginning and an end', () => {
+    const upgraded = heartbeatAwareInstructions('scrum-master', '# Existing Scrum Master guidance\n');
+
+    expect(upgraded).toContain(WATCHDOG_PROTOCOL_MARKER);
+    expect(upgraded).toContain('`get_watchdog_agenda`');
+    expect(upgraded).toContain('`submit_watchdog_report`');
+    expect(upgraded).toContain('Suche keine Ersatzarbeit');
+    expect(upgraded).toContain('implementierst nichts');
+    // Die vorhandene Anleitung bleibt erhalten, und ein zweiter Durchlauf
+    // haengt den Abschnitt nicht erneut an.
+    expect(upgraded).toContain('# Existing Scrum Master guidance');
+    expect(heartbeatAwareInstructions('scrum-master', upgraded)).toBe(upgraded);
+  });
+
+  it('does not hand the watchdog protocol to a delivery role', () => {
+    for (const agentKey of ['developer-1', 'technical-lead', 'qa-engineer', 'product-owner'] as const) {
+      expect(heartbeatAwareInstructions(agentKey, '# Existing guidance\n')).not.toContain(
+        WATCHDOG_PROTOCOL_MARKER
+      );
+    }
   });
 
   it('uses one feature branch and one feature pull request instead of ticket pull requests', () => {

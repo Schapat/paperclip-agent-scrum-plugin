@@ -12,6 +12,14 @@ export interface ProjectOnboardingInput {
   brief: string;
   constraints: string | null;
   skipSprintPlanning: boolean;
+  /**
+   * Der Lieferbranch, wenn der Human ihn schon hier festlegt.
+   *
+   * Die Frage gehoert eigentlich an den Sprintstart — aber eine kleine
+   * Umsetzung ueberspringt das Sprint-Planning ganz, und dann wuerde sie nie
+   * gestellt. `null` heisst wie ueberall: das Team entscheidet selbst.
+   */
+  deliveryBranch: string | null;
 }
 
 export type ProjectOnboardingInputResult =
@@ -85,6 +93,7 @@ export function parseProjectOnboardingInput(input: {
   brief?: unknown;
   constraints?: unknown;
   skipSprintPlanning?: unknown;
+  deliveryBranch?: unknown;
 }): ProjectOnboardingInputResult {
   const projectId = trimmedString(input.projectId);
   if (!projectId) return { valid: false, error: 'Choose a Paperclip project first.' };
@@ -100,6 +109,7 @@ export function parseProjectOnboardingInput(input: {
       brief,
       constraints: constraints || null,
       skipSprintPlanning: input.skipSprintPlanning === true,
+      deliveryBranch: normalizeBranchName(input.deliveryBranch),
     },
   };
 }
@@ -122,6 +132,10 @@ export function startProjectOnboarding({
     scopeHolds: [],
     brief: input.brief,
     constraints: input.constraints,
+    // Die Branchwahl ueberlebt den ganzen Ablauf: sie wird am Sprintstart
+    // wieder angeboten, gilt aber schon vorher — auch fuer eine kleine
+    // Umsetzung, die das Sprint-Planning ueberspringt.
+    deliveryBranch: input.deliveryBranch,
     startedAt: now,
     updatedAt: now,
   };
@@ -140,9 +154,113 @@ export function transitionProjectOnboarding(
   return { ...onboarding, status: nextStatus, updatedAt: now };
 }
 
+/** Die Stufe, auf die ein Human den Projektablauf zurueckstellen kann. */
+export type ProjectWorkflowResetTarget = 'stories' | 'refinement';
+
+/**
+ * Stellt den Ablauf auf eine fruehere Stufe zurueck.
+ *
+ * Ein Sprint, der auf der falschen Grundlage gestartet ist, laesst sich sonst
+ * nur abwarten: die Statusuebergaenge laufen bewusst nur vorwaerts. Der Reset
+ * ist die ausdrueckliche Ausnahme davon — er kommt vom Human, nicht von einem
+ * Agenten, und deshalb steht er neben `transitionProjectOnboarding` statt die
+ * erlaubten Uebergaenge aufzuweichen.
+ *
+ * `stories` gibt den Backlog an den Product Owner zurueck, `refinement` behaelt
+ * die Stories und laesst den Technical Lead neu schaetzen. Beide Ziele
+ * entwerten die bisherigen Schaetzungen: nach einem Reset ist keine davon mehr
+ * die Grundlage einer Sprintfreigabe.
+ */
+export function resetProjectOnboarding(
+  onboarding: ProjectOnboarding,
+  target: ProjectWorkflowResetTarget,
+  /** Die Refinement-Kommentare, die dieser Reset entwertet. */
+  voidedCommentIds: readonly string[] = [],
+  now = new Date().toISOString()
+): ProjectOnboarding {
+  return {
+    ...onboarding,
+    status: target === 'stories' ? 'backlog_in_progress' : 'sprint_planning',
+    refinementResetAt: now,
+    // Frueher entwertete Marker bleiben entwertet: ein zweiter Reset darf eine
+    // Schaetzung aus der ersten Runde nicht wieder gueltig machen.
+    refinementVoidedCommentIds: [
+      ...new Set([...(onboarding.refinementVoidedCommentIds ?? []), ...voidedCommentIds]),
+    ],
+    refinementRequestedTaskIds: [],
+    refinementAttempts: [],
+    refinementWaits: [],
+    updatedAt: now,
+  };
+}
+
+/** Aus welchen Phasen ein Reset ueberhaupt sinnvoll ist. */
+export function canResetProjectWorkflow(onboarding: ProjectOnboarding | undefined): boolean {
+  return (
+    onboarding?.status === 'backlog_in_progress' ||
+    onboarding?.status === 'sprint_planning' ||
+    onboarding?.status === 'active'
+  );
+}
+
 /** Bestehende Board-Automationen starten erst nach einer Backlog-Freigabe. */
 export function canRunAutomaticDelivery(onboarding: ProjectOnboarding): boolean {
   return onboarding.status === 'active';
+}
+
+/**
+ * Darf das Plugin ein Ticket durch Development, Review und QA reichen?
+ *
+ * Dieselbe Frage wie `canRunAutomaticDelivery`, aber fuer die Host-Ereignisse.
+ * Die Weiterleitungskette lief bisher ungeprueft bei *jedem* Issue-Event — ein
+ * Agent, der sich vor dem Sprintstart selbst ein Ticket auf `done` setzte,
+ * bekam daraufhin vom Plugin einen Developer zugewiesen und die Lieferung lief
+ * am Sprint-Gate vorbei.
+ */
+export function canRouteDelivery(onboarding: ProjectOnboarding | undefined): boolean {
+  return Boolean(onboarding && canRunAutomaticDelivery(onboarding));
+}
+
+/**
+ * Phasen, in denen der Human die Lieferung noch nicht freigegeben hat.
+ *
+ * Der Product Owner schreibt Stories, der Technical Lead verfeinert sie — was
+ * darueber hinausgeht, gehoert zurueck ins Backlog.
+ */
+export function isPreDeliveryGate(onboarding: ProjectOnboarding | undefined): boolean {
+  return onboarding?.status === 'backlog_in_progress' || onboarding?.status === 'sprint_planning';
+}
+
+/** Git erlaubt vieles, aber nicht alles — und ein Branch mit Leerzeichen bricht jeden Push. */
+export function normalizeBranchName(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+
+  const normalized = value
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/[~^:?*[\\\]]/g, '')
+    .replace(/\/{2,}/g, '/')
+    .replace(/^[/.]+|[/.]+$/g, '')
+    .slice(0, 200);
+
+  if (!normalized || normalized.includes('..') || normalized.endsWith('.lock')) return null;
+  return normalized;
+}
+
+/** Schlaegt einen Lieferbranch vor, solange der Human keinen gewaehlt hat. */
+export function suggestDeliveryBranch(
+  onboarding: Pick<ProjectOnboarding, 'projectName' | 'brief'>,
+  sprintNumber = 1
+): string {
+  const source = onboarding.projectName ?? onboarding.brief ?? 'delivery';
+  const slug = source
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+
+  return `feature/${slug || 'delivery'}-sprint-${Math.max(1, sprintNumber)}`;
 }
 
 /** Creates the persisted local sprint context for a host-backed project delivery cycle. */
@@ -171,6 +289,10 @@ export function createProjectSprint({
     goal: onboarding.brief,
     velocity: 0,
     completedPoints: 0,
+    // Der Branch ist eine Sprintentscheidung, keine Ticketentscheidung: alle
+    // Tickets eines Sprints liefern auf denselben Branch, damit am Ende genau
+    // ein Pull Request entsteht.
+    deliveryBranch: onboarding.deliveryBranch ?? null,
     createdAt: now,
     updatedAt: now,
   };

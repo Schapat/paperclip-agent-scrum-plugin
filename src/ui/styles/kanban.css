@@ -872,6 +872,19 @@
   color: var(--color-primary);
 }
 
+.ticket-detail-branch {
+  overflow-wrap: anywhere;
+  color: var(--color-text);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.8125rem;
+}
+
+.ticket-detail-branch em {
+  color: var(--color-text-muted);
+  font-family: inherit;
+  font-style: italic;
+}
+
 .ticket-detail-assignee {
   display: flex;
   flex-direction: column;
@@ -1544,6 +1557,23 @@
 
 .kanban-card-unrefined {
   color: var(--color-warning);
+}
+
+/*
+  Der Lieferbranch am Ticket. Bewusst leise: er ist eine Ortsangabe, kein
+  Alarm — aber er soll ohne Oeffnen des Tickets lesbar sein.
+*/
+.kanban-card-branch {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: var(--spacing-xs);
+  overflow: hidden;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ==========================================================================

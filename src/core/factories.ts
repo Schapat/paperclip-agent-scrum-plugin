@@ -58,6 +58,7 @@ export function createScrumTask(input: ScrumTaskInput): ScrumTask {
     parentId: input.parentId ?? null,
     labels: input.labels ?? [],
     priority: input.priority ?? 'medium',
+    deliveryBranch: input.deliveryBranch ?? null,
 
     acceptanceCriteria: input.acceptanceCriteria ?? [],
     technicalNotes: input.technicalNotes ?? null,

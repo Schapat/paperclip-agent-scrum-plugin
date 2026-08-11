@@ -51,6 +51,7 @@
 }
 
 .project-onboarding-field select,
+.project-onboarding-field input,
 .project-onboarding-field textarea {
   width: 100%;
   border: 1px solid var(--color-surface);
@@ -60,9 +61,32 @@
   font: inherit;
 }
 
-.project-onboarding-field select {
+.project-onboarding-field select,
+.project-onboarding-field input {
   min-height: 36px;
   padding: 0 var(--spacing-sm);
+}
+
+/*
+  Die Branchwahl gehoert unmittelbar vor den Sprintstart: sie ist die letzte
+  Entscheidung, die der Human trifft, bevor die Agents liefern.
+*/
+.project-onboarding-branch {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm);
+  border: 1px solid var(--color-surface);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+}
+
+.project-onboarding-branch-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  line-height: 1.45;
 }
 
 .project-onboarding-field textarea {
@@ -451,4 +475,42 @@ button.project-onboarding-kickoff:focus-visible {
   .project-onboarding-working-dot {
     animation: none;
   }
+}
+
+/*
+  Der Rueckweg im Ablauf steht unter den Vorwaerts-Aktionen und traegt eine
+  Warnfarbe: er beendet einen laufenden Sprint.
+*/
+.project-onboarding-reset {
+  display: grid;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm);
+  border: 1px dashed var(--color-surface);
+  border-radius: var(--radius-sm);
+}
+
+.project-onboarding-reset-note {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.project-onboarding-reset-note strong {
+  color: var(--color-text);
+}
+
+.project-onboarding-reset-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.project-onboarding-reset-confirm {
+  color: var(--color-text);
+  font-size: 0.8125rem;
+  font-weight: 600;
 }

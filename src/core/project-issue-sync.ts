@@ -111,7 +111,7 @@ export function syncProjectOnboardingIssue(
     return { handled: true, changed: false, action: 'unchanged', taskId: issue.id };
   }
 
-  const hostFields = toHostFields(issue, agents);
+  const hostFields = toHostFields(issue, agents, onboarding.refinementVoidedCommentIds);
   if (existingIndex === -1) {
     tasks.push(
       createScrumTask({
@@ -124,6 +124,18 @@ export function syncProjectOnboardingIssue(
         assignedAgentId: hostFields.assignedAgentId,
         parentId: hostFields.parentId,
         labels: hostFields.labels,
+        // Ein Ticket, das erst nach seinem Refinement gespiegelt wird — nach
+        // einem Worker-Neustart der Normalfall — kam bisher ohne Schaetzung und
+        // ohne Akzeptanzkriterien auf dem Board an. Erst die naechste Aenderung
+        // des Host-Issues holte sie nach; blieb sie aus, galt das Ticket
+        // dauerhaft als unverfeinert.
+        storyPoints: hostFields.storyPoints,
+        acceptanceCriteria: hostFields.acceptanceCriteria,
+        technicalNotes: hostFields.technicalNotes,
+        risks: hostFields.risks,
+        refined: hostFields.refined,
+        comments: hostFields.comments,
+        decisions: hostFields.decisions,
         createdAt: hostFields.createdAt,
         updatedAt: hostFields.updatedAt,
         startedAt: hostFields.startedAt,
@@ -231,7 +243,8 @@ interface HostTaskFields {
 
 function toHostFields(
   issue: ProjectIssueSnapshot,
-  agents: Array<Pick<ScrumAgent, 'id' | 'name' | 'role'>>
+  agents: Array<Pick<ScrumAgent, 'id' | 'name' | 'role'>>,
+  voidedRefinementCommentIds: readonly string[] = []
 ): HostTaskFields {
   if (issue.status === 'cancelled') {
     throw new Error('Cancelled issues cannot be materialized as Scrum tasks.');
@@ -242,6 +255,7 @@ function toHostFields(
     description: issue.description,
     comments: issue.comments ?? [],
     agents,
+    voidedRefinementCommentIds,
   });
 
   return {

@@ -60,3 +60,9 @@
 | OP-008 | Betrieb | Lokale Paperclip-Plugin-Installation auf Kiro- und Reporting-Line-Stand aktualisieren | Erledigt | 2026-08-10 |
 | DF-037 | Defekt | Langlebige Shell-Prozesse duerfen Agent-Runs nicht unbemerkt blockieren | Erledigt | 2026-08-10 |
 | DF-038 | Defekt | Run-Timeout darf nicht an den Kiro-Default gebunden sein | Erledigt | 2026-08-10 |
+| DF-039 | Defekt | Abgebrochene Technical-Lead-Refinements duerfen Tickets nicht in In Progress festhalten | Erledigt | 2026-08-10 |
+| OP-009 | Betrieb | Lokale Paperclip-Plugin-Instanz auf den Technical-Lead-Refinement-Fix aktualisieren | Erledigt | 2026-08-10 |
+| DF-040 | Defekt | Vollstaendiges Ticket-Batch-Refinement darf nicht nach der ersten Story abbrechen | Erledigt | 2026-08-10 |
+| DF-041 | Defekt | Angezeigte Scope-Holds ausserhalb des Projekts muessen freigegeben oder verworfen werden koennen | Erledigt | 2026-08-10 |
+| DF-042 | Defekt | Technical-Lead-Batch-Refinement muss alle Storys in einer Tool-Uebergabe abschliessen | Erledigt | 2026-08-10 |
+| DF-043 | Defekt | Partielles Batch-Refinement blockiert verbleibende Storys | Erledigt | 2026-08-10 |

@@ -164,6 +164,14 @@ export interface ScrumTask {
   parentId: string | null;
   labels: string[];
   priority: 'low' | 'medium' | 'high' | 'critical';
+  /**
+   * Branch, auf dem dieses Ticket geliefert wird.
+   *
+   * Beim Einplanen festgehalten, nicht aus dem laufenden Sprint abgeleitet: ein
+   * Ticket aus Sprint 1 behaelt seinen Branch, auch wenn Sprint 2 laengst auf
+   * einem anderen liefert. `null` heisst: der Human hat keinen vorgegeben.
+   */
+  deliveryBranch?: string | null;
 
   // Refinement-Ergebnisse (Technical Lead, Spec §3)
   /** Akzeptanzkriterien — QA prüft diese beim Review */
@@ -226,6 +234,8 @@ export interface ScrumSprint {
   goal: string | null;
   velocity: number;
   completedPoints: number;
+  /** Branch, auf dem die Tickets dieses Sprints geliefert werden. */
+  deliveryBranch?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -466,6 +476,22 @@ export interface ProjectRefinementAttempt {
   lastRequestedAt: string;
 }
 
+/**
+ * Ein Ticket, dessen Refinement hinter einer Abhaengigkeit wartet.
+ *
+ * Der Host lehnt einen Weckruf auf ein blockiertes Issue ab. Das ist kein
+ * Stillstand — aber ohne diesen Vermerk ist es auch nichts: die Ansicht
+ * behauptete waehrenddessen, der Technical Lead arbeite.
+ */
+export interface ProjectRefinementWait {
+  taskId: string;
+  /** Menschenlesbare Kennungen der offenen Blocker, z. B. `TESAA-17`. */
+  blockedBy: string[];
+  /** Wurde das Refinement ueber ein anderes Ticket mitbeauftragt? */
+  carriedBy: string | null;
+  since: string;
+}
+
 export interface ProjectOnboarding {
   status: ProjectOnboardingStatus;
   projectId: string | null;
@@ -483,6 +509,26 @@ export interface ProjectOnboarding {
    * Ticket dauerhaft liegen.
    */
   refinementAttempts?: ProjectRefinementAttempt[];
+  /** Tickets, deren Refinement hinter einem offenen Blocker wartet. */
+  refinementWaits?: ProjectRefinementWait[];
+  /** Zeitpunkt des letzten Workflow-Resets, fuer die Nachvollziehbarkeit. */
+  refinementResetAt?: string | null;
+  /**
+   * Refinement-Kommentare, die ein Workflow-Reset entwertet hat.
+   *
+   * Die Tickets gelten damit wieder als unverfeinert, ohne dass ein Kommentar
+   * verschwindet — die Schaetzung bleibt als Historie lesbar und zaehlt nur
+   * nicht mehr.
+   */
+  refinementVoidedCommentIds?: string[];
+  /**
+   * Der vom Human vor dem Sprintstart gewaehlte Lieferbranch.
+   *
+   * Ohne diese Entscheidung erfindet jeder Developer-Run seinen eigenen
+   * Feature-Branch — die Tickets eines Sprints landen dann auf drei Branches,
+   * und der abschliessende Pull Request findet seine Commits nicht wieder.
+   */
+  deliveryBranch?: string | null;
   /** Ungebundene Agentenarbeit, die auf menschliche Scope-Freigabe wartet. */
   scopeHolds: ProjectScopeHold[];
   brief: string | null;
@@ -550,6 +596,21 @@ export interface WorkerState {
    * abgestuerzter Run vom laufenden Run nicht zu unterscheiden.
    */
   stalls?: TicketStall[];
+  /**
+   * Agent-Runs, die der Host gerade als laufend meldet.
+   *
+   * "Ein Agent arbeitet" war bisher aus dem Phasenstatus abgeleitet — also
+   * geraten. Der Header behauptete Arbeit, waehrend der Technical Lead
+   * nachweislich idle war. Nur der Host weiss, ob ein Lauf existiert.
+   */
+  liveRuns?: LiveAgentRun[];
+}
+
+/** Ein vom Host als laufend gemeldeter Agent-Run. */
+export interface LiveAgentRun {
+  taskId: string;
+  runId: string;
+  startedAt: string;
 }
 
 /** Persistierter Wiederanlauf nach einem nativen Adapter-Timeout. */

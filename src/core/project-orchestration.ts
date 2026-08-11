@@ -11,7 +11,7 @@
  * pruefbar sind.
  */
 
-import type { TicketStall } from './types';
+import type { LiveAgentRun, TicketStall } from './types';
 
 /** Die Teilmenge der Host-Orchestrierung, die das Board auswertet. */
 export interface OrchestrationSnapshot {
@@ -76,6 +76,25 @@ function latestRunsByIssue(
   }
 
   return latestRuns;
+}
+
+/**
+ * Liefert die Runs, die der Host gerade als laufend fuehrt.
+ *
+ * Das ist der einzige Beleg dafuer, dass ueberhaupt ein Agent arbeitet. Die
+ * Ansicht hat diese Frage bisher aus dem Phasenstatus beantwortet und damit
+ * auch dann "Working now" gezeigt, wenn seit einer halben Stunde kein Lauf
+ * mehr existierte.
+ */
+export function liveRunsFromOrchestration(
+  snapshot: OrchestrationSnapshot,
+  knownTaskIds: ReadonlySet<string>
+): LiveAgentRun[] {
+  return [...latestRunsByIssue(snapshot, knownTaskIds).entries()].flatMap(([issueId, run]) =>
+    LIVE_RUN_STATUSES.has(run.status)
+      ? [{ taskId: issueId, runId: run.id, startedAt: run.startedAt ?? run.createdAt }]
+      : []
+  );
 }
 
 /** Liefert Timeouts, fuer die ein neuer, begrenzter Versuch sinnvoll ist. */
@@ -177,7 +196,27 @@ export function mergeStalls(
    * ein fertiges Projekt weiter "blocked — human approval required", weil der
    * Stillstand von vorhin nie jemand zurueckgenommen hat.
    */
-  settledTaskIds: ReadonlySet<string> = new Set()
+  settledTaskIds: ReadonlySet<string> = new Set(),
+  /**
+   * Tickets, die inzwischen verfeinert sind.
+   *
+   * Ein "Refinement fehlt"-Stillstand ueberlebte die Schaetzung, die ihn
+   * aufhebt: er wird nur beim Tool-Aufruf zurueckgenommen, und ein als
+   * Kommentar nachgereichter Marker laeuft nicht durch das Tool. Das Board
+   * meldete danach "blocked" auf einem sprintreifen Backlog.
+   */
+  refinedTaskIds: ReadonlySet<string> = new Set(),
+  /**
+   * Der Kickoff und der Zeitpunkt seines letzten Phasenwechsels.
+   *
+   * Ein Stillstand am Kickoff — etwa ein Weckruf, der nicht eingereiht wurde —
+   * gehoert zu der Phase, in der er entstand. Ist die Phase weitergezogen,
+   * beschreibt er nichts mehr. Er kann sich aber auch nicht selbst
+   * zuruecknehmen: der Kickoff ist kein Kanban-Ticket und faellt damit aus
+   * jeder Ticket-Bereinigung heraus. Das Board meldete deshalb "blocked" wegen
+   * eines abgebrochenen Versuchs von vor acht Minuten.
+   */
+  kickoff: { issueId: string; phaseChangedAt: string } | null = null
 ): TicketStall[] {
   const hostOwned = new Set<TicketStall['kind']>([
     'run_failed',
@@ -187,11 +226,17 @@ export function mergeStalls(
   ]);
   const observedIds = new Set(observed.map((stall) => stall.taskId));
 
+  // Die Schaetzung ist da — der Vermerk "es fehlt eine Schaetzung" ist damit
+  // erledigt, unabhaengig davon, auf welchem Weg sie kam.
+  const obsolete = (stall: TicketStall) =>
+    settledTaskIds.has(stall.taskId) ||
+    (stall.kind === 'refinement_invalid' && refinedTaskIds.has(stall.taskId)) ||
+    (kickoff !== null &&
+      stall.taskId === kickoff.issueId &&
+      stall.detectedAt.localeCompare(kickoff.phaseChangedAt) < 0);
+
   const kept = existing.filter(
-    (stall) =>
-      !hostOwned.has(stall.kind) &&
-      !observedIds.has(stall.taskId) &&
-      !settledTaskIds.has(stall.taskId)
+    (stall) => !hostOwned.has(stall.kind) && !observedIds.has(stall.taskId) && !obsolete(stall)
   );
-  return [...kept, ...observed.filter((stall) => !settledTaskIds.has(stall.taskId))];
+  return [...kept, ...observed.filter((stall) => !obsolete(stall))];
 }

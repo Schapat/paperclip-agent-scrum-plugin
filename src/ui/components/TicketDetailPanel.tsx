@@ -511,6 +511,14 @@ export function TicketDetailPanel({
             <span className="ticket-detail-meta-label">Story Points</span>
             <span className="ticket-detail-points">{task.storyPoints} SP</span>
           </div>
+          {/* Wohin geliefert wird. Ohne Branch entscheidet der Developer selbst
+              — auch das ist eine Aussage und gehoert sichtbar hin. */}
+          <div className="ticket-detail-meta-item">
+            <span className="ticket-detail-meta-label">Lieferbranch</span>
+            <span className="ticket-detail-branch">
+              {task.deliveryBranch ?? <em>vom Team gewählt</em>}
+            </span>
+          </div>
         </div>
 
         {/* Assignee */}

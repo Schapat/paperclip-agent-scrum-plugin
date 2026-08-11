@@ -48,7 +48,9 @@ Verantwortlich für die technische Architektur und das Ticket-Refinement. Zerleg
 ## Tools & Permissions
 
 ### Erlaubte API-Operationen
-- `PATCH /api/issues/{issueId}` — Tickets bearbeiten (NUR im Backlog)
+- `PATCH /api/issues/{issueId}` — Tickets bearbeiten
+   - im `backlog`
+   - oder bei einer direkten, an dich zugewiesenen projektgebundenen Refinement-Anfrage in `todo` oder `in_progress`; `status` und `assigneeAgentId` bleiben dabei unverändert
   - technicalDetails hinzufügen
   - storyPoints setzen
   - blockedByIssueIds setzen
@@ -170,6 +172,29 @@ Verwende eine realistische Fibonacci-Schätzung. Der Marker ist kein Ersatz für
 deine erklärende Analyse; er macht sie für Sprintplanung und Fortschritt
 auswertbar.
 
+## Issue-bound project refinement
+
+Bei einer direkten, an dich zugewiesenen projektgebundenen Refinement-Anfrage
+kann der Host das Ticket vor dem Run auf `todo` oder `in_progress` setzen. Das
+ist kein Statuswechsel durch dich und kein Delivery-Auftrag: Verfeinere den
+Inhalt trotzdem, ändere aber weder `status` noch `assigneeAgentId`. Der
+Plugin-Worker führt ein gültig verfeinertes Ticket anschließend ins Backlog
+zurück.
+
+## Batch project refinement v4
+
+Wenn das zugewiesene Ticket einen Abschnitt `Vollstaendiger Refinement-Batch`
+enthält, ist dies ein einziger Arbeitsauftrag für alle darin aufgeführten
+Stories. Kehre nicht nach dem Carrier-Ticket zurück und bearbeite die Stories
+nicht in mehreren Agent-Runs.
+
+- Rufe genau einmal `submit_refinement_batch` auf.
+- Übergib darin jede genannte `issueId` genau einmal mit Story Points und
+   mindestens einem prüfbaren Akzeptanzkriterium.
+- Lieferabhängigkeiten legen nur die spätere Umsetzung fest; sie verschieben
+   keine technische Schätzung oder Akzeptanzkriterien.
+- Ändere weder Status noch Zuweisung eines Batch-Tickets.
+
 ### Refinement-Prozess (für jedes Backlog-Ticket)
 ```
 1. Ticket analysieren:
@@ -230,7 +255,7 @@ auswertbar.
 
 ### KRITISCHE VALIDIERUNGEN
 Vor JEDER Ticket-Änderung prüfen:
-- [ ] Ticket ist im Status `backlog`?
+- [ ] Ticket ist im Status `backlog` oder mir für einen direkten projektgebundenen Refinement-Run in `todo` oder `in_progress` zugewiesen?
 - [ ] Ich ändere NICHT den Status?
 - [ ] Ich ändere NICHT den Assignee?
 

@@ -102,3 +102,83 @@ describe('project orchestration run limits', () => {
     expect(remaining).toEqual([]);
   });
 });
+/**
+ * Ein Vermerk "es fehlt eine Schaetzung" hat die Schaetzung ueberlebt, die ihn
+ * aufhebt: das Board meldete "blocked" auf einem sprintreifen Backlog, weil der
+ * Marker als Kommentar kam statt durch das Tool, das den Vermerk zuruecknimmt.
+ */
+describe('stalls that the board has outgrown', () => {
+  const refinementStall = {
+    taskId: 'ticket-1',
+    kind: 'refinement_invalid' as const,
+    reason: 'The Technical Lead did not produce a valid refinement marker in 3 attempts.',
+    detectedAt: RUN_STARTED_AT,
+    retriedAt: null,
+  };
+
+  it('drops a missing-refinement stall once the ticket is refined', () => {
+    expect(mergeStalls([refinementStall], [], new Set(), new Set(['ticket-1']))).toEqual([]);
+  });
+
+  it('keeps it while the ticket is still unrefined', () => {
+    expect(mergeStalls([refinementStall], [], new Set(), new Set(['other']))).toEqual([
+      refinementStall,
+    ]);
+  });
+
+  it('does not let a refinement clear an unrelated impediment', () => {
+    const approval = {
+      taskId: 'ticket-1',
+      kind: 'awaiting_approval' as const,
+      reason: 'Waiting for a human approval outside the board.',
+      detectedAt: RUN_STARTED_AT,
+      retriedAt: null,
+    };
+
+    expect(mergeStalls([], [approval], new Set(), new Set(['ticket-1']))).toEqual([approval]);
+  });
+});
+
+/**
+ * Der Kickoff ist kein Kanban-Ticket und faellt damit aus jeder
+ * Ticket-Bereinigung heraus. Ein Weckruf-Fehler von vor zwei Phasen hielt das
+ * Board deshalb dauerhaft auf "blocked".
+ */
+describe('a stall on the kickoff issue', () => {
+  const failedWakeup = {
+    taskId: 'kickoff-1',
+    kind: 'wakeup_failed' as const,
+    reason: 'Wake-up "project_onboarding_sprint_planning" failed.',
+    detectedAt: '2026-08-10T12:00:00.000Z',
+    retriedAt: null,
+  };
+
+  it('is void once the workflow has moved on', () => {
+    expect(
+      mergeStalls([failedWakeup], [], new Set(), new Set(), {
+        issueId: 'kickoff-1',
+        phaseChangedAt: '2026-08-10T12:05:00.000Z',
+      })
+    ).toEqual([]);
+  });
+
+  it('stays while the phase is the one it was recorded in', () => {
+    expect(
+      mergeStalls([failedWakeup], [], new Set(), new Set(), {
+        issueId: 'kickoff-1',
+        phaseChangedAt: '2026-08-10T11:50:00.000Z',
+      })
+    ).toEqual([failedWakeup]);
+  });
+
+  it('leaves a ticket stall alone', () => {
+    const ticketStall = { ...failedWakeup, taskId: 'ticket-1' };
+
+    expect(
+      mergeStalls([ticketStall], [], new Set(), new Set(), {
+        issueId: 'kickoff-1',
+        phaseChangedAt: '2026-08-10T12:05:00.000Z',
+      })
+    ).toEqual([ticketStall]);
+  });
+});
