@@ -3727,6 +3727,9 @@ const plugin = definePlugin({
         stalls: state.stalls ?? [],
         liveRuns: state.liveRuns ?? [],
         liveRunsKnown: orchestrationReadable,
+        // Ohne das Recht, eine Rueckfrage zu beantworten, waere der Knopf im
+        // Ticket ein Versprechen, das der Host einloest, indem er ablehnt.
+        canResolveQuestions: manifest.capabilities.includes("issue.interactions.respond"),
         deliveryBranchOptions: await deliveryBranchOptions(),
       };
     });

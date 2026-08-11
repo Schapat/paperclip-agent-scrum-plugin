@@ -67,6 +67,8 @@ interface BoardData {
   /** Konnte der Host ueberhaupt befragt werden? Sonst ist `liveRuns` keine Aussage. */
   liveRunsKnown: boolean;
   deliveryBranchOptions: DeliveryBranchOptions;
+  /** Darf das Board eine offene Rueckfrage beantworten? Braucht eine Freigabe. */
+  canResolveQuestions: boolean;
 }
 
 interface LogData {
@@ -633,7 +635,7 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
           onFetchDecisions={fetchDecisions}
           onFetchCommitChanges={fetchCommitChanges}
           onResolveProductDecision={handleResolveProductDecision}
-          onResolveTicketQuestion={handleResolveTicketQuestion}
+          onResolveTicketQuestion={data.canResolveQuestions ? handleResolveTicketQuestion : undefined}
           pendingQuestionTaskIds={(data.stalls ?? [])
             .filter((stall) => stall.kind === "awaiting_decision")
             .map((stall) => stall.taskId)}
