@@ -216,7 +216,16 @@ export function mergeStalls(
    * jeder Ticket-Bereinigung heraus. Das Board meldete deshalb "blocked" wegen
    * eines abgebrochenen Versuchs von vor acht Minuten.
    */
-  kickoff: { issueId: string; phaseChangedAt: string } | null = null
+  kickoff: { issueId: string; phaseChangedAt: string } | null = null,
+  /**
+   * Tickets, an denen erkennbar gearbeitet wird.
+   *
+   * "Der zustaendige Agent konnte nicht geweckt werden" ist widerlegt, sobald
+   * das Ticket in Arbeit ist — jemand wurde offensichtlich geweckt. Der
+   * Vermerk blieb sonst stehen, bis das Ticket fertig war, und meldete
+   * "blocked" auf einem laufenden Ticket.
+   */
+  movingTaskIds: ReadonlySet<string> = new Set()
 ): TicketStall[] {
   const hostOwned = new Set<TicketStall['kind']>([
     'run_failed',
@@ -233,7 +242,8 @@ export function mergeStalls(
     (stall.kind === 'refinement_invalid' && refinedTaskIds.has(stall.taskId)) ||
     (kickoff !== null &&
       stall.taskId === kickoff.issueId &&
-      stall.detectedAt.localeCompare(kickoff.phaseChangedAt) < 0);
+      stall.detectedAt.localeCompare(kickoff.phaseChangedAt) < 0) ||
+    (stall.kind === 'wakeup_failed' && movingTaskIds.has(stall.taskId));
 
   const kept = existing.filter(
     (stall) => !hostOwned.has(stall.kind) && !observedIds.has(stall.taskId) && !obsolete(stall)
