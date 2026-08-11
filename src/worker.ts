@@ -2843,17 +2843,11 @@ const plugin = definePlugin({
       const route = options.route !== false;
       if (route) lastFullSyncAt = Date.now();
       const onboarding = state.projectOnboarding;
-      if (
-        !companyId ||
-        !onboarding?.projectId ||
-        !onboarding.rootIssueId ||
-        (
-          onboarding.status !== "backlog_in_progress" &&
-          onboarding.status !== "sprint_planning" &&
-          onboarding.status !== "active" &&
-          onboarding.status !== "completed"
-        )
-      ) {
+      // Sobald ein Kickoff existiert, spiegelt das Board seine Kinder. Der
+      // Phasenfilter stand frueher hier und hat sieben fertig geschriebene
+      // Stories unsichtbar gemacht, weil eine Freigabe ausstand. Was die Phase
+      // steuert, ist die Automation — und die pruefen die Gates selbst.
+      if (!companyId || !onboarding?.projectId || !onboarding.rootIssueId) {
         return false;
       }
 

@@ -205,3 +205,46 @@ describe('project issue synchronization', () => {
     expect(tasks).toEqual([]);
   });
 });
+/**
+ * Der Product Owner hatte sieben Stories geschrieben, waehrend die Analyse noch
+ * auf die Freigabe wartete. Das Board hat sie verschwiegen — der Backlog stand
+ * leer neben sieben existierenden Tickets. Unsichtbare Arbeit ist die teuerste
+ * Sorte: der Human sieht nichts und kann nichts entscheiden.
+ */
+describe('stories written before the gate', () => {
+  it('mirrors a child issue even while the analysis awaits approval', () => {
+    const tasks: ScrumTask[] = [];
+    const result = syncProjectOnboardingIssue(
+      tasks,
+      { ...onboarding(), status: 'analysis_ready' as const },
+      issue({ id: 'child-1', title: 'Tetris Core Game Loop' })
+    );
+
+    expect(result).toMatchObject({ handled: true, changed: true, action: 'created' });
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]).toMatchObject({ id: 'child-1', column: 'backlog' });
+  });
+
+  it('mirrors it during the analysis itself', () => {
+    const tasks: ScrumTask[] = [];
+    syncProjectOnboardingIssue(
+      tasks,
+      { ...onboarding(), status: 'analysis_in_progress' as const },
+      issue({ id: 'child-1' })
+    );
+
+    expect(tasks).toHaveLength(1);
+  });
+
+  it('still ignores an issue that belongs to another kickoff', () => {
+    const tasks: ScrumTask[] = [];
+    const result = syncProjectOnboardingIssue(
+      tasks,
+      { ...onboarding(), status: 'analysis_ready' as const },
+      issue({ id: 'child-1', parentId: 'some-other-kickoff' })
+    );
+
+    expect(result.handled).toBe(false);
+    expect(tasks).toEqual([]);
+  });
+});
