@@ -2707,24 +2707,49 @@ const plugin = definePlugin({
       const rootIssueId = state.projectOnboarding?.rootIssueId;
       if (!companyId || !rootIssueId) return false;
 
-      const reviewTasks = state.tasks.filter(
-        (task) => task.parentId === rootIssueId && task.column === "in_review"
+      // Frueher nur `in_review`. Beide beobachteten Faelle lagen woanders: einer
+      // im Refinement, einer in der Entwicklung. Eine Rueckfrage haelt das
+      // Ticket in *jeder* Spalte an, also wird auch in jeder gesucht.
+      const activeColumns = new Set(["todo", "in_progress", "in_review", "blocked"]);
+      const activeTasks = state.tasks.filter(
+        (task) => task.parentId === rootIssueId && activeColumns.has(task.column)
       );
-      if (reviewTasks.length === 0) return false;
+      if (activeTasks.length === 0) return false;
 
       let changed = false;
-      for (const task of reviewTasks) {
+      for (const task of activeTasks) {
         try {
           const interactions = await ctx.issues.listInteractions(task.id, companyId);
           const blocking = interactions.find(
             (interaction) => (interaction as { status?: string }).status === "pending"
           );
-          if (!blocking) continue;
+          if (!blocking) {
+            // Die Frage ist beantwortet — der Vermerk gehoert weg, sonst meldet
+            // das Board weiter "blocked" auf einem laufenden Ticket.
+            if (state.stalls?.some((s) => s.taskId === task.id && s.kind === "awaiting_decision")) {
+              clearStall(task.id);
+              changed = true;
+            }
+            continue;
+          }
 
+          const label = task.identifier ?? task.title;
           recordStall(
             task.id,
-            "A board confirmation is pending. QA cannot take this review until it is resolved.",
-            "awaiting_approval"
+            `${label} is waiting for a decision that an agent asked for inside the ticket.`,
+            "awaiting_decision"
+          );
+          // Der Agent bekommt die Regel dort, wo er sie liest: im Ticket. Die
+          // Instruktion verbietet eigene Confirmations laengst — sie steht nur
+          // in 12 KB Bundle, und der naechste Run beginnt hier.
+          await postIssueNotice(
+            task.id,
+            "self-authored-confirmation",
+            [
+              "## This ticket is waiting on a confirmation you created",
+              "A board confirmation stops the ticket until a human clicks it — and nobody is watching for that click, so the ticket simply stops.",
+              "Inside an approved sprint you decide within the acceptance criteria; you do not ask for a confirmation. If a question genuinely exceeds the ticket scope, say so in a comment and let the Scrum Master escalate it.",
+            ].join("\n\n")
           );
           changed = true;
         } catch (error) {

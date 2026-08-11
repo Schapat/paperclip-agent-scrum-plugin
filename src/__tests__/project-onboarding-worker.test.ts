@@ -2769,6 +2769,81 @@ describe('project onboarding worker actions', () => {
     ).toEqual([]);
   });
 
+  /**
+   * Ein Agent stellt eine eigene Board-Rueckfrage. Der Host haelt das Ticket
+   * daraufhin an, bis ein Mensch klickt — und niemand erwartet den Klick, weil
+   * die Frage nur im Issue steht. Beobachtet wurde das zweimal: einmal im
+   * Refinement, einmal in der Entwicklung. Gesucht hat das Board bis dahin nur
+   * in `in_review`.
+   */
+  describe('a confirmation an agent asked for itself', () => {
+    /**
+     * Das Plugin darf Interactions nur *lesen* — antworten hiesse, in fremdem
+     * Namen zu entscheiden. Der Test spiegelt deshalb die Leseschnittstelle,
+     * statt dem Plugin Rechte zu geben, die es nicht haben soll.
+     */
+    async function ticketWithPendingConfirmation(column: 'in_progress' | 'in_review') {
+      const kickoff = await startApprovedDelivery(harness);
+      const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+      const developer = board.agents.find((agent) => agent.role === 'developer');
+      const child = await harness.ctx.issues.create({
+        companyId: COMPANY_ID,
+        projectId: PROJECT_ID,
+        parentId: kickoff.rootIssueId,
+        title: 'Slider markup',
+        status: column,
+        assigneeAgentId: developer?.id,
+      });
+      await harness.emit(
+        'issue.created',
+        { issueId: child.id },
+        { companyId: COMPANY_ID, entityId: child.id, entityType: 'issue' }
+      );
+
+      const pending = { id: 'interaction-1', status: 'pending', kind: 'request_confirmation' };
+      const listInteractions = vi
+        .spyOn(harness.ctx.issues, 'listInteractions')
+        .mockImplementation(async (issueId) => (issueId === child.id ? [pending as never] : []));
+      return { child, listInteractions };
+    }
+
+    it('names the ticket that is waiting, whatever column it sits in', async () => {
+      const { child } = await ticketWithPendingConfirmation('in_progress');
+
+      const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID, force: true });
+      const stall = board.stalls.find((entry) => entry.taskId === child.id);
+      expect(stall?.kind, 'a confirmation in development was invisible before').toBe(
+        'awaiting_decision'
+      );
+      expect(stall?.reason, 'the human has to find the ticket').toContain('waiting for a decision');
+    });
+
+    it('tells the agent in the ticket that this is not how it asks', async () => {
+      const { child } = await ticketWithPendingConfirmation('in_review');
+      await harness.getData<BoardData>('board', { companyId: COMPANY_ID, force: true });
+
+      const comments = await harness.ctx.issues.listComments(child.id, COMPANY_ID);
+      expect(
+        comments.some((comment) => comment.body.includes('waiting on a confirmation you created'))
+      ).toBe(true);
+    });
+
+    it('withdraws the stall once the question has been answered', async () => {
+      const { child, listInteractions } = await ticketWithPendingConfirmation('in_progress');
+      await harness.getData<BoardData>('board', { companyId: COMPANY_ID, force: true });
+      expect(
+        (await harness.getData<BoardData>('board', { companyId: COMPANY_ID })).stalls.length
+      ).toBeGreaterThan(0);
+
+      // Der Mensch hat geklickt: die Frage ist weg.
+      listInteractions.mockResolvedValue([]);
+
+      const after = await harness.getData<BoardData>('board', { companyId: COMPANY_ID, force: true });
+      expect(after.stalls.filter((entry) => entry.kind === 'awaiting_decision')).toEqual([]);
+      expect(child.id).toBeTruthy();
+    });
+  });
+
   it('rejects a branch name that Git would not take', async () => {
     const { harness } = await startSprintReadyBoard();
 

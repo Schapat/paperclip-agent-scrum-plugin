@@ -633,7 +633,16 @@ export interface TicketStall {
     | 'wakeup_failed'
     | 'awaiting_approval'
     | 'budget'
-    | 'refinement_invalid';
+    | 'refinement_invalid'
+    /**
+     * Ein Agent hat selbst eine Board-Rueckfrage gestellt.
+     *
+     * Der Host haelt das Ticket dann an, bis ein Mensch klickt — und niemand
+     * erwartet diesen Klick, weil die Frage nur im Issue steht. Eine eigene
+     * Kategorie, weil die Aufloesung eine andere ist als bei einer regulaeren
+     * Freigabe: hier ist die Frage selbst der Fehler.
+     */
+    | 'awaiting_decision';
   detectedAt: string;
   /** Gesetzt, sobald der Worker selbst einen Wiederanlauf versucht hat. */
   retriedAt?: string | null;
