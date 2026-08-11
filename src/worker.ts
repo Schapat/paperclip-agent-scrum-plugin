@@ -96,6 +96,7 @@ import {
   SUBMIT_REFINEMENT_TOOL,
   commitComment,
   qaVerdictComment,
+  refinementBriefComment,
   refinementComment,
   reviewSubmissionComment,
   validateCommit,
@@ -218,29 +219,6 @@ const REFINEMENT_RETRY_AFTER_MS = 15 * 60 * 1000;
  */
 const BRANCH_OPTIONS_TTL_MS = 2 * 60 * 1000;
 
-/**
- * Der Auftrag, den ein Refinement-Weckruf mitbringt.
- *
- * `requestWakeup` uebertraegt nur einen Grund-Code. Das erwartete Ergebnis —
- * und vor allem sein exaktes Format — stand bisher ausschliesslich in der
- * statischen AGENTS.md zwischen mehreren konkurrierenden Regelbloecken. Das
- * Format ist aber die Bedingung dafuer, dass das Ticket ueberhaupt planbar
- * wird, also gehoert es an die Stelle, an der die Arbeit beauftragt wird.
- */
-function refinementBriefComment(previousAttempts: number): string {
-  const retryHint =
-    previousAttempts > 0
-      ? `\n\n**Hinweis:** Das ist Versuch ${previousAttempts + 1}. Ein vorheriger Lauf hat keinen gueltigen Marker hinterlassen — ohne ihn bleibt das Ticket ungeplant.`
-      : "";
-
-  return [
-    "## Technical refinement requested",
-    "Ergaenze dieses Ticket um Schaetzung, Akzeptanzkriterien, technische Hinweise und Risiken.",
-    "Schliesse deinen Kommentar mit genau einem Marker ab. Er ist maschinenlesbar: ohne ihn wird das Ticket weder eingeplant noch zugewiesen.",
-    '```html\n<!-- agent-scrum:refinement:v1 {"storyPoints":5,"acceptanceCriteria":["..."],"technicalNotes":"...","risks":[],"labels":["testing","documentation"]} -->\n```',
-    "- `storyPoints`: Ganzzahl zwischen 1 und 100.\n- `acceptanceCriteria`: nicht-leere Liste pruefbarer Kriterien.\n- `labels`: optionale technische Domaenen des Tickets. Die Sprint-Planung waehlt darueber den passenden Developer aus; ohne Labels entscheidet allein die Auslastung.\n- Der Marker muss gueltiges JSON enthalten und von dir als Technical Lead stammen.",
-  ].join("\n\n") + retryHint;
-}
 
 const plugin = definePlugin({
   multiCompanyConfig: true,
@@ -899,7 +877,10 @@ const plugin = definePlugin({
         return false;
       }
 
-      const projectTasks = state.tasks.filter((task) => task.parentId === onboarding.rootIssueId);
+      // Ein Arbeitsauftrag wird nie geliefert und nie `done`. Zaehlte er mit,
+      // blieb der Sprint offen und das Projekt unabgeschlossen — beliebig
+      // lange, denn niemand wird ihn je abschliessen.
+      const projectTasks = deliveryTasks(onboarding.rootIssueId);
       if (projectTasks.length === 0 || projectTasks.some((task) => task.column !== "done")) return false;
 
       const previousSprintId = state.currentSprint?.id ?? null;
@@ -2350,17 +2331,14 @@ const plugin = definePlugin({
       // setzt nur den Status, die Zuweisung fehlt. Solche Tickets werden hier
       // uebernommen — sonst wartet das Board auf einen Agenten, den es nie
       // benannt hat.
-      const orphanedTodo = state.tasks.filter(
+      const orphanedTodo = deliveryTasks(rootIssueId).filter(
         (task) =>
-          task.parentId === rootIssueId &&
           task.column === "todo" &&
           task.assignedAgentId === null &&
           isReady(task)
       );
-      const readyBacklog = state.tasks
-        .filter(
-          (task) => task.parentId === rootIssueId && task.column === "backlog" && isReady(task)
-        )
+      const readyBacklog = deliveryTasks(rootIssueId)
+        .filter((task) => task.column === "backlog" && isReady(task))
         .sort(byBusinessValue);
       const planned = [...orphanedTodo, ...readyBacklog].slice(
         0,
@@ -4181,7 +4159,8 @@ const plugin = definePlugin({
       const rootIssueId = onboarding.rootIssueId;
 
       await syncOnboardingProjectIssues();
-      const projectTasks = state.tasks.filter((task) => task.parentId === rootIssueId);
+      // Ein Arbeitsauftrag gehoert keinem Sprint an; der Reset fasst ihn nicht an.
+      const projectTasks = deliveryTasks(rootIssueId);
       const returnedTaskIds: string[] = [];
       // Genau der Kommentar, der die aktuelle Schaetzung traegt, wird entwertet
       // — nicht ein Zeitfenster. Ein neuer Marker zaehlt dadurch sofort, auch
@@ -4949,7 +4928,9 @@ const plugin = definePlugin({
         clearStall(auth.issueId);
         await save();
         return {
-          content: `Refinement recorded: ${parsed.value.storyPoints} points, ${parsed.value.acceptanceCriteria.length} acceptance criteria. The ticket is now eligible for sprint planning.`,
+          content:
+            `Refinement recorded: ${parsed.value.storyPoints} points, ${parsed.value.acceptanceCriteria.length} acceptance criteria. ` +
+            'The ticket is now eligible for sprint planning. Your run is complete — do not implement this ticket; a Developer gets it when the human starts the sprint.',
         };
       }
     );
@@ -5021,7 +5002,9 @@ const plugin = definePlugin({
           reconcileProjectRefinementRequests();
           await save();
           return {
-            content: `Batch refinement recorded for ${parsed.value.refinements.length} tickets. Every ticket is now eligible for sprint planning.`,
+            content:
+              `Batch refinement recorded for ${parsed.value.refinements.length} tickets. ` +
+              'Every ticket is now eligible for sprint planning. Your run is complete — do not implement any of them; a Developer gets them when the human starts the sprint.',
           };
         } catch (error) {
           return { error: `Could not record the refinement batch: ${String(error)}` };

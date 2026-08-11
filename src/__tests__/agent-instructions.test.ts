@@ -16,6 +16,7 @@ import {
   heartbeatAwareInstructions,
   repairInstructionBundle,
 } from '../agent-instructions';
+import { refinementBriefComment } from '../core/agent-tools';
 
 describe('managed agent instruction upgrades', () => {
   it('materializes managed instructions with all required upgrade rules when an agent has no bundle yet', () => {
@@ -234,5 +235,24 @@ describe('repairs bundles damaged by the earlier marker mismatch', () => {
     expect(healed.match(/agent-scrum:commit:v1/g) ?? []).toHaveLength(1);
     // Und der zweite Durchlauf aendert nichts mehr.
     expect(heartbeatAwareInstructions('developer-1', healed)).toBe(healed);
+  });
+});
+
+/**
+ * Der Watchdog hat aufgehoert, sich Lieferarbeit zu nehmen, als sein Lauf ein
+ * benanntes Ende bekam. Der Technical Lead war danach die einzige Rolle, die
+ * noch fertigmeldete — zweimal, beide Male aus einem Refinement-Lauf heraus.
+ */
+describe('where a refinement run ends', () => {
+  it('tells the Technical Lead that the estimate is the end of its run', () => {
+    const brief = refinementBriefComment(0);
+
+    expect(brief).toContain('Dein Lauf endet mit der abgegebenen Schaetzung');
+    expect(brief).toContain('Implementiere das Ticket nicht');
+    expect(brief, 'the workspace being ready is exactly the temptation').toContain('Workspace');
+  });
+
+  it('says the same on a retry, where the temptation to just do it is larger', () => {
+    expect(refinementBriefComment(2)).toContain('Dein Lauf endet mit der abgegebenen Schaetzung');
   });
 });

@@ -512,6 +512,13 @@ describe('project onboarding worker actions', () => {
     await harness.performAction('startBacklogDiscovery', {}, { companyId: COMPANY_ID });
 
     const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const workOrder = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Product Owner Backlog Discovery: Tetris',
+      status: 'backlog',
+    });
     const developer = board.agents.find((agent) => agent.role === 'developer');
     const child = await harness.ctx.issues.create({
       companyId: COMPANY_ID,
@@ -1297,6 +1304,57 @@ describe('project onboarding worker actions', () => {
    * erneut loszuschicken hiesse, dieselbe Arbeit ein zweites Mal erfinden zu
    * lassen — und bis dahin laesst sich nichts verfeinern.
    */
+  /**
+   * Der Sprint blieb offen, weil ein Arbeitsauftrag im Backlog lag: die
+   * Abschlussbedingung will jedes Ticket in `done` sehen, und ein Auftrag wird
+   * nie geliefert. Das Projekt haette beliebig lange offen gestanden.
+   */
+  it('completes a project whose only open ticket is an agent work order', async () => {
+    const kickoff = await startApprovedDelivery(harness);
+    const board = await harness.getData<BoardData>('board', { companyId: COMPANY_ID });
+    const qa = board.agents.find((agent) => agent.role === 'qa_engineer');
+
+    const developer = board.agents.find((agent) => agent.role === 'developer');
+    const workOrder = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Product Owner Backlog Discovery: Tetris',
+      status: 'backlog',
+    });
+    const story = await harness.ctx.issues.create({
+      companyId: COMPANY_ID,
+      projectId: PROJECT_ID,
+      parentId: kickoff.rootIssueId,
+      title: 'Tetris Core Game Loop',
+      status: 'done',
+      assigneeAgentId: qa?.id,
+    });
+    // Ohne Commit-Nachweis und QA-Freigabe schickt das Board die Story zurueck
+    // in die Entwicklung — dann prueft der Test etwas anderes als gemeint.
+    await recordDeveloperCommit(harness, story.id, developer?.id);
+    await harness.ctx.issues.createComment(
+      story.id,
+      `## QA approved\n\n${QA_REVIEW_APPROVED_MARKER}`,
+      COMPANY_ID,
+      { authorAgentId: qa?.id }
+    );
+    // Der Auftrag kommt zuerst: sonst schliesst das Projekt schon beim
+    // Story-Event ab und der Test prueft nur die Reihenfolge.
+    for (const issue of [workOrder, story]) {
+      await harness.emit(
+        'issue.created',
+        { issueId: issue.id },
+        { companyId: COMPANY_ID, entityId: issue.id, entityType: 'issue' }
+      );
+    }
+
+    const after = await harness.getData<BoardData>('board', { companyId: COMPANY_ID, force: true });
+    expect(after.projectOnboarding.status, 'the work order must not hold the project open').toBe(
+      'completed'
+    );
+  });
+
   it('adopts a backlog the Product Owner wrote before the approval', async () => {
     const kickoff = await harness.performAction<{ rootIssueId: string }>(
       'startProjectOnboarding',
