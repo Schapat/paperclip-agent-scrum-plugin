@@ -159,6 +159,27 @@ export function planBoard(input: PlanInput): BoardIntent[] {
     add(task, 'await_human', 'human', null, stall.reason);
   }
 
+  // -- 1b. Was einem Menschen gehoert ---------------------------------------
+  //
+  // Ein Ticket, das der Host einem Board-Nutzer zugewiesen hat, ist keine
+  // Agentenarbeit. Es sah bisher aus wie ein Ticket ohne Bearbeiter, und das
+  // Board hat dafuer eine Rolle geweckt, die es nicht erledigen kann — ein
+  // "GitHub-Repository einrichten" wartete so auf die QA, waehrend vier Stories
+  // in der Lieferkette dahinter standen und das Board nur meldete, es laufe
+  // gerade kein Agent.
+  for (const task of tasks) {
+    if (task.column === 'done' || !task.assignedUserId || task.assignedAgentId) continue;
+    // Der Vermerk nennt das Ticket. "Ein Ticket wartet auf einen Menschen" ist
+    // eine Feststellung; erst der Name macht daraus etwas, das jemand tun kann.
+    add(
+      task,
+      'await_human',
+      'human',
+      null,
+      `${task.identifier ?? task.title} is assigned to a person, not an agent — nothing behind it moves until it is done.`
+    );
+  }
+
   // -- 2. Blockierte Tickets ------------------------------------------------
   for (const task of tasks) {
     if (task.column !== 'blocked') continue;

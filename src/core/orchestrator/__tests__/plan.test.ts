@@ -352,6 +352,37 @@ describe('Menschliche Entscheidungen', () => {
     expect(intent?.role).toBe('human');
   });
 
+  it('ein Ticket, das einem Menschen gehört, weckt keinen Agenten', () => {
+    // Der Fall aus dem echten Board: "GitHub-Repository einrichten" lag im
+    // Review und war einem Board-Nutzer zugewiesen. Das Board weckte dafür die
+    // QA — und meldete ansonsten nur, es laufe gerade kein Agent, während vier
+    // Stories in der Lieferkette dahinter standen.
+    const task = ready({ column: 'in_review', assignedAgentId: null });
+    (task as ScrumTask).assignedUserId = 'local-board';
+    const intent = forTask(plan(createState({ tasks: [task] })), task.id);
+
+    expect(intent?.kind).toBe('await_human');
+    expect(intent?.role).toBe('human');
+    expect(intent?.reason).toContain('assigned to a person');
+    expect(intent?.reason).toContain(task.title);
+  });
+
+  it('ein erledigtes Ticket eines Menschen hält nichts mehr auf', () => {
+    const task = ready({ column: 'done', assignedAgentId: null });
+    (task as ScrumTask).assignedUserId = 'local-board';
+
+    expect(forTask(plan(createState({ tasks: [task] })), task.id)).toBeUndefined();
+  });
+
+  it('ein zugewiesener Agent schlägt die menschliche Zuweisung', () => {
+    // Beides gesetzt heisst: ein Agent arbeitet daran, der Mensch ist nur
+    // Eigentuemer. Dann bleibt es Agentenarbeit.
+    const task = ready({ column: 'todo', assignedAgentId: 'dev-1' });
+    (task as ScrumTask).assignedUserId = 'local-board';
+
+    expect(forTask(plan(createState({ tasks: [task] })), task.id)?.kind).toBe('implement');
+  });
+
   it('ein technischer Stillstand beendet die Automatik nicht', () => {
     // Ein abgestürzter Run ist kein Fall für einen Menschen — er wird wiederholt.
     const task = ready({ column: 'in_progress', assignedAgentId: 'dev-1' });

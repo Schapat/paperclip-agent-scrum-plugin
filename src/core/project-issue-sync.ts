@@ -27,6 +27,15 @@ export interface ProjectIssueSnapshot {
   status: ProjectIssueStatus;
   priority: ScrumTask['priority'];
   assigneeAgentId: string | null;
+  /**
+   * Der Mensch, dem das Ticket gehoert.
+   *
+   * Ein Ticket kann einem Agenten *oder* einem Menschen zugewiesen sein. Ohne
+   * dieses Feld sah beides gleich aus — naemlich wie "kein Bearbeiter" — und
+   * das Board hat fuer eine Aufgabe, die nur ein Mensch erledigen kann, einen
+   * Agenten geweckt.
+   */
+  assigneeUserId?: string | null;
   startedAt: HostTimestamp | null;
   completedAt: HostTimestamp | null;
   createdAt: HostTimestamp;
@@ -225,6 +234,7 @@ interface HostTaskFields {
   column: TaskStatus;
   priority: ScrumTask['priority'];
   assignedAgentId: string | null;
+  assignedUserId: string | null;
   parentId: string | null;
   createdAt: string;
   updatedAt: string;
@@ -265,6 +275,7 @@ function toHostFields(
     column: issue.status,
     priority: issue.priority,
     assignedAgentId: issue.assigneeAgentId,
+    assignedUserId: issue.assigneeUserId ?? null,
     parentId: issue.parentId,
     createdAt: toIso(issue.createdAt),
     updatedAt: toIso(issue.updatedAt),

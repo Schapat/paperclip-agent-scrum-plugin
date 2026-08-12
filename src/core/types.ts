@@ -160,6 +160,15 @@ export interface ScrumTask {
   storyPoints: number;
   column: TaskStatus;
   assignedAgentId: string | null;
+  /**
+   * Der Mensch, dem dieses Ticket gehoert.
+   *
+   * Gesetzt, wenn der Host das Ticket einem Board-Nutzer zugewiesen hat statt
+   * einem Agenten — etwa eine Aufgabe, die niemand automatisieren kann. Ohne
+   * dieses Feld war ein solches Ticket von einem unzugewiesenen nicht zu
+   * unterscheiden, und das Board weckte dafuer einen Agenten.
+   */
+  assignedUserId?: string | null;
   sprintId: string | null;
   parentId: string | null;
   labels: string[];
