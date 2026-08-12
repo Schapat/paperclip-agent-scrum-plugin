@@ -371,7 +371,7 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
   }, [data?.projectOnboarding.refinementRequestedTaskIds, requestProjectRefinement, refresh, retryProjectRefinement, tasks]);
 
   const handleResolveTicketQuestion = useCallback(
-    async (taskId: string, action: "accept" | "reject", reason?: string): Promise<boolean> => {
+    async (taskId: string, action: "accept" | "reject", reason?: string): Promise<string | null> => {
       // Der Freitext ist die eigentliche Antwort. Eine Frage wie "welches Spiel
       // soll es werden" laesst sich mit Zustimmung allein nicht beantworten —
       // der Text geht als Kommentar ins Ticket, wo der Agent ihn liest.
@@ -380,13 +380,18 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
         error?: string;
       };
       if (!result?.resolved) {
-        setNotice(result?.error ?? "Question could not be answered");
-        return false;
+        const message = result?.error ?? "Question could not be answered";
+        setNotice(message);
+        // Auch der Fehlerfall aktualisiert: verweigert der Host die Freigabe,
+        // faellt damit das Antwortfeld weg, statt beim naechsten Versuch erneut
+        // dasselbe zu tun.
+        refresh();
+        return message;
       }
       setNotice(null);
       refreshOnboarding();
       refresh();
-      return true;
+      return null;
     },
     [resolveTicketInteraction, refreshOnboarding, refresh],
   );
@@ -652,7 +657,13 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
           onFetchDecisions={fetchDecisions}
           onFetchCommitChanges={fetchCommitChanges}
           onResolveProductDecision={handleResolveProductDecision}
-          onResolveTicketQuestion={data.canResolveQuestions ? handleResolveTicketQuestion : undefined}
+          onResolveTicketQuestion={
+            // Die Karte kennt nur "hat geklappt"; den Grund zeigt das Panel
+            // oben, das die Meldung des Workers im Wortlaut trägt.
+            data.canResolveQuestions
+              ? async (taskId, action) => (await handleResolveTicketQuestion(taskId, action)) === null
+              : undefined
+          }
           pendingQuestionTaskIds={(data.stalls ?? [])
             .filter((stall) => stall.kind === "awaiting_decision")
             .map((stall) => stall.taskId)}

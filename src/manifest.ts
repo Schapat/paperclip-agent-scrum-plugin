@@ -18,7 +18,7 @@ import { MANAGED_AGENT_INSTRUCTIONS } from "./agent-instructions";
 import { TEAM } from "./team";
 
 const PLUGIN_ID = "schapat.agent-scrum";
-const PLUGIN_VERSION = "2.1.1";
+const PLUGIN_VERSION = "2.2.0";
 
 const manifest: PaperclipPluginManifestV1 = {
   id: PLUGIN_ID,

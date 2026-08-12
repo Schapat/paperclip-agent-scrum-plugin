@@ -24,7 +24,11 @@ export interface OpenQuestionsPanelProps {
    * Begruendung. Der Text landet als Kommentar im Ticket — also genau dort, wo
    * der Agent seinen naechsten Lauf beginnt.
    */
-  onAnswer: (taskId: string, action: "accept" | "reject", answer: string) => Promise<boolean>;
+  onAnswer: (
+    taskId: string,
+    action: "accept" | "reject",
+    answer: string
+  ) => Promise<string | null>;
   /** Fehlt die Freigabe, wird die Frage gezeigt, aber nicht beantwortbar. */
   readOnly?: boolean;
 }
@@ -64,8 +68,10 @@ function QuestionCard({
     setBusy(true);
     setError(null);
     try {
-      const ok = await onAnswer(question.taskId, action, answer.trim());
-      if (!ok) setError("Die Antwort konnte nicht zugestellt werden.");
+      // Die Meldung des Workers wird durchgereicht, nicht ersetzt: sie nennt
+      // den Grund — etwa eine fehlende Freigabe — und ein allgemeines
+      // "hat nicht geklappt" haette genau den verschluckt.
+      setError(await onAnswer(question.taskId, action, answer.trim()));
     } finally {
       setBusy(false);
     }
@@ -94,7 +100,9 @@ function QuestionCard({
 
       {readOnly ? (
         <p className="open-question-readonly">
-          Antworten ist nicht freigegeben. Öffne das Ticket, um zu entscheiden.
+          Antworten vom Board ist nicht freigegeben. Erteile dem Plugin in seinen
+          Einstellungen die Berechtigung <code>issue.interactions.respond</code> — bis dahin
+          entscheidest du im Ticket selbst.
         </p>
       ) : (
         <>

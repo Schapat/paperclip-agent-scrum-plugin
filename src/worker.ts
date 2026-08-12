@@ -2750,6 +2750,21 @@ const plugin = definePlugin({
     }
 
     /**
+     * Erkennt die Absage des Hosts an einer fehlenden Freigabe.
+     *
+     * Der Host meldet sie als gewoehnlichen Aufruffehler; unterscheidbar ist sie
+     * nur am Text. Bewusst eng geprueft — ein Netzwerkfehler darf nicht als
+     * fehlende Freigabe durchgehen und das Antwortfeld dauerhaft abschalten.
+     */
+    function isMissingRespondCapability(error: unknown): boolean {
+      const message = String(error);
+      return (
+        message.includes("missing required capability") &&
+        message.includes("issue.interactions.respond")
+      );
+    }
+
+    /**
      * Nimmt eine beantwortete Frage sofort aus der zentralen Liste.
      *
      * Ohne das steht sie dort bis zum naechsten Abgleich weiter — der Mensch
@@ -3969,7 +3984,13 @@ const plugin = definePlugin({
         liveRunsKnown: orchestrationReadable,
         // Ohne das Recht, eine Rueckfrage zu beantworten, waere der Knopf im
         // Ticket ein Versprechen, das der Host einloest, indem er ablehnt.
-        canResolveQuestions: manifest.capabilities.includes("issue.interactions.respond"),
+        // Deklariert *und* nicht vom Host abgelehnt. Das Manifest allein ist
+        // keine Zusage: es sagt, was das Plugin verlangt, nicht was es bekommen
+        // hat. Auf das Manifest allein zu schauen hat der Boardseite ein
+        // Antwortfeld erlaubt, dessen Aufruf der Host anschliessend verweigerte.
+        canResolveQuestions:
+          manifest.capabilities.includes("issue.interactions.respond") &&
+          state.interactionsRespondDenied !== true,
         // Die Fragen selbst, nicht nur ihre Existenz: die Boardseite soll sie
         // beantworten koennen, ohne dass jemand sie im Ticket suchen muss.
         openQuestions: state.openQuestions ?? [],
@@ -4615,12 +4636,32 @@ const plugin = definePlugin({
           applied,
           queued: wakeup.queued,
         });
+        // Es hat funktioniert — eine frueher verweigerte Freigabe liegt jetzt
+        // offensichtlich vor.
+        if (state.interactionsRespondDenied) {
+          state.interactionsRespondDenied = false;
+          await save();
+        }
         return { resolved: true, applied, action };
       } catch (error) {
         ctx.logger.warn("Could not resolve the ticket question", {
           issueId: taskId,
           error: String(error),
         });
+
+        // Ein Plugin kennt nur seine deklarierten Capabilities, nicht die
+        // gewaehrten. Dass die Freigabe fehlt, sagt erst der Host — und zwar
+        // hier. Der Vermerk nimmt der Boardseite das Antwortfeld ab, das sonst
+        // jedes Mal am selben Fehler scheitert.
+        if (isMissingRespondCapability(error)) {
+          state.interactionsRespondDenied = true;
+          await save();
+          return {
+            resolved: false,
+            error:
+              'Answering from the board is not approved yet. Grant this plugin the "issue.interactions.respond" capability in its plugin settings, then answer here again.',
+          };
+        }
         return { resolved: false, error: String(error) };
       }
     });

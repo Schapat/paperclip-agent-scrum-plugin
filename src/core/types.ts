@@ -618,6 +618,15 @@ export interface WorkerState {
    * beantworten koennen, ohne sie erst im Ticket suchen zu muessen.
    */
   openQuestions?: OpenTicketQuestion[];
+  /**
+   * Der Host hat das Beantworten einer Rueckfrage abgelehnt.
+   *
+   * Ein Plugin kennt nur die Capabilities, die es *deklariert* — nicht die, die
+   * der Host ihm *gewaehrt* hat. Ob die Freigabe vorliegt, zeigt sich erst beim
+   * Aufruf. Ohne diesen Vermerk bietet die Boardseite weiter ein Antwortfeld
+   * an, das jedes Mal am selben Fehler scheitert.
+   */
+  interactionsRespondDenied?: boolean;
 }
 
 /**
