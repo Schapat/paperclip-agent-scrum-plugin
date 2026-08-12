@@ -29,6 +29,7 @@ import type {
   CeremonyType,
   ProjectOnboarding,
   LiveAgentRun,
+  OpenTicketQuestion,
   TaskStatus,
   TicketStall,
 } from "../core/types";
@@ -38,6 +39,7 @@ import type { GitHubCommitChangesResult } from "../core/github-repository";
 import { KanbanBoard } from "./components/KanbanBoard";
 import { AgentLog } from "./components/AgentLog";
 import { TicketDetailPanel } from "./components/TicketDetailPanel";
+import { OpenQuestionsPanel } from "./components/OpenQuestionsPanel";
 import {
   ProjectOnboardingPanel,
   type DeliveryBranchOptions,
@@ -69,6 +71,8 @@ interface BoardData {
   deliveryBranchOptions: DeliveryBranchOptions;
   /** Darf das Board eine offene Rueckfrage beantworten? Braucht eine Freigabe. */
   canResolveQuestions: boolean;
+  /** Die offenen Rueckfragen im Klartext — zentral beantwortbar. */
+  openQuestions: OpenTicketQuestion[];
 }
 
 interface LogData {
@@ -367,8 +371,11 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
   }, [data?.projectOnboarding.refinementRequestedTaskIds, requestProjectRefinement, refresh, retryProjectRefinement, tasks]);
 
   const handleResolveTicketQuestion = useCallback(
-    async (taskId: string, action: "accept" | "reject"): Promise<boolean> => {
-      const result = (await resolveTicketInteraction({ taskId, action })) as {
+    async (taskId: string, action: "accept" | "reject", reason?: string): Promise<boolean> => {
+      // Der Freitext ist die eigentliche Antwort. Eine Frage wie "welches Spiel
+      // soll es werden" laesst sich mit Zustimmung allein nicht beantworten —
+      // der Text geht als Kommentar ins Ticket, wo der Agent ihn liest.
+      const result = (await resolveTicketInteraction({ taskId, action, reason })) as {
         resolved?: boolean;
         error?: string;
       };
@@ -378,9 +385,10 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
       }
       setNotice(null);
       refreshOnboarding();
+      refresh();
       return true;
     },
-    [resolveTicketInteraction, refreshOnboarding],
+    [resolveTicketInteraction, refreshOnboarding, refresh],
   );
 
   const handleResolveProductDecision = useCallback(async (taskId: string): Promise<boolean> => {
@@ -625,6 +633,15 @@ export function ScrumBoardPage(_props: PluginWidgetProps) {
       </div>
 
       <main className="main-content">
+        {/*
+          Die Rueckfragen stehen vor dem Board, nicht darin: sie sind der Grund,
+          warum darunter nichts mehr passiert.
+        */}
+        <OpenQuestionsPanel
+          questions={data.openQuestions ?? []}
+          onAnswer={handleResolveTicketQuestion}
+          readOnly={!data.canResolveQuestions}
+        />
         <KanbanBoard
           initialTasks={tasks}
           pollingInterval={0}

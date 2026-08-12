@@ -611,6 +611,13 @@ export interface WorkerState {
    * zehnmal vergeblich geweckt wurde, wieder bei null anfing.
    */
   intentLog?: IntentLog;
+  /**
+   * Offene Rueckfragen aus den Tickets, zentral fuer die Boardseite.
+   *
+   * Das Ziel ist eine Steuerung an einer Stelle: der Mensch soll eine Frage
+   * beantworten koennen, ohne sie erst im Ticket suchen zu muessen.
+   */
+  openQuestions?: OpenTicketQuestion[];
 }
 
 /**
@@ -628,6 +635,41 @@ export interface IntentRecord {
 
 /** Zustellvermerke, nach dem stabilen Schluessel der Absicht. */
 export type IntentLog = Record<string, IntentRecord>;
+
+/**
+ * Eine Rueckfrage, die ein Agent im Ticket gestellt hat.
+ *
+ * Der Host haelt das Ticket an, bis ein Mensch antwortet — und niemand erwartet
+ * diesen Klick, weil die Frage nur im Ticket steht. Bisher trug das Board
+ * lediglich die Tatsache "hier wartet eine Frage"; *welche*, musste der Mensch
+ * sich im Ticket suchen. Der Fragetext gehoert deshalb an die Oberflaeche.
+ *
+ * Beim Erkennen mitgeschrieben und nicht bei jeder Abfrage neu geholt: die
+ * Ansicht pollt, der Host nicht.
+ */
+export interface OpenTicketQuestion {
+  taskId: string;
+  /** `GAM-42` — wie der Mensch das Ticket im Board wiederfindet. */
+  identifier: string | null;
+  taskTitle: string;
+  interactionId: string;
+  /** Die Art der Rueckfrage, wie der Host sie fuehrt. */
+  kind: string;
+  /** Ueberschrift der Frage, sofern der Agent eine gesetzt hat. */
+  title: string | null;
+  /** Der Fragetext. */
+  summary: string | null;
+  /**
+   * Einzelfragen mit ihren Antwortmoeglichkeiten.
+   *
+   * Nur `ask_user_questions` traegt sie. Die Plugin-Bruecke kann eine Auswahl
+   * allerdings nicht strukturiert zurueckgeben — sie kennt nur Zustimmung,
+   * Ablehnung und einen Freitext. Die Optionen stehen deshalb als Lesehilfe
+   * da, damit der Mensch weiss, worueber er entscheidet.
+   */
+  options: string[];
+  askedAt: string;
+}
 
 /** Ein vom Host als laufend gemeldeter Agent-Run. */
 export interface LiveAgentRun {

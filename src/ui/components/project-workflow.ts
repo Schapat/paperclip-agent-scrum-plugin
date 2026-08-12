@@ -78,9 +78,9 @@ export function describeStall(stall: TicketStall, now = Date.now()): string {
     case 'budget':
       return `A budget incident stopped this agent${suffix}.`;
     case 'awaiting_decision':
-      // Der Satz nennt das Ticket, weil der Klick sonst nicht zu finden ist:
-      // die Frage steht im Issue, nicht im Board.
-      return `${stall.reason}${suffix} Open the ticket and answer it — the board cannot decide this for you.`;
+      // Die Frage steht jetzt oben auf dieser Seite, im Klartext und mit
+      // Antwortfeld. Der Satz schickt niemanden mehr ins Ticket suchen.
+      return `${stall.reason}${suffix} Answer it at the top of this page — the board cannot decide this for you.`;
     case 'refinement_invalid':
       return `Refinement did not produce a usable estimate${suffix}.`;
     case 'escalated':

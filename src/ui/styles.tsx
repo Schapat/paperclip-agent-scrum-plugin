@@ -3,6 +3,7 @@ import ceremonyStyles from "./styles/ceremonies.css";
 import kanbanStyles from "./styles/kanban.css";
 import onboardingStyles from "./styles/project-onboarding.css";
 import settingsStyles from "./styles/settings.css";
+import openQuestionStyles from "./styles/open-questions.css";
 
 /**
  * Paperclip dynamically imports the UI entry module but does not load esbuild's
@@ -32,6 +33,7 @@ const AGENT_SCRUM_STYLES = [
   ]),
   scopeStyles(onboardingStyles, "onboarding", ["workingPulse"]),
   scopeStyles(settingsStyles, "settings", ["fadeIn", "slideUp"]),
+  scopeStyles(openQuestionStyles, "open-questions"),
 ].join("\n");
 
 export function AgentScrumStyleSheet() {

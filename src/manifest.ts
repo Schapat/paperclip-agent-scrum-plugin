@@ -45,15 +45,16 @@ const manifest: PaperclipPluginManifestV1 = {
     // Ein Ticket, das auf einen Board-Dialog wartet, ist sonst nicht von einem
     // Ticket zu unterscheiden, das QA gerade prueft.
     "issue.interactions.read",
-    // `issue.interactions.respond` fehlt hier mit Absicht.
+    // Damit beantwortet die Boardseite eine offene Rueckfrage direkt — auf
+    // einen Klick des Humans hin, nie von selbst. Die Entscheidung wird dem
+    // angemeldeten Board-Nutzer zugeschrieben, den der Host selbst aufloest;
+    // ohne ihn lehnt die Aktion ab.
     //
-    // Damit koennte das Board eine offene Rueckfrage direkt beantworten — auf
-    // einen Klick des Humans hin, nie von selbst. Der Host stuft das als
-    // Rechteerweiterung ein und verlangt eine ausdrueckliche Freigabe; die
-    // gehoert dem Menschen, nicht dem Plugin. Bis sie erteilt ist, bleibt der
-    // Knopf im Ticket verborgen — der Rest des Ablaufs braucht ihn nicht.
-    // Freigeben: in den Plugin-Einstellungen bestaetigen, danach genuegt es,
-    // diese Zeile wieder aufzunehmen.
+    // Der Host stuft das als Rechteerweiterung ein und verlangt eine
+    // ausdrueckliche Freigabe in den Plugin-Einstellungen. Ohne sie zeigt das
+    // Board die Frage weiterhin an, sagt aber, dass geantwortet werden muss,
+    // wo die Frage steht.
+    "issue.interactions.respond",
     // Ein stehendes Ticket ist von einem laufenden nur unterscheidbar, wenn der
     // Host nach Runs, Freigaben und Budget-Sperren gefragt werden kann. Aus
     // Events allein laesst sich das nicht rekonstruieren: was waehrend eines

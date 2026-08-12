@@ -30,6 +30,7 @@ import {
 import manifest from "./manifest";
 import type {
   CeremonyType,
+  OpenTicketQuestion,
   ProjectRefinementWait,
   ScrumTask,
   TaskStatus,
@@ -2688,6 +2689,7 @@ const plugin = definePlugin({
       if (activeTasks.length === 0) return false;
 
       let changed = false;
+      const questions: OpenTicketQuestion[] = [];
       for (const task of activeTasks) {
         try {
           const interactions = await ctx.issues.listInteractions(task.id, companyId);
@@ -2703,6 +2705,11 @@ const plugin = definePlugin({
             }
             continue;
           }
+
+          // Der Fragetext wurde bisher weggeworfen. Genau er ist aber das, was
+          // der Mensch braucht — sonst weiss er nur, *dass* etwas wartet, und
+          // muss die Frage im Ticket suchen.
+          questions.push(describeOpenQuestion(task, blocking));
 
           const label = task.identifier ?? task.title;
           recordStall(
@@ -2728,10 +2735,71 @@ const plugin = definePlugin({
             issueId: task.id,
             error: String(error),
           });
+          // Die bisher gesammelten Fragen bleiben stehen: eine Frage, die wir
+          // gerade nicht bestaetigen konnten, verschwindet sonst aus der
+          // Ansicht, obwohl sie weiter wartet.
           return changed;
         }
       }
+
+      if (JSON.stringify(questions) !== JSON.stringify(state.openQuestions ?? [])) {
+        state.openQuestions = questions;
+        changed = true;
+      }
       return changed;
+    }
+
+    /**
+     * Nimmt eine beantwortete Frage sofort aus der zentralen Liste.
+     *
+     * Ohne das steht sie dort bis zum naechsten Abgleich weiter — der Mensch
+     * hat gerade geantwortet und saehe seine eigene Frage erneut.
+     */
+    function forgetOpenQuestion(taskId: string): void {
+      if (!state.openQuestions?.length) return;
+      state.openQuestions = state.openQuestions.filter((entry) => entry.taskId !== taskId);
+    }
+
+    /** Uebersetzt eine Host-Rueckfrage in das, was die Boardseite anzeigt. */
+    function describeOpenQuestion(task: ScrumTask, interaction: unknown): OpenTicketQuestion {
+      const record = (interaction ?? {}) as Record<string, unknown>;
+      const payload = (record.payload ?? {}) as Record<string, unknown>;
+      const text = (value: unknown): string | null =>
+        typeof value === "string" && value.trim() ? value.trim() : null;
+
+      // Nur `ask_user_questions` traegt einzelne Fragen mit Auswahl. Sie werden
+      // flach gelesen: die Bruecke kann eine Auswahl ohnehin nicht strukturiert
+      // zurueckgeben, also dienen sie dem Menschen als Lesehilfe.
+      const options: string[] = [];
+      const questions = Array.isArray(payload.questions) ? payload.questions : [];
+      for (const entry of questions) {
+        if (typeof entry !== "object" || entry === null) continue;
+        const question = entry as Record<string, unknown>;
+        const prompt = text(question.prompt);
+        if (prompt) options.push(prompt);
+        const choices = Array.isArray(question.options) ? question.options : [];
+        for (const choice of choices) {
+          if (typeof choice !== "object" || choice === null) continue;
+          const label = text((choice as Record<string, unknown>).label);
+          if (label) options.push(`— ${label}`);
+        }
+      }
+
+      const createdAt = record.createdAt;
+      return {
+        taskId: task.id,
+        identifier: task.identifier ?? null,
+        taskTitle: task.title,
+        interactionId: String(record.id ?? ""),
+        kind: text(record.kind) ?? "unknown",
+        title: text(record.title) ?? text(payload.title),
+        summary: text(record.summary),
+        options,
+        askedAt:
+          createdAt instanceof Date
+            ? createdAt.toISOString()
+            : text(createdAt) ?? new Date().toISOString(),
+      };
     }
 
     /**
@@ -3902,6 +3970,9 @@ const plugin = definePlugin({
         // Ohne das Recht, eine Rueckfrage zu beantworten, waere der Knopf im
         // Ticket ein Versprechen, das der Host einloest, indem er ablehnt.
         canResolveQuestions: manifest.capabilities.includes("issue.interactions.respond"),
+        // Die Fragen selbst, nicht nur ihre Existenz: die Boardseite soll sie
+        // beantworten koennen, ohne dass jemand sie im Ticket suchen muss.
+        openQuestions: state.openQuestions ?? [],
         deliveryBranchOptions: await deliveryBranchOptions(),
       };
     });
@@ -4475,8 +4546,19 @@ const plugin = definePlugin({
      * sie einem menschlichen Mitglied zu und verifiziert das. Was das Board
      * abnimmt, ist die Suche nach dem Ticket, nicht die Entscheidung.
      */
-    registerCompanyAction("resolveTicketInteraction", async (params) => {
+    registerCompanyAction("resolveTicketInteraction", async (params, context) => {
       if (!companyId) return { resolved: false, error: "No company context." };
+
+      // Die Entscheidung wird dem Menschen zugeschrieben, der sie geklickt hat.
+      // Der Host loest den Nutzer selbst auf — er stammt nie aus den Parametern
+      // und laesst sich damit auch nicht vom Aufrufer behaupten.
+      const actorUserId = context.actor.type === "user" ? context.actor.userId : null;
+      if (!actorUserId) {
+        return {
+          resolved: false,
+          error: "Only a signed-in board user can answer a ticket question.",
+        };
+      }
 
       const taskId = typeof params.taskId === "string" ? params.taskId : "";
       const action = params.action === "reject" ? "reject" : "accept";
@@ -4495,6 +4577,7 @@ const plugin = definePlugin({
         );
         if (pending.length === 0) {
           clearStall(taskId);
+          forgetOpenQuestion(taskId);
           await save();
           return { resolved: false, error: "This ticket has no open question." };
         }
@@ -4504,13 +4587,14 @@ const plugin = definePlugin({
           const result = await ctx.issues.respondInteraction(
             taskId,
             (interaction as { id: string }).id,
-            { action, reason },
+            { action, reason, actorUserId },
             companyId
           );
           if (result.applied) applied += 1;
         }
 
         clearStall(taskId);
+        forgetOpenQuestion(taskId);
         await save();
         // Der Agent liest das Ticket, nicht das Board — die Entscheidung
         // gehoert dorthin, wo sein naechster Lauf beginnt.
