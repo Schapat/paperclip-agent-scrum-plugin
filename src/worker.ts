@@ -771,7 +771,15 @@ const plugin = definePlugin({
           ctx.logger.info("Wake-up deferred until the blocking ticket is done", { issueId, reason });
           return { queued: false, error: null };
         }
-        recordStall(issueId, `Wake-up "${reason}" failed: ${String(error)}`);
+        // Kein Stillstandsvermerk mehr: ein fehlgeschlagener Weckruf ist ein
+        // Versuch, kein Zustand. Der Reconciler wiederholt ihn beim naechsten
+        // Durchlauf, und die Zustellpolitik zaehlt mit — nach fuenf Versuchen
+        // wird daraus ein `escalated`, das einen Menschen meint.
+        //
+        // Als Vermerk war er eine Dauersperre: er beschrieb einen Moment, nahm
+        // sich aber nie zurueck. Ein Backlog-Ticket, dessen Weckruf einmal
+        // scheiterte, zeigte neun Stunden spaeter noch "blocked — human
+        // approval required", waehrend das Board laengst wieder lief.
         ctx.logger.error("Could not queue project onboarding work", {
           issueId,
           reason,
@@ -2120,7 +2128,13 @@ const plugin = definePlugin({
       // Erschoepfte Tickets werden gemeldet, nicht verschwiegen. Der Technical
       // Lead liefert hier dauerhaft kein verwertbares Refinement; das ist eine
       // menschliche Entscheidung, kein Zustand zum Aussitzen.
-      for (const task of candidates) {
+      //
+      // Hat der Reconciler die Auswahl geliefert, gehoert ihm auch das Aufgeben:
+      // seine Zustellpolitik zaehlt dieselben Versuche und eskaliert nach fuenf.
+      // Zwei Zaehler nebeneinander hiessen, dass der kuerzere ein Ticket als
+      // "blocked" meldete, waehrend der laengere es noch bearbeitete — der
+      // Header sagte dann "blocked" und "laeuft gerade" zugleich.
+      for (const task of plannedTaskIds ? [] : candidates) {
         const attempt = attempts.get(task.id);
         if (!attempt || attempt.attempts < MAX_REFINEMENT_ATTEMPTS) continue;
         if (state.stalls?.some((entry) => entry.taskId === task.id)) continue;
@@ -3463,6 +3477,7 @@ const plugin = definePlugin({
       if (refinementTaskIds.length > 0) {
         await requestProjectRefinement("automatic", false, refinementTaskIds);
       }
+      retireHandledStalls(new Set(delivery.deliver.map((intent) => intent.taskId)));
       if (needsProjectPlanning && state.projectOnboarding?.status === "active") {
         await requestProjectPlanning();
       }
@@ -3539,7 +3554,10 @@ const plugin = definePlugin({
               state.agents
             );
           } catch (error) {
-            recordStall(task.id, `Could not assign the ticket: ${String(error)}`);
+            ctx.logger.warn("Could not assign a ticket for delivery", {
+              issueId: task.id,
+              error: String(error),
+            });
             return;
           }
         }
@@ -3562,8 +3580,38 @@ const plugin = definePlugin({
           reason: `Agent Scrum: ${intent.kind}`,
         });
       } catch (error) {
-        recordStall(task.id, `Could not invoke the agent: ${String(error)}`);
+        ctx.logger.warn("Could not invoke an agent for delivery", {
+          issueId: task.id,
+          error: String(error),
+        });
       }
+    }
+
+    /**
+     * Nimmt Vermerke zurueck, an deren Tickets gerade gearbeitet wird.
+     *
+     * Ein Stillstand behauptet: dieses Ticket bewegt sich nicht von selbst.
+     * Wurde in diesem Durchlauf ein Auftrag dafuer zugestellt, ist die
+     * Behauptung widerlegt — der Vermerk beschreibt dann Vergangenheit, nicht
+     * Zustand. Das Board meldete sonst "blocked" und "laeuft gerade" im selben
+     * Satz.
+     *
+     * Was ein Mensch entscheiden muss, bleibt: dafuer ist kein Auftrag
+     * unterwegs, der die Sache erledigen koennte.
+     */
+    function retireHandledStalls(handledTaskIds: ReadonlySet<string>): void {
+      if (!state.stalls?.length) return;
+
+      const humanOwned = new Set<TicketStall["kind"]>([
+        "awaiting_approval",
+        "awaiting_decision",
+        "budget",
+        "escalated",
+      ]);
+
+      state.stalls = state.stalls.filter(
+        (stall) => humanOwned.has(stall.kind) || !handledTaskIds.has(stall.taskId)
+      );
     }
 
     /**

@@ -45,6 +45,31 @@ function normalizeIntentLog(value: unknown): IntentLog {
 }
 
 /**
+ * Wirft Stillstandsvermerke weg, die kein Zustand sind.
+ *
+ * `wakeup_failed` beschrieb einen einzelnen fehlgeschlagenen Weckruf und nahm
+ * sich nie zurueck. Seit die Wiedervorlage jeden Versuch von selbst wiederholt
+ * und die Zustellpolitik nach fuenf Versuchen eskaliert, ist der Vermerk keine
+ * Information mehr, sondern eine Dauersperre: ein Backlog-Ticket, dessen
+ * Weckruf einmal scheiterte, zeigte neun Stunden spaeter noch "blocked — human
+ * approval required", waehrend das Board laengst wieder lief.
+ *
+ * Gespeicherte Boards tragen ihn noch, und sie kaemen ohne diesen Schnitt nie
+ * davon los — nichts im Ablauf raeumt ihn ab.
+ */
+function dropTransientStalls(value: unknown): WorkerState['stalls'] {
+  if (!Array.isArray(value)) return undefined;
+
+  return value.filter(
+    (stall) => isRecord(stall) && stall.kind !== 'wakeup_failed'
+  ) as WorkerState['stalls'];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
  * Stellt einen geladenen State auf das aktuelle Schema um.
  *
  * Fehlende Felder aus älteren Versionen werden ergänzt, statt sie als
@@ -100,6 +125,7 @@ export function migrateState(raw: Partial<WorkerState>): Partial<WorkerState> {
     proposedStories: raw.proposedStories ?? [],
     agentInstructions: raw.agentInstructions ?? {},
     intentLog: normalizeIntentLog(raw.intentLog),
+    stalls: dropTransientStalls(raw.stalls),
   };
 }
 

@@ -166,6 +166,24 @@ describe('project onboarding', () => {
     expect(migrateState({}).projectOnboarding?.status).toBe('active');
   });
 
+  it('drops a stuck wake-up stall but keeps what a human has to decide', () => {
+    // Der Vermerk beschrieb einen einzelnen fehlgeschlagenen Weckruf und nahm
+    // sich nie zurueck. Er hat ein laufendes Board neun Stunden lang als
+    // "blocked — human approval required" ausgewiesen.
+    const migrated = migrateState({
+      stalls: [
+        { taskId: 't1', kind: 'wakeup_failed', reason: 'no assigned agent', detectedAt: 'x' },
+        { taskId: 't2', kind: 'awaiting_approval', reason: 'waiting', detectedAt: 'x' },
+        { taskId: 't3', kind: 'refinement_invalid', reason: 'no marker', detectedAt: 'x' },
+      ],
+    } as unknown as Parameters<typeof migrateState>[0]);
+
+    expect(migrated.stalls?.map((stall) => stall.kind)).toEqual([
+      'awaiting_approval',
+      'refinement_invalid',
+    ]);
+  });
+
   it('preserves only valid delivery records across a worker restart', () => {
     // Der Versuchszaehler muss den Neustart ueberleben: liegt er nur im
     // Arbeitsspeicher, faengt ein wiederholt haengendes Ticket wieder bei null
