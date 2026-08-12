@@ -83,6 +83,10 @@ export function describeStall(stall: TicketStall, now = Date.now()): string {
       return `${stall.reason}${suffix} Open the ticket and answer it — the board cannot decide this for you.`;
     case 'refinement_invalid':
       return `Refinement did not produce a usable estimate${suffix}.`;
+    case 'escalated':
+      // Der Grund traegt hier schon die Zahl der Versuche — er sagt mehr als
+      // jeder Satz, den dieses Modul daraus bauen koennte.
+      return `${stall.reason}${suffix} The board stopped waking agents for it; decide how it proceeds.`;
   }
 }
 

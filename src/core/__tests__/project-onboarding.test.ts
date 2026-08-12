@@ -166,30 +166,21 @@ describe('project onboarding', () => {
     expect(migrateState({}).projectOnboarding?.status).toBe('active');
   });
 
-  it('preserves only valid timeout-recovery budgets across a worker restart', () => {
+  it('preserves only valid delivery records across a worker restart', () => {
+    // Der Versuchszaehler muss den Neustart ueberleben: liegt er nur im
+    // Arbeitsspeicher, faengt ein wiederholt haengendes Ticket wieder bei null
+    // an und eskaliert nie.
     const migrated = migrateState(
       {
-        timeoutRecoveries: {
-          'ticket-1': {
-            sourceRunId: 'run-timeout',
-            sourceRunCreatedAt: '2026-08-10T12:00:00.000Z',
-            attemptedAt: '2026-08-10T12:10:15.000Z',
-            queued: true,
-            recoveryRunId: 'run-recovery',
-          },
-          malformed: { sourceRunId: 'missing-required-fields' },
+        intentLog: {
+          'ticket-1:implement': { lastDeliveredAt: '2026-08-10T12:00:00.000Z', attempts: 3 },
+          malformed: { attempts: 'many' },
         },
       } as unknown as Parameters<typeof migrateState>[0]
     );
 
-    expect(migrated.timeoutRecoveries).toEqual({
-      'ticket-1': {
-        sourceRunId: 'run-timeout',
-        sourceRunCreatedAt: '2026-08-10T12:00:00.000Z',
-        attemptedAt: '2026-08-10T12:10:15.000Z',
-        queued: true,
-        recoveryRunId: 'run-recovery',
-      },
+    expect(migrated.intentLog).toEqual({
+      'ticket-1:implement': { lastDeliveredAt: '2026-08-10T12:00:00.000Z', attempts: 3 },
     });
   });
 

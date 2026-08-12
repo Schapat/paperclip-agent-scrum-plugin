@@ -4,10 +4,13 @@
  * Everything the Scrum process needs lives in `src/core/` as plain functions
  * over a `WorkerState` value. This file is the thin shell that connects that
  * logic to the host: it loads state, exposes board data and actions to the UI,
- * and re-evaluates the ceremony triggers whenever the board changes.
+ * and reconciles the board whenever something changes.
  *
- * Ceremonies are never scheduled. They fire from board state — see
- * `src/core/triggers/ceremony-triggers.ts`.
+ * Das Board bewegt sich auf genau einem Weg: `reconcile()` rechnet die Lage
+ * vollstaendig neu aus (`core/orchestrator/plan.ts`), entscheidet, was davon
+ * jetzt zugestellt wird (`core/orchestrator/deliver.ts`), und stellt zu. Es gibt
+ * keinen zweiten Motor mehr — der alte Flankenmechanismus war im Echtbetrieb
+ * abgeschaltet, waehrend seine Tests gruen blieben.
  */
 
 import {
@@ -117,7 +120,10 @@ import { isAgentWorkOrderTicket } from "./core/meta-ticket";
 import { migrateState } from "./core/storage";
 import { recalculateMetrics, createInitialMetrics, onStatusChange } from "./core/hooks";
 import { collectDecisions, recordDecision, sendMessage } from "./core/communication";
-import { CeremonyTriggerEngine } from "./core/triggers";
+import { planBoard } from "./core/orchestrator/plan";
+import { planDelivery } from "./core/orchestrator/deliver";
+import { intentInstruction } from "./core/orchestrator/instruct";
+import type { BoardIntent } from "./core/orchestrator/intents";
 import {
   runSprintPlanning,
   runBacklogRefinement,
@@ -177,7 +183,6 @@ function createEmptyState(): WorkerState {
     skills: [],
     proposedStories: [],
     agentInstructions: {},
-    timeoutRecoveries: {},
     stalls: [],
   };
 }
@@ -814,12 +819,6 @@ const plugin = definePlugin({
         });
         return false;
       }
-    }
-
-    /** True, wenn das Board aktuell Paperclip-Child-Issues eines Kickoffs zeigt. */
-    function hasProjectBackedTasks(): boolean {
-      const rootIssueId = state.projectOnboarding?.rootIssueId;
-      return Boolean(rootIssueId && state.tasks.some((task) => task.parentId === rootIssueId));
     }
 
     /** Runs the required sprint-close ceremonies before closing a delivered project request. */
@@ -2037,9 +2036,23 @@ const plugin = definePlugin({
      */
     let refinementRunning = false;
 
+    /**
+     * Fordert ein Batch-Refinement beim Technical Lead an.
+     *
+     * `plannedTaskIds` ist der Weg, auf dem der Reconciler diese Routine als
+     * reinen Executor benutzt: er hat bereits entschieden, welche Tickets fällig
+     * sind — anhand laufender Runs, Wartezeit und Versuchszähler. Ohne den
+     * Parameter entscheidet die Routine wie bisher selbst; das ist der Pfad für
+     * manuelle Aufrufe aus der Ansicht.
+     *
+     * Beide Wege teilen sich, was hier fachlich einmalig ist und nirgends sonst
+     * steht: die Wahl des Trägers, der Auftrag im Ticket, der Umgang mit einer
+     * Kette blockierter Tickets.
+     */
     async function requestProjectRefinement(
       source: "automatic" | "manual" = "manual",
-      force = false
+      force = false,
+      plannedTaskIds?: readonly string[]
     ): Promise<ProjectRefinementResult> {
       if (refinementRunning) {
         return { requested: false, error: "Refinement is already running.", taskIds: [] };
@@ -2047,7 +2060,7 @@ const plugin = definePlugin({
       if (projectRefinementPromise) return projectRefinementPromise;
 
       refinementRunning = true;
-      const refinement = requestProjectRefinementInternal(source, force);
+      const refinement = requestProjectRefinementInternal(source, force, plannedTaskIds);
       projectRefinementPromise = refinement;
       try {
         return await refinement;
@@ -2059,7 +2072,8 @@ const plugin = definePlugin({
 
     async function requestProjectRefinementInternal(
       source: "automatic" | "manual" = "manual",
-      force = false
+      force = false,
+      plannedTaskIds?: readonly string[]
     ): Promise<ProjectRefinementResult> {
       if (!companyId) return { requested: false, error: "No company context.", taskIds: [] as string[] };
       const refinementCompanyId = companyId;
@@ -2126,8 +2140,16 @@ const plugin = definePlugin({
           ].join("\n\n")
         );
       }
+      // Hat der Reconciler die Auswahl schon getroffen, wird sie hier nicht
+      // zweimal getroffen. Genau diese Doppelung war das Problem: die Routine
+      // wartete ihre eigenen 15 Minuten ab, waehrend die Wiedervorlage laengst
+      // entschieden hatte, dass das Ticket faellig ist — und umgekehrt.
+      const plannedSelection = plannedTaskIds ? new Set(plannedTaskIds) : null;
+
       const taskIds = candidates
         .filter((task) => {
+          if (plannedSelection) return plannedSelection.has(task.id);
+
           // Ein laufender Run ist das staerkste "frag nicht nochmal": ein
           // zweiter Weckruf ueberholt ihn, und der Technical Lead faengt von
           // vorne an. Genau so hat ein Ticket sechs Anlaeufe verbraucht, ohne
@@ -2543,7 +2565,6 @@ const plugin = definePlugin({
         // Ab hier ist "kein laufender Run" eine Aussage und keine Luecke.
         orchestrationReadable = true;
         const knownTaskIds = new Set(state.tasks.map((task) => task.id));
-        const recoveryChanged = await recoverTimedOutAgentRuns(summary, knownTaskIds);
         // Der Kickoff ist kein Kanban-Ticket, traegt aber die Analyse- und
         // Backlog-Laeufe. Ohne ihn haette die Ansicht in genau den Phasen keine
         // Belege, in denen sie am meisten behauptet.
@@ -2579,12 +2600,8 @@ const plugin = definePlugin({
           },
           moving
         );
-        annotateTimeoutRecoveryStalls(merged, summary, knownTaskIds);
-        if (
-          !recoveryChanged &&
-          !liveRunsChanged &&
-          JSON.stringify(merged) === JSON.stringify(state.stalls ?? [])
-        ) {
+        annotateTimedOutRuns(merged, summary, knownTaskIds);
+        if (!liveRunsChanged && JSON.stringify(merged) === JSON.stringify(state.stalls ?? [])) {
           return false;
         }
 
@@ -2607,80 +2624,29 @@ const plugin = definePlugin({
     }
 
     /**
-     * Setzt nach einem nativen Adapter-Timeout genau einen ticketgebundenen
-     * Ersatzlauf ab. Ein Board-Cancel ist bewusst ausgeschlossen: Der Host
-     * behandelt ihn als menschlichen Stop und darf ihn nicht wieder aufnehmen.
+     * Benennt einen Lauf, den der Adapter selbst abgebrochen hat.
+     *
+     * Frueher hing hier eine eigene Wiederanlauf-Mechanik: genau ein Ersatzlauf
+     * je Timeout, mit eigenem persistierten Budget. Sie ist entfallen, weil die
+     * Zustellpolitik dasselbe generisch tut — und zwar fuer jede Art von
+     * Stillstand, nicht nur fuer diese. Nebeneinander erzeugten beide zwei
+     * Weckrufe fuer denselben Ausfall.
+     *
+     * Was bleibt, ist der Satz fuer den Menschen: ein Timeout liest sich anders
+     * als ein abgestuerzter Lauf, und das Board soll den Unterschied nennen.
      */
-    async function recoverTimedOutAgentRuns(
-      summary: OrchestrationSnapshot,
-      knownTaskIds: ReadonlySet<string>
-    ): Promise<boolean> {
-      const recoveries = (state.timeoutRecoveries ??= {});
-      let changed = false;
-
-      for (const taskId of Object.keys(recoveries)) {
-        const recovery = recoveries[taskId];
-        const completed = summary.runs.some(
-          (run) =>
-            run.issueId === taskId &&
-            run.status === "succeeded" &&
-            run.createdAt.localeCompare(recovery.sourceRunCreatedAt) > 0
-        );
-        if (!knownTaskIds.has(taskId) || completed) {
-          delete recoveries[taskId];
-          changed = true;
-        }
-      }
-
-      for (const run of timedOutRunsAwaitingRecovery(summary, knownTaskIds)) {
-        if (!run.issueId || recoveries[run.issueId]) continue;
-
-        const attemptedAt = new Date().toISOString();
-        const wakeup = await requestIssueWakeup(run.issueId, "project_run_timeout_recovery");
-        recoveries[run.issueId] = {
-          sourceRunId: run.id,
-          sourceRunCreatedAt: run.createdAt,
-          attemptedAt,
-          queued: wakeup.queued,
-          recoveryRunId: wakeup.runId ?? null,
-        };
-        changed = true;
-        ctx.logger.warn("Recorded the single automatic recovery attempt after a managed run timeout", {
-          issueId: run.issueId,
-          sourceRunId: run.id,
-          queued: wakeup.queued,
-          recoveryRunId: wakeup.runId ?? null,
-        });
-      }
-
-      return changed;
-    }
-
-    /** Beschreibt Recovery-Status im Board, ohne sein dauerhaftes Budget dort zu speichern. */
-    function annotateTimeoutRecoveryStalls(
+    function annotateTimedOutRuns(
       stalls: TicketStall[],
       summary: OrchestrationSnapshot,
       knownTaskIds: ReadonlySet<string>
     ): void {
-      const timedOutRuns = new Map(
-        timedOutRunsAwaitingRecovery(summary, knownTaskIds)
-          .filter((run): run is typeof run & { issueId: string } => Boolean(run.issueId))
-          .map((run) => [run.issueId, run])
+      const timedOut = new Set(
+        timedOutRunsAwaitingRecovery(summary, knownTaskIds).map((run) => run.issueId)
       );
 
       for (const stall of stalls) {
-        const recovery = state.timeoutRecoveries?.[stall.taskId];
-        const timedOutRun = timedOutRuns.get(stall.taskId);
-        if (!recovery || !timedOutRun || stall.kind !== "run_failed") continue;
-
-        stall.retriedAt = recovery.attemptedAt;
-        if (timedOutRun.id === recovery.sourceRunId) {
-          stall.reason = recovery.queued
-            ? "The managed run timed out. One controlled recovery run was queued."
-            : "The managed run timed out and its single recovery wake-up could not be queued.";
-        } else {
-          stall.reason = "The controlled recovery run also timed out. Automatic recovery is exhausted.";
-        }
+        if (stall.kind !== "run_failed" || !timedOut.has(stall.taskId)) continue;
+        stall.reason = "The managed run exceeded its time budget before it finished.";
       }
     }
 
@@ -3435,33 +3401,197 @@ const plugin = definePlugin({
       return record;
     }
 
-    const triggers = new CeremonyTriggerEngine({
-      getState: () => state,
-      run: (ceremony, reason) => {
-        ctx.logger.info("Ceremony triggered", { ceremony, reason });
-        runCeremony(ceremony, false);
-      },
-    });
+    /**
+     * Der eine Weg, auf dem sich das Board bewegt.
+     *
+     * Vorher standen hier zwei Motoren nebeneinander: die Zeremonien-Trigger fur
+     * lokale Boards und ein Dutzend verstreuter Weckrufe fur projektgebundene.
+     * Welcher lief, entschied ein `hasProjectBackedTasks()` gleich in der ersten
+     * Zeile — und weil ein Projekt mit Arbeit immer projektgebundene Tickets hat,
+     * war der getestete Motor im Echtbetrieb nie in Betrieb. Das Board stand,
+     * waehrend 529 Tests gruen waren.
+     *
+     * Jetzt gibt es einen Motor. Er rechnet die Lage vollstaendig neu aus
+     * (`planBoard`), entscheidet dann, was davon jetzt zugestellt wird
+     * (`planDelivery`), und stellt zu. Der Unterschied zwischen lokalem und
+     * projektgebundenem Ticket ist nur noch der Zustellweg, nicht die Regel.
+     */
+    async function reconcile(): Promise<void> {
+      if (!companyId) return;
+
+      // Die Sicht des Hosts ist die Wahrheit daruber, wer gerade arbeitet.
+      // Ohne sie wurde der naechste Schritt einen laufenden Agenten uberholen.
+      await refreshOrchestrationStalls();
+
+      const liveRunTaskIds = new Set((state.liveRuns ?? []).map((run) => run.taskId));
+      const intents = planBoard({
+        state,
+        liveRunTaskIds,
+        refinementInFlight: isRefinementInFlight(liveRunTaskIds),
+      });
+      const delivery = planDelivery(intents, state.intentLog ?? {}, Date.now());
+      state.intentLog = delivery.log;
+
+      // Im Projektmodus sind `refine` und `assign` Sammelvorgaenge: der
+      // Technical Lead verfeinert einen ganzen Stapel in einem Lauf, und die
+      // Planung verteilt gegen Kapazitaet und Sprint. Sie einzeln zu wecken
+      // waere nicht nur teurer, sondern fachlich falsch. Der Planner sagt
+      // weiterhin *dass* etwas ansteht — wie es zugestellt wird, entscheidet
+      // sich hier.
+      const refinementTaskIds: string[] = [];
+      let needsProjectPlanning = false;
+
+      for (const intent of delivery.deliver) {
+        const task = state.tasks.find((entry) => entry.id === intent.taskId);
+        if (task && isProjectBackedTask(task)) {
+          if (intent.kind === "refine") {
+            refinementTaskIds.push(task.id);
+            continue;
+          }
+          // Nur was die Projektplanung auch bearbeitet: sie verteilt aus dem
+          // Backlog und adoptiert herrenlose TODOs. Ein Ticket, das *in Arbeit*
+          // seinen Bearbeiter verloren hat, faellt durch ihr Raster — es wird
+          // direkt geweckt, sonst bleibt es liegen, ohne dass jemand fragt.
+          if (intent.kind === "assign" && (task.column === "backlog" || task.column === "todo")) {
+            needsProjectPlanning = true;
+            continue;
+          }
+        }
+        await deliverIntent(intent);
+      }
+
+      if (refinementTaskIds.length > 0) {
+        await requestProjectRefinement("automatic", false, refinementTaskIds);
+      }
+      if (needsProjectPlanning && state.projectOnboarding?.status === "active") {
+        await requestProjectPlanning();
+      }
+
+      applyEscalations(delivery.escalate);
+
+      // Zeremonien erzeugen Arbeit, die an keinem Ticket haengt — "Product
+      // Owner, schreib Stories" gehoert einer Rolle, nicht einer Karte. Der
+      // Planner kennt nur Tickets, deshalb bleibt diese Warteschlange bestehen
+      // und wird hier geleert.
+      await dispatchWork();
+      await syncRetrospectiveSkills();
+      state.metrics = recalculateMetrics(state);
+      await save();
+
+      ctx.logger.info("Reconciled board", {
+        intents: intents.length,
+        delivered: delivery.deliver.length,
+        escalated: delivery.escalate.length,
+      });
+    }
 
     /**
-     * Re-evaluates the triggers after a board change and persists the result.
+     * Laeuft gerade ein Refinement-Stapel?
      *
-     * There is no timer anywhere in this plugin — this is the only path that
-     * starts a ceremony automatically.
+     * Ein Stapel haengt an genau einem Traeger — entweder an einem Ticket, das
+     * dafuer dem Technical Lead zugewiesen wurde, oder am Kickoff, wenn jedes
+     * Ticket durch eine Lieferreihenfolge blockiert ist. Beide Faelle sind am
+     * laufenden Lauf erkennbar; die uebrigen Mitglieder des Stapels haben keinen
+     * eigenen und sehen sonst unbearbeitet aus.
+     *
+     * Bewusst abgeleitet statt gespeichert: ein Merker, den ein abgestuerzter
+     * Lauf nicht zurueckzunehmen weiss, ist die naechste Dauersperre.
      */
-    async function boardChanged(): Promise<void> {
-      // Der Host ist fur projektgebundene Child-Issues die Quelle der Wahrheit.
-      // Lokale Zeremonien wurden Status und Zuweisungen nur im Plugin-State
-      // andern und beim nachsten Host-Event wieder auseinanderlaufen.
-      if (hasProjectBackedTasks()) {
-        await save();
+    function isRefinementInFlight(liveRunTaskIds: ReadonlySet<string>): boolean {
+      if (liveRunTaskIds.size === 0) return false;
+
+      const rootIssueId = state.projectOnboarding?.rootIssueId;
+      if (rootIssueId && liveRunTaskIds.has(rootIssueId)) return true;
+
+      const technicalLeadId = state.agents.find((agent) => agent.role === "technical_lead")?.id;
+      if (!technicalLeadId) return false;
+
+      return state.tasks.some(
+        (task) => liveRunTaskIds.has(task.id) && task.assignedAgentId === technicalLeadId
+      );
+    }
+
+    /**
+     * Stellt eine Absicht an ihren Agenten zu.
+     *
+     * Die Zuweisung wird *vor* dem Weckruf geschrieben: ein Ticket ohne
+     * Bearbeiter weckt niemanden, und genau daran hing das Board zuletzt fest —
+     * die Planung setzte den Status, die Zuweisung fehlte, und das Ticket wartete
+     * auf einen Agenten, den nie jemand benannt hatte.
+     */
+    async function deliverIntent(intent: BoardIntent): Promise<void> {
+      const task = state.tasks.find((entry) => entry.id === intent.taskId);
+      if (!task || !companyId) return;
+
+      if (isProjectBackedTask(task)) {
+        if (intent.kind === "assign" && intent.agentId) {
+          try {
+            const updated = await ctx.issues.update(
+              task.id,
+              { status: "todo", assigneeAgentId: intent.agentId },
+              companyId
+            );
+            syncProjectOnboardingIssue(
+              state.tasks,
+              state.projectOnboarding,
+              await withHostComments(updated),
+              state.agents.find((agent) => agent.role === "product_owner")?.id ?? null,
+              state.agents
+            );
+          } catch (error) {
+            recordStall(task.id, `Could not assign the ticket: ${String(error)}`);
+            return;
+          }
+        }
+        await requestIssueWakeup(task.id, intent.kind);
         return;
       }
 
-      triggers.evaluate();
-      await syncRetrospectiveSkills();
-      await dispatchWork();
-      await save();
+      // Lokales Ticket: es existiert nur im Plugin-State, also traegt der
+      // Auftrag den Inhalt mit.
+      if (intent.kind === "assign" && intent.agentId) {
+        task.assignedAgentId = intent.agentId;
+        task.column = "todo";
+        task.updatedAt = new Date().toISOString();
+      }
+      if (!intent.agentId) return;
+
+      try {
+        await ctx.agents.invoke(intent.agentId, companyId, {
+          prompt: intentInstruction(intent, task),
+          reason: `Agent Scrum: ${intent.kind}`,
+        });
+      } catch (error) {
+        recordStall(task.id, `Could not invoke the agent: ${String(error)}`);
+      }
+    }
+
+    /**
+     * Haelt fest, wo das Board aufgegeben hat.
+     *
+     * Ein `escalated`-Vermerk beschreibt keine Beobachtung, sondern ein Urteil
+     * uber eine Serie — deshalb wird er nicht von der Host-Sicht ueberschrieben,
+     * sondern hier gesetzt und hier zurueckgenommen: verschwindet die Absicht aus
+     * dem Plan, weil das Ticket weitergezogen ist, verschwindet der Vermerk mit.
+     */
+    function applyEscalations(escalated: readonly BoardIntent[]): void {
+      const escalatedIds = new Set(escalated.map((intent) => intent.taskId));
+
+      state.stalls = (state.stalls ?? []).filter(
+        (stall) => stall.kind !== "escalated" || escalatedIds.has(stall.taskId)
+      );
+
+      for (const intent of escalated) {
+        // Wartet ohnehin schon ein Mensch, ist der Grund des Hosts der bessere.
+        const existing = state.stalls.find((stall) => stall.taskId === intent.taskId);
+        if (existing && existing.kind !== "escalated") continue;
+        recordStall(intent.taskId, intent.reason, "escalated");
+      }
+    }
+
+    /** Beibehalten fuer die Aufrufstellen, die nach einer Aenderung nachziehen. */
+    async function boardChanged(): Promise<void> {
+      await reconcile();
     }
 
     /**
@@ -3548,11 +3678,23 @@ const plugin = definePlugin({
         if (!projectCompleted) await maybeRunProjectRetrospective();
         state.metrics = recalculateMetrics(state);
         await save();
+        // Der Handler stellt nur fest, *dass* sich etwas geaendert hat. Was
+        // daraus folgt, beantwortet der Reconciler — sonst entscheiden zwei
+        // Stellen dieselbe Frage und ueberholen einander. Moeglich ist das erst,
+        // seit die Refinement-Routine ihre Auswahl vom Reconciler entgegennimmt
+        // statt sie ein zweites Mal selbst zu treffen.
         if (
           !projectCompleted &&
           (state.projectOnboarding?.status === "active" ||
             state.projectOnboarding?.status === "sprint_planning")
         ) {
+          // Dieser Handler entscheidet noch selbst, statt `reconcile()` zu
+          // rufen. Was dem im Weg steht, ist nicht die Zustellpolitik — die ist
+          // inzwischen angeschlossen —, sondern `refinementRequestedTaskIds`:
+          // dieses Gedaechtnis ist der einzige Schutz gegen einen zweiten
+          // Stapel in der Luecke zwischen "Lauf gestartet" und "Host meldet den
+          // Lauf". Solange `orchestrationReadable` false sein kann, traegt
+          // `refinementInFlight` allein nicht.
           await requestProjectRefinement("automatic");
           if (state.projectOnboarding.status === "active") {
             await requestProjectPlanning();
@@ -3637,7 +3779,6 @@ const plugin = definePlugin({
       if (!issueId || !state.stalls?.some((entry) => entry.taskId === issueId)) return;
 
       clearStall(issueId);
-      if (state.timeoutRecoveries?.[issueId]) delete state.timeoutRecoveries[issueId];
       await save();
     });
 
@@ -4663,12 +4804,6 @@ const plugin = definePlugin({
 
       const task = state.tasks.find((t) => t.id === params.taskId);
       if (!task) return { moved: false, error: "Unknown ticket" };
-      if (isProjectBackedTask(task)) {
-        return {
-          moved: false,
-          error: "Project-backed tickets are updated through their Paperclip issue workflow.",
-        };
-      }
 
       const target = params.column as TaskStatus;
       const result = await onStatusChange(task, task.column, target, {
@@ -4680,6 +4815,25 @@ const plugin = definePlugin({
       });
 
       if (!result.success) return { moved: false, error: result.error };
+
+      // Bei einem projektgebundenen Ticket ist der Host die Quelle der Wahrheit.
+      // Nur lokal zu verschieben hiess bisher, dass der naechste Host-Event die
+      // Bewegung wieder zurueckrollt — deshalb war das Ziehen einer Karte
+      // gesperrt. Statt es zu sperren, wird es jetzt durchgereicht.
+      if (isProjectBackedTask(task) && companyId) {
+        try {
+          const updated = await ctx.issues.update(task.id, { status: target }, companyId);
+          syncProjectOnboardingIssue(
+            state.tasks,
+            state.projectOnboarding,
+            await withHostComments(updated),
+            null,
+            state.agents
+          );
+        } catch (error) {
+          return { moved: false, error: `Could not update the ticket: ${String(error)}` };
+        }
+      }
 
       await boardChanged();
       return { moved: true, task };
@@ -4710,12 +4864,6 @@ const plugin = definePlugin({
 
       const ceremony = params.ceremony as CeremonyType;
       if (!CEREMONIES[ceremony]) return { started: false, error: `Unknown ceremony: ${ceremony}` };
-      if (hasProjectBackedTasks()) {
-        return {
-          started: false,
-          error: "Project-backed tickets are coordinated through their Paperclip issue workflow.",
-        };
-      }
       if (
         (ceremony === "sprint_planning" || ceremony === "backlog_refinement") &&
         state.projectOnboarding &&
@@ -4728,9 +4876,7 @@ const plugin = definePlugin({
       }
 
       const record = runCeremony(ceremony, true);
-    await syncRetrospectiveSkills();
-      await dispatchWork();
-      await save();
+      await reconcile();
       return { started: true, record };
     });
 
@@ -5166,33 +5312,12 @@ const plugin = definePlugin({
       for (const scope of scopes) {
         try {
           await withCompanyInvocation(scope, async () => {
-            if (!state.projectOnboarding?.rootIssueId) return;
-
-            const changed = await refreshOrchestrationStalls();
-            if (changed) await save();
-
-            // Der Wiederanlauf eines Refinements ist zeitbasiert — "seit 15
-            // Minuten nichts geliefert" ist eine Frist, kein Ereignis. Bewertet
-            // wurde sie aber nur, wenn zufaellig etwas anderes passierte. Auf
-            // einem stillen Board hiess das: nie. Zwei Tickets warteten so
-            // zwei Stunden auf einen Anlauf, der seit 105 Minuten faellig war.
-            //
-            // Dass dieser Takt jetzt gefahrlos ist, liegt an den Bremsen davor:
-            // laufender Run, Versuchsdeckel, Wartefrist und Anfragegedaechtnis.
-            // Ohne sie waere daraus wieder das Ueberholen im Minutentakt.
-            const refinement = await requestProjectRefinement("automatic");
-            if (refinement.requested) {
-              ctx.logger.info("Reconcile tick resumed a due refinement", {
-                companyId: scope,
-                taskIds: refinement.taskIds,
-              });
-            }
-            if (state.projectOnboarding?.status === "active") await requestProjectPlanning();
-
-            ctx.logger.info("Reconcile tick completed", {
-              companyId: scope,
-              stalls: state.stalls?.length ?? 0,
-            });
+            // Der Takt ist die Wiedervorlage des Boards: was offen ist, faellt
+            // hier wieder an. Dass der Minutentakt dabei niemanden ueberholt,
+            // regelt die Zustellpolitik — laufender Run, Wartezeit, Versuchs-
+            // deckel. Vorher lagen diese Bremsen im Arbeitsspeicher und waren
+            // nach jedem Neustart weg.
+            await reconcile();
           });
         } catch (error) {
           ctx.logger.warn("Reconcile tick could not inspect a company", {

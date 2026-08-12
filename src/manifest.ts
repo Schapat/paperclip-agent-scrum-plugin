@@ -6,9 +6,10 @@
  * hand-rolled onboarding this plugin used to ship — the host is better at
  * agent lifecycle than we are.
  *
- * Ceremonies are deliberately **not** declared as scheduled jobs. They are
- * triggered by board state (see `src/core/triggers/`), because AI agents work
- * faster than any cron expression could express.
+ * Der einzige Job ist der Reconcile-Tick: er ist keine Terminplanung, sondern
+ * die Wiedervorlage des Boards. Was zu tun ist, entscheidet der Zustand
+ * (`src/core/orchestrator/`), nicht die Uhr — Agenten arbeiten schneller, als
+ * ein Cron-Ausdruck es ausdruecken koennte.
  */
 
 import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";

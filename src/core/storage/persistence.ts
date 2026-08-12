@@ -7,40 +7,41 @@
  * ersten Zeremonie-Lauf werfen.
  */
 
-import type { ProjectOnboarding, ScrumTask, TimeoutRecovery, WorkerState } from '../types';
+import type {
+  IntentLog,
+  IntentRecord,
+  ProjectOnboarding,
+  ScrumTask,
+  WorkerState,
+} from '../types';
 import { normalizeScrumTask } from '../factories';
 import { createInitialProjectOnboarding } from '../project-onboarding';
 
 /**
  * Aktuelle Schema-Version des persistierten States.
  */
-export const STATE_SCHEMA_VERSION = 8;
+export const STATE_SCHEMA_VERSION = 9;
 
-function normalizeTimeoutRecoveries(value: unknown): Record<string, TimeoutRecovery> {
+/**
+ * Liest die Zustellvermerke eines gespeicherten Boards.
+ *
+ * Ein unlesbarer Vermerk wird verworfen statt repariert: er kostet hoechstens
+ * einen zusaetzlichen Weckruf, waehrend ein geratener Zaehler eine Eskalation
+ * ausloesen koennte, die nie stattgefunden hat.
+ */
+function normalizeIntentLog(value: unknown): IntentLog {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return {};
 
-  const recoveries: Record<string, TimeoutRecovery> = {};
-  for (const [taskId, candidate] of Object.entries(value)) {
+  const log: IntentLog = {};
+  for (const [key, candidate] of Object.entries(value)) {
     if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) continue;
-    const recovery = candidate as Partial<TimeoutRecovery>;
-    if (
-      typeof recovery.sourceRunId !== 'string' ||
-      typeof recovery.sourceRunCreatedAt !== 'string' ||
-      typeof recovery.attemptedAt !== 'string' ||
-      typeof recovery.queued !== 'boolean'
-    ) {
-      continue;
-    }
+    const record = candidate as Partial<IntentRecord>;
+    if (typeof record.lastDeliveredAt !== 'string' || typeof record.attempts !== 'number') continue;
+    if (!Number.isFinite(record.attempts) || record.attempts < 0) continue;
 
-    recoveries[taskId] = {
-      sourceRunId: recovery.sourceRunId,
-      sourceRunCreatedAt: recovery.sourceRunCreatedAt,
-      attemptedAt: recovery.attemptedAt,
-      queued: recovery.queued,
-      recoveryRunId: typeof recovery.recoveryRunId === 'string' ? recovery.recoveryRunId : null,
-    };
+    log[key] = { lastDeliveredAt: record.lastDeliveredAt, attempts: Math.floor(record.attempts) };
   }
-  return recoveries;
+  return log;
 }
 
 /**
@@ -98,7 +99,7 @@ export function migrateState(raw: Partial<WorkerState>): Partial<WorkerState> {
     skills: raw.skills ?? [],
     proposedStories: raw.proposedStories ?? [],
     agentInstructions: raw.agentInstructions ?? {},
-    timeoutRecoveries: normalizeTimeoutRecoveries(raw.timeoutRecoveries),
+    intentLog: normalizeIntentLog(raw.intentLog),
   };
 }
 

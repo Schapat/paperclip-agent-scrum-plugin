@@ -780,21 +780,23 @@ describe('project onboarding worker actions', () => {
     ];
     await guardHarness.runJob('reconcile-stalled-work');
 
+    // Der Tick laeuft jede Minute. Dass der zweite Durchlauf nicht erneut
+    // weckt, ist die Wartezeit der Zustellpolitik — frueher lag diese Bremse
+    // in einer eigenen Timeout-Mechanik, die neben der allgemeinen lief und
+    // deshalb zwei Weckrufe fuer denselben Ausfall erzeugte.
     expect(requestWakeupSpy).toHaveBeenCalledTimes(1);
-    expect(requestWakeupSpy).toHaveBeenCalledWith(
-      task.id,
-      COMPANY_ID,
-      expect.objectContaining({ reason: 'project_run_timeout_recovery' })
-    );
+
     const stored = guardHarness.getState({ scopeKind: 'company', scopeId: COMPANY_ID, stateKey: 'board' }) as WorkerState;
-    expect(stored).toMatchObject({
-      timeoutRecoveries: {
-        [task.id]: expect.objectContaining({ sourceRunId: 'run-over-budget' }),
-      },
-    });
+    expect(Object.values(stored.intentLog ?? {})).toEqual([
+      expect.objectContaining({ attempts: 1 }),
+    ]);
     expect(stored.stalls).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ taskId: task.id, kind: 'run_failed' }),
+        expect.objectContaining({
+          taskId: task.id,
+          kind: 'run_failed',
+          reason: 'The managed run exceeded its time budget before it finished.',
+        }),
       ])
     );
   });
@@ -1525,7 +1527,7 @@ describe('project onboarding worker actions', () => {
     expect(harness.logs.filter((entry) => entry.message === 'Project refinement requested')).toHaveLength(1);
   });
 
-  it('keeps project-backed tickets host-controlled after backlog approval', async () => {
+  it('lets a human move a project-backed ticket and pushes it to the host', async () => {
     const kickoff = await harness.performAction<{ rootIssueId: string }>(
       'startProjectOnboarding',
       { projectId: PROJECT_ID, brief: 'Build a responsive image slider.' },
@@ -1564,14 +1566,15 @@ describe('project onboarding worker actions', () => {
 
     expect(activation).toMatchObject({ activated: true, wakeup: { queued: true } });
     expect(comments.at(-1)?.body).toContain('Backlog approved');
-    expect(move).toEqual({
-      moved: false,
-      error: 'Project-backed tickets are updated through their Paperclip issue workflow.',
-    });
-    expect(ceremony).toEqual({
-      started: false,
-      error: 'Project-backed tickets are coordinated through their Paperclip issue workflow.',
-    });
+
+    // Eine Karte zu ziehen war gesperrt, weil eine rein lokale Bewegung beim
+    // naechsten Host-Event wieder zurueckgerollt waere. Sie wird jetzt an den
+    // Host durchgereicht, statt dem Menschen die Bedienung zu verweigern.
+    expect(move).toMatchObject({ moved: true });
+    expect((await harness.ctx.issues.get(child.id, COMPANY_ID))?.status).toBe('todo');
+
+    // Dasselbe fuer die Zeremonie: sie lief in diesem Modus gar nicht mehr.
+    expect(ceremony).toMatchObject({ started: true });
   });
 
   it('starts one host-backed refinement ceremony after the human approves a backlog', async () => {

@@ -582,12 +582,6 @@ export interface WorkerState {
    */
   agentInstructions: Record<string, string>;
   /**
-   * Der erste Timeout eines Tickets bekommt genau einen automatischen
-   * Wiederanlauf. Das Budget bleibt ueber Worker-Neustarts erhalten, damit ein
-   * wiederholt haengender Agent keine Endlosschleife ausloest.
-   */
-  timeoutRecoveries?: Record<string, TimeoutRecovery>;
-  /**
    * Tickets, die nachweislich stehen.
    *
    * Ein Ticket steht nicht, weil es lange dauert, sondern weil etwas
@@ -604,22 +598,42 @@ export interface WorkerState {
    * nachweislich idle war. Nur der Host weiss, ob ein Lauf existiert.
    */
   liveRuns?: LiveAgentRun[];
+  /**
+   * Was der Reconciler zuletzt an wen zugestellt hat.
+   *
+   * Die Wiedervorlage rechnet die Lage bei jedem Durchlauf neu aus und weiss
+   * daher nicht von sich aus, ob sie einen Agenten gerade erst geweckt hat.
+   * Ohne dieses Gedaechtnis wuerde der Minutentakt des Reconcile-Ticks jede
+   * offene Absicht sechzigmal pro Stunde erneut zustellen.
+   *
+   * Persistiert und nicht im Arbeitsspeicher: die Vorgaengersperren lagen in
+   * lokalen `Map`s, die jeder Worker-Neustart verlor — womit ein Ticket, das
+   * zehnmal vergeblich geweckt wurde, wieder bei null anfing.
+   */
+  intentLog?: IntentLog;
 }
+
+/**
+ * Was ueber eine bereits zugestellte Absicht bekannt ist.
+ *
+ * Die Politik dazu steht in `core/orchestrator/deliver.ts`; hier steht nur die
+ * Form, weil der Board-Zustand sie persistiert.
+ */
+export interface IntentRecord {
+  /** Wann diese Absicht zuletzt zugestellt wurde. */
+  lastDeliveredAt: string;
+  /** Wie oft insgesamt — Grundlage fuer Wartezeit und Aufgabe. */
+  attempts: number;
+}
+
+/** Zustellvermerke, nach dem stabilen Schluessel der Absicht. */
+export type IntentLog = Record<string, IntentRecord>;
 
 /** Ein vom Host als laufend gemeldeter Agent-Run. */
 export interface LiveAgentRun {
   taskId: string;
   runId: string;
   startedAt: string;
-}
-
-/** Persistierter Wiederanlauf nach einem nativen Adapter-Timeout. */
-export interface TimeoutRecovery {
-  sourceRunId: string;
-  sourceRunCreatedAt: string;
-  attemptedAt: string;
-  queued: boolean;
-  recoveryRunId: string | null;
 }
 
 /** Grund und Zeitpunkt, warum ein Ticket nicht weiterlaeuft. */
@@ -642,7 +656,16 @@ export interface TicketStall {
      * Kategorie, weil die Aufloesung eine andere ist als bei einer regulaeren
      * Freigabe: hier ist die Frage selbst der Fehler.
      */
-    | 'awaiting_decision';
+    | 'awaiting_decision'
+    /**
+     * Der Reconciler hat es oft genug versucht.
+     *
+     * Anders als ein gescheiterter Weckruf ist das kein Einzelereignis, sondern
+     * ein Urteil ueber eine Serie: die zustaendige Rolle wurde mehrfach geweckt
+     * und das Ticket hat sich trotzdem nicht bewegt. Weiterzuwecken kostet nur
+     * noch Budget, deshalb uebernimmt hier ein Mensch.
+     */
+    | 'escalated';
   detectedAt: string;
   /** Gesetzt, sobald der Worker selbst einen Wiederanlauf versucht hat. */
   retriedAt?: string | null;
