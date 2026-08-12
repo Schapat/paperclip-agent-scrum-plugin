@@ -61,6 +61,17 @@ const HUMAN_ONLY_STALLS: ReadonlySet<TicketStall['kind']> = new Set([
   'awaiting_approval',
   'budget',
   'escalated',
+  /**
+   * Ein Agent hat im Ticket selbst eine Frage gestellt, und der Host haelt es
+   * an, bis ein Mensch sie beantwortet.
+   *
+   * Ohne diesen Eintrag weckt die Wiedervorlage weiter die zustaendige Rolle:
+   * fuenf Versuche an einem Ticket, das per Konstruktion nicht weiterlaeuft,
+   * danach eine Eskalation, die die eigentliche Frage verdeckt. Der Agent hat
+   * nach einer Produktentscheidung gefragt — daran aendert ein sechster
+   * Weckruf nichts.
+   */
+  'awaiting_decision',
 ]);
 
 function agentOfRole(agents: readonly ScrumAgent[], role: AgentRole): ScrumAgent | null {

@@ -334,6 +334,24 @@ describe('Menschliche Entscheidungen', () => {
     );
   });
 
+  it('eine Rückfrage im Ticket beendet die Automatik für ihr Ticket', () => {
+    // Der Host haelt das Ticket an, bis ein Mensch antwortet. Weiterzuwecken
+    // kostet fuenf Versuche und endet in einer Eskalation, die die eigentliche
+    // Frage verdeckt.
+    const task = ready({ column: 'blocked', assignedAgentId: 'dev-1' });
+    const stall: TicketStall = {
+      taskId: task.id,
+      kind: 'awaiting_decision',
+      reason: 'GAM-42 is waiting for a decision that an agent asked for inside the ticket.',
+      detectedAt: '2026-08-01T00:00:00.000Z',
+      retriedAt: null,
+    };
+    const intent = forTask(plan(createState({ tasks: [task], stalls: [stall] })), task.id);
+
+    expect(intent?.kind).toBe('await_human');
+    expect(intent?.role).toBe('human');
+  });
+
   it('ein technischer Stillstand beendet die Automatik nicht', () => {
     // Ein abgestürzter Run ist kein Fall für einen Menschen — er wird wiederholt.
     const task = ready({ column: 'in_progress', assignedAgentId: 'dev-1' });
