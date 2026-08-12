@@ -148,25 +148,14 @@ export function planBoard(input: PlanInput): BoardIntent[] {
   // allen Regeln, damit kein Durchlauf einen laufenden Lauf ueberholt.
   for (const taskId of liveRunTaskIds) claimed.add(taskId);
 
-  // -- 1. Was ein Mensch aufloesen muss -------------------------------------
+  // -- 1. Was einem Menschen gehoert ----------------------------------------
   //
-  // Zuerst, weil eine wartende Freigabe jedes andere Urteil ueber dasselbe
-  // Ticket entwertet: es bewegt sich nicht, und kein Weckruf aendert das.
-  for (const stall of state.stalls ?? []) {
-    if (!HUMAN_ONLY_STALLS.has(stall.kind)) continue;
-    const task = tasks.find((entry) => entry.id === stall.taskId);
-    if (!task) continue;
-    add(task, 'await_human', 'human', null, stall.reason);
-  }
-
-  // -- 1b. Was einem Menschen gehoert ---------------------------------------
-  //
-  // Ein Ticket, das der Host einem Board-Nutzer zugewiesen hat, ist keine
-  // Agentenarbeit. Es sah bisher aus wie ein Ticket ohne Bearbeiter, und das
-  // Board hat dafuer eine Rolle geweckt, die es nicht erledigen kann — ein
-  // "GitHub-Repository einrichten" wartete so auf die QA, waehrend vier Stories
-  // in der Lieferkette dahinter standen und das Board nur meldete, es laufe
-  // gerade kein Agent.
+  // Vor der Stillstandsliste, und das ist keine Geschmacksfrage: ein Vermerk
+  // traegt den Text, den das Board selbst irgendwann geschrieben hat. Wird er
+  // zur Absicht gemacht und danach als Vermerk zurueckgeschrieben, beschreibt
+  // er sich nur noch selbst — der Satz konnte sich nicht mehr aendern, auch
+  // wenn die Regel dahinter laengst eine andere war. Die Zuweisung ist dagegen
+  // eine Tatsache am Ticket.
   for (const task of tasks) {
     if (task.column === 'done' || !task.assignedUserId || task.assignedAgentId) continue;
     // Der Vermerk nennt das Ticket. "Ein Ticket wartet auf einen Menschen" ist
@@ -178,6 +167,17 @@ export function planBoard(input: PlanInput): BoardIntent[] {
       null,
       `${task.identifier ?? task.title} is assigned to a person, not an agent — nothing behind it moves until it is done.`
     );
+  }
+
+  // -- 1b. Was ein Mensch sonst aufloesen muss ------------------------------
+  //
+  // Eine wartende Freigabe entwertet jedes andere Urteil ueber dasselbe
+  // Ticket: es bewegt sich nicht, und kein Weckruf aendert das.
+  for (const stall of state.stalls ?? []) {
+    if (!HUMAN_ONLY_STALLS.has(stall.kind)) continue;
+    const task = tasks.find((entry) => entry.id === stall.taskId);
+    if (!task) continue;
+    add(task, 'await_human', 'human', null, stall.reason);
   }
 
   // -- 2. Blockierte Tickets ------------------------------------------------
